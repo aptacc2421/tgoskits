@@ -1,8 +1,16 @@
 /*
  * bug-redis-aof-appendonly: redis-server with AOF enabled must accept local
- * redis-cli PING (PONG). On StarryOS riscv64 QEMU (2026-05), daemonized
- * redis-server with --appendonly yes exits or fails to bind, so ping gets
- * "Connection refused".
+ * redis-cli PING (PONG).
+ *
+ * Diagnosis (2026-05-18, QEMU riscv64 Alpine, Redis 8.4.2):
+ *   redis-server --appendonly yes fails during AOF init with:
+ *     "Error moving temp append only file on the final destination: Invalid argument"
+ *   fg_exit=1; redis-cli -> Connection refused.
+ *   Control without AOF on another port still PONGs.
+ *
+ * Likely root cause: Redis moves a temp AOF file onto the final name via
+ * rename(2) (replace existing). StarryOS has known rename-replace issues;
+ * see bugfix/bug-rename-replace and sys_renameat2 in kernel syscall/fs/ctl.rs.
  *
  * Do NOT add /usr/bin/bug-redis-aof-appendonly to bugfix/qemu-*.toml
  * test_commands until this test passes (normal CI runs the full bugfix group).
