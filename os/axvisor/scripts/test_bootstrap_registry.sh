@@ -341,6 +341,55 @@ test_case5_regression_guard() {
 }
 
 # ---------------------------------------------------------------------------
+# Case 6: Sourcing does not mutate persistent .image.toml config.
+# Regression guard: setup_qemu.sh top-level logic is behind a BASH_SOURCE
+# guard; sourcing must not side-effect the caller's image config.
+# ---------------------------------------------------------------------------
+test_case6_source_does_not_mutate_image_config() {
+  echo ""
+  echo "=== Case 6: Sourcing does not mutate .image.toml ==="
+  setup
+
+  local image_config="${WORKSPACE_ROOT}/tmp/axbuild/.image.toml"
+  local saved_content=""
+  local config_existed=false
+
+  # Save pre-source state
+  if [ -f "${image_config}" ]; then
+    config_existed=true
+    saved_content="$(cat "${image_config}")"
+  fi
+
+  # Re-source (setup already sourced once; verify idempotent / no drift)
+  _saved_opts="$(set +o)"
+  set +euo pipefail
+  source "${SETUP_QEMU}"
+  eval "${_saved_opts}"
+
+  if $config_existed; then
+    local current_content
+    current_content="$(cat "${image_config}")"
+    if [ "${saved_content}" = "${current_content}" ]; then
+      echo "  PASS: .image.toml unchanged after source (byte-level match)"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL: .image.toml was modified by source"
+      echo "    before: ${saved_content}"
+      echo "    after:  ${current_content}"
+      FAIL=$((FAIL + 1))
+    fi
+  else
+    if [ ! -f "${image_config}" ]; then
+      echo "  PASS: .image.toml not created by source (file did not exist before)"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL: .image.toml was created by source (did not exist before)"
+      FAIL=$((FAIL + 1))
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Run all tests
 # ---------------------------------------------------------------------------
 echo "=== bootstrap_image_registry regression tests ==="
@@ -352,6 +401,7 @@ test_case2_fallback_url_available
 test_case3_default_registry_works
 test_case4_already_bootstrapped
 test_case5_regression_guard
+test_case6_source_does_not_mutate_image_config
 
 echo ""
 echo "=== Results: ${PASS} passed, ${FAIL} failed ==="

@@ -21,13 +21,6 @@ WORKSPACE_ROOT="$(cd "${REPO_ROOT}/../.." && pwd)"
 IMAGE_STORAGE_ROOT="${TGOS_IMAGE_LOCAL_STORAGE:-${WORKSPACE_ROOT}/tmp/axbuild/rootfs}"
 export TGOS_IMAGE_LOCAL_STORAGE="${IMAGE_STORAGE_ROOT}"
 
-# Sync xtask's persistent config so that `cargo xtask axvisor qemu` finds
-# images at the same path even after this script exits and the env var is gone.
-_image_config="${WORKSPACE_ROOT}/tmp/axbuild/.image.toml"
-if [ -f "${_image_config}" ]; then
-  sed -i 's|^local_storage = .*|local_storage = "'"${IMAGE_STORAGE_ROOT}"'"|' "${_image_config}"
-fi
-
 DEFAULT_REGISTRY_URL="https://raw.githubusercontent.com/rcore-os/tgosimages/refs/heads/main/registry/default.toml"
 IMAGE_DOWNLOAD_MAX_ATTEMPTS=2
 
@@ -214,6 +207,18 @@ EOF
 # Only execute main logic when run directly (not sourced).
 # When sourced (e.g. by test scripts), only function/variable definitions are loaded.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+
+# Sync xtask's persistent config so that `cargo xtask axvisor qemu` finds
+# images at the same path even after this script exits and the env var is gone.
+# NOTE: This intentionally modifies workspace-persistent state. When the env
+# var TGOS_IMAGE_LOCAL_STORAGE is set, subsequent `cargo xtask axvisor qemu`
+# (without the env var) will still read the overridden path from .image.toml.
+# This is existing behavior — kept inside the direct-execution guard so that
+# sourcing this script (e.g. from tests) does NOT mutate the caller's config.
+_image_config="${WORKSPACE_ROOT}/tmp/axbuild/.image.toml"
+if [ -f "${_image_config}" ]; then
+  sed -i 's|^local_storage = .*|local_storage = "'"${IMAGE_STORAGE_ROOT}"'"|' "${_image_config}"
+fi
 
 GUEST=""
 while [[ $# -gt 0 ]]; do

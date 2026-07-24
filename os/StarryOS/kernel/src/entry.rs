@@ -3,7 +3,6 @@ use alloc::{
     sync::Arc,
 };
 
-use ax_fs_ng::vfs::FS_CONTEXT;
 use ax_kernel_guard::NoPreemptIrqSave;
 use ax_runtime::hal::cpu::uspace::UserContext;
 use ax_sync::Mutex;
@@ -21,6 +20,7 @@ use crate::{
 /// Initialize and run initproc.
 pub fn init(args: &[String], envs: &[String]) {
     static_keys::global_init();
+
     tracepoint_init().expect("Failed to initialize tracepoints");
 
     crate::ebpf::init_ebpf();
@@ -33,7 +33,7 @@ pub fn init(args: &[String], envs: &[String]) {
 
     ax_alloc::register_page_reclaim_fn(ax_fs_ng::vfs::page_cache_reclaim);
 
-    let loc = FS_CONTEXT
+    let loc = ax_fs_ng::vfs::current_fs_context()
         .lock()
         .resolve(&args[0])
         .expect("Failed to resolve executable path");
@@ -75,7 +75,14 @@ pub fn init(args: &[String], envs: &[String]) {
 
     let proc = ProcessData::new(
         proc,
-        ProcessImage::new(path.to_string(), Arc::new(args.to_vec()), auxv),
+        ProcessImage::new(
+            path.to_string(),
+            Arc::new(args.to_vec()),
+            Arc::new(envs.to_vec()),
+            auxv,
+            "/".to_string(),
+            "/".to_string(),
+        ),
         Arc::new(Mutex::new(uspace)),
         Arc::default(),
         None,
@@ -83,13 +90,11 @@ pub fn init(args: &[String], envs: &[String]) {
         false,
     );
 
-    {
-        let mut scope = proc.scope.write();
-        crate::file::add_stdio(&mut FD_TABLE.scope_mut(&mut scope).write())
-            .expect("Failed to add stdio");
-    }
+    let mut scope = scope_local::Scope::new();
+    crate::file::add_stdio(&mut FD_TABLE.scope_mut(&mut scope).write())
+        .expect("Failed to add stdio");
 
-    let thr = Thread::new(pid, proc, None, starry_signal::SignalSet::default());
+    let thr = Thread::new(pid, proc, None, starry_signal::SignalSet::default(), scope);
     *task.task_ext_mut() = Some(AxTaskExt::from_impl(thr));
 
     let task = {
@@ -104,7 +109,8 @@ pub fn init(args: &[String], envs: &[String]) {
     let exit_code = task.join();
     info!("Init process exited with code: {exit_code:?}");
 
-    let cx = FS_CONTEXT.lock();
+    let fs_context = ax_fs_ng::vfs::current_fs_context();
+    let cx = fs_context.lock();
     cx.root_dir()
         .unmount_all()
         .expect("Failed to unmount all filesystems");
