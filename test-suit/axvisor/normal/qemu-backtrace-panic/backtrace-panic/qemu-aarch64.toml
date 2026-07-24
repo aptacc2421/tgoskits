@@ -14,7 +14,7 @@ args = [
 # Fail if alloc=false (backtrace feature leaked or capture path broken).
 fail_regex = ["(?s)BACKTRACE_BEGIN\\b.*\\balloc=false\\b"]
 # Assert complete BACKTRACE_BEGIN … BACKTRACE_END block with alloc=true.
-success_regex = ["(?s)BACKTRACE_BEGIN\\b.*\\balloc=true\\b.*\\bkind=panic\\b.*\\bBACKTRACE_END"]
+success_regex = ["(?s)BACKTRACE_BEGIN\\b.*\\bkind=panic\\b.*\\balloc=true\\b.*\\bBACKTRACE_END"]
 timeout = 60
 to_bin = true
 uefi = false
