@@ -59,7 +59,7 @@ rockchip-pm = ["ax-driver/rockchip-pm"]
 stack-protector = ["ax-std/stack-protector"]
 backtrace = ["ax-std/backtrace", "dep:axbacktrace"]
 test-backtrace-panic = ["backtrace"]
-test-panic-no-backtrace = []
+test-panic-no-backtrace = ["dep:axbacktrace"]
 
 [dependencies]
 spin = { workspace = true }

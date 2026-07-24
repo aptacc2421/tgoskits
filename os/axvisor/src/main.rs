@@ -36,10 +36,14 @@ mod manager;
 mod platform_irq;
 mod shell;
 
-#[cfg(feature = "backtrace")]
+#[cfg(any(feature = "backtrace", feature = "test-panic-no-backtrace"))]
 fn init_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         eprintln!("{info}");
+        // When the `backtrace` feature is NOT enabled, axbacktrace is compiled
+        // without `alloc` → Inner::Disabled → BT_ERROR requires_alloc.
+        // When the `backtrace` feature IS enabled, axbacktrace captures real
+        // frames (alloc=true, frames enumerated).
         eprintln!("{}", axbacktrace::Backtrace::capture().kind("panic"));
     }));
 }
@@ -53,7 +57,7 @@ fn init_panic_hook() {
 /// 3. Build and start configured guest VMs.
 /// 4. Enter the management shell after the default guests have exited.
 fn main() {
-    #[cfg(feature = "backtrace")]
+    #[cfg(any(feature = "backtrace", feature = "test-panic-no-backtrace"))]
     init_panic_hook();
 
     // Test-only panic paths — gated behind dedicated features so they never
