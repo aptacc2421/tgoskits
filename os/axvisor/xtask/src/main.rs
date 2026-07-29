@@ -47,7 +47,7 @@ mod lang;
 
 #[cfg(any(windows, all(unix, not(target_env = "musl"))))]
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
@@ -92,20 +92,17 @@ fn normalize_image_paths(args: &mut [OsString], invocation_dir: &Path) {
 
     let mut i = 1; // skip binary name
     while i < args.len() {
-        let Some(current) = args[i].to_str().map(String::from) else {
-            i += 1;
-            continue;
-        };
-
-        // Handle --flag=<value> / -S=<value> form
+        // Handle --flag=<value> / -S=<value> form.
+        // Match the ASCII flag prefix at the byte level via try_strip_prefix so
+        // that non-UTF-8 path values (valid on POSIX) are not silently dropped.
         let mut matched = false;
         for flag in PATH_FLAGS {
             let prefix = format!("{flag}=");
-            if let Some(rel) = current.strip_prefix(&prefix) {
-                let path = Path::new(rel);
+            if let Some(rest) = try_strip_prefix(&args[i], &prefix) {
+                let path = Path::new(rest);
                 if path.is_relative() {
                     let abs = invocation_dir.join(path);
-                    args[i] = OsString::from(format!("{flag}={}", abs.display()));
+                    args[i] = prepend_flag(flag, &abs);
                 }
                 matched = true;
                 break;
@@ -116,12 +113,18 @@ fn normalize_image_paths(args: &mut [OsString], invocation_dir: &Path) {
             continue;
         }
 
-        // Handle -S <value> / --flag <value> form
-        if PATH_FLAGS.contains(&current.as_str()) && i + 1 < args.len() {
-            if let Some(val_str) = args[i + 1].to_str() {
-                let path = Path::new(val_str);
-                if path.is_relative() && !val_str.starts_with('-') {
-                    args[i + 1] = OsString::from(invocation_dir.join(path).display().to_string());
+        // Handle -S <value> / --flag <value> form.
+        // Flag tokens are always ASCII so to_str() is safe for the flag check;
+        // the path value is handled as OsStr to preserve non-UTF-8 bytes.
+        if let Some(current_str) = args[i].to_str()
+            && PATH_FLAGS.contains(&current_str)
+            && i + 1 < args.len()
+        {
+            let val = &args[i + 1];
+            if !looks_like_flag(val) {
+                let path = Path::new(val);
+                if path.is_relative() {
+                    args[i + 1] = invocation_dir.join(path).into_os_string();
                 }
             }
             i += 2;
@@ -130,6 +133,52 @@ fn normalize_image_paths(args: &mut [OsString], invocation_dir: &Path) {
 
         i += 1;
     }
+}
+
+/// Strip `prefix` (which must be ASCII) from an `OsStr`.
+///
+/// On Unix this operates at the byte level so non-UTF-8 path content is
+/// preserved; on Windows it falls back to string matching.
+#[cfg(unix)]
+fn try_strip_prefix<'a>(os: &'a OsStr, prefix: &str) -> Option<&'a OsStr> {
+    use std::os::unix::ffi::OsStrExt;
+    os.as_bytes()
+        .strip_prefix(prefix.as_bytes())
+        .map(OsStr::from_bytes)
+}
+
+#[cfg(not(unix))]
+fn try_strip_prefix<'a>(os: &'a OsStr, prefix: &str) -> Option<&'a OsStr> {
+    os.to_str()
+        .and_then(|s| s.strip_prefix(prefix))
+        .map(OsStr::new)
+}
+
+/// Returns `true` when `os` starts with a `-` byte (i.e. looks like a flag).
+#[cfg(unix)]
+fn looks_like_flag(os: &OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    os.as_bytes().first() == Some(&b'-')
+}
+
+#[cfg(not(unix))]
+fn looks_like_flag(os: &OsStr) -> bool {
+    os.to_str().map_or(false, |s| s.starts_with('-'))
+}
+
+/// Reconstruct `flag=absolute_path` as an `OsString`, preserving non-UTF-8
+/// bytes in `abs` on Unix.
+#[cfg(unix)]
+fn prepend_flag(flag: &str, abs: &Path) -> OsString {
+    let mut os = OsString::from(flag);
+    os.push("=");
+    os.push(abs);
+    os
+}
+
+#[cfg(not(unix))]
+fn prepend_flag(flag: &str, abs: &Path) -> OsString {
+    OsString::from(format!("{flag}={}", abs.display()))
 }
 
 /// Detect whether the first positional argument after the binary name is an
@@ -281,7 +330,10 @@ fn resolve_existing_path(path: &Path, invocation_dir: &Path, workspace_root: &Pa
 
 #[cfg(all(test, any(windows, all(unix, not(target_env = "musl")))))]
 mod tests {
-    use std::{ffi::OsString, path::Path};
+    use std::{
+        ffi::{OsStr, OsString},
+        path::Path,
+    };
 
     use super::normalize_image_paths;
 
@@ -401,5 +453,44 @@ mod tests {
         let expected = args.clone();
         normalize_image_paths(&mut args, inv);
         assert_eq!(args, expected);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn non_utf8_local_storage_short_flag() {
+        use std::os::unix::ffi::OsStrExt;
+        let inv = Path::new("/tmp/work");
+        let val = OsString::from(OsStr::from_bytes(b"cache-\xff"));
+        let mut args = vec![
+            OsString::from("xtask"),
+            OsString::from("image"),
+            OsString::from("-S"),
+            val,
+            OsString::from("pull"),
+            OsString::from("qemu-aarch64"),
+        ];
+        normalize_image_paths(&mut args, inv);
+        let mut expected = Vec::from(b"/tmp/work/cache-");
+        expected.push(0xff);
+        assert_eq!(args[3].as_bytes(), expected.as_slice());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn non_utf8_local_storage_equals_form() {
+        use std::os::unix::ffi::OsStrExt;
+        let inv = Path::new("/tmp/work");
+        let arg = OsString::from(OsStr::from_bytes(b"--local-storage=cache-\xff"));
+        let mut args = vec![
+            OsString::from("xtask"),
+            OsString::from("image"),
+            arg,
+            OsString::from("pull"),
+            OsString::from("qemu-aarch64"),
+        ];
+        normalize_image_paths(&mut args, inv);
+        let mut expected = Vec::from(b"--local-storage=/tmp/work/cache-");
+        expected.push(0xff);
+        assert_eq!(args[2].as_bytes(), expected.as_slice());
     }
 }
