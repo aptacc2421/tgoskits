@@ -390,6 +390,127 @@ test_case6_source_does_not_mutate_image_config() {
 }
 
 # ---------------------------------------------------------------------------
+# Case 7: persist_image_storage_config updates local_storage to match
+# IMAGE_STORAGE_ROOT, preserving other TOML fields.  Regression guard
+# for the custom-cache-not-persisted-after-pull bug.
+# ---------------------------------------------------------------------------
+test_case7_persist_updates_local_storage() {
+  echo ""
+  echo "=== Case 7: persist_image_storage_config updates local_storage ==="
+  setup
+
+  local mock_config="${TEST_ROOT}/.image.toml"
+  cat > "${mock_config}" <<-'TOML'
+local_storage = "/default/cache/path"
+registry = "https://raw.githubusercontent.com/rcore-os/tgosimages/refs/heads/main/registry/default.toml"
+auto_sync = true
+auto_sync_threshold = 604800
+TOML
+
+  persist_image_storage_config "${mock_config}"
+
+  local stored_path
+  stored_path="$(grep '^local_storage' "${mock_config}" | sed 's/^local_storage = "\(.*\)"$/\1/')"
+  assert_eq "local_storage matches IMAGE_STORAGE_ROOT" \
+    "${IMAGE_STORAGE_ROOT}" \
+    "${stored_path}"
+
+  # Verify other TOML fields are preserved (no data loss from sed).
+  local fields_ok=true
+  grep -q '^registry' "${mock_config}" || fields_ok=false
+  grep -q '^auto_sync' "${mock_config}" || fields_ok=false
+  grep -q '^auto_sync_threshold' "${mock_config}" || fields_ok=false
+  if $fields_ok; then
+    echo "  PASS: other TOML fields preserved"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: other TOML fields not preserved"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # Simulate the post-script scenario: env var gone, config persists.
+  local saved_env="${TGOS_IMAGE_LOCAL_STORAGE-}"
+  unset TGOS_IMAGE_LOCAL_STORAGE
+  local after_unset
+  after_unset="$(grep '^local_storage' "${mock_config}" | sed 's/^local_storage = "\(.*\)"$/\1/')"
+  export TGOS_IMAGE_LOCAL_STORAGE="${saved_env}"
+  assert_eq "local_storage preserved after env var unset" \
+    "${TEST_ROOT}/images" \
+    "${after_unset}"
+}
+
+# ---------------------------------------------------------------------------
+# Case 8: persist_image_storage_config no-ops (no crash, no file) when
+# .image.toml does not exist — e.g. before the first pull.
+# ---------------------------------------------------------------------------
+test_case8_persist_noop_when_config_missing() {
+  echo ""
+  echo "=== Case 8: persist no-op when .image.toml missing ==="
+  setup
+
+  local missing_config="${TEST_ROOT}/nonexistent/.image.toml"
+  persist_image_storage_config "${missing_config}"
+
+  if [ ! -f "${missing_config}" ]; then
+    echo "  PASS: no file created when config did not exist"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: file was unexpectedly created"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Case 9: End-to-end regression — no initial config + custom cache + pull
+# creates default config → persist corrects it → env var gone still works.
+# ---------------------------------------------------------------------------
+test_case9_persist_after_simulated_pull() {
+  echo ""
+  echo "=== Case 9: persist corrects config created by pull with default path ==="
+  setup
+
+  local mock_config="${TEST_ROOT}/.image.toml"
+
+  # Step 1: no .image.toml initially (simulating fresh workspace)
+  rm -f "${mock_config}"
+
+  # Step 2: first persist call (script start / early guard) — no-op
+  persist_image_storage_config "${mock_config}"
+  if [ ! -f "${mock_config}" ]; then
+    echo "  PASS: first persist does not create config"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: first persist unexpectedly created config"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # Step 3: simulate cargo xtask image pull creating config with default path
+  cat > "${mock_config}" <<-'TOML'
+local_storage = "/home/user/.cache/tgos/images"
+registry = "https://example.com/registry/default.toml"
+TOML
+
+  # Step 4: second persist call (post-pull guard) — fixes local_storage
+  persist_image_storage_config "${mock_config}"
+
+  local stored_path
+  stored_path="$(grep '^local_storage' "${mock_config}" | sed 's/^local_storage = "\(.*\)"$/\1/')"
+  assert_eq "local_storage corrected after simulated pull" \
+    "${IMAGE_STORAGE_ROOT}" \
+    "${stored_path}"
+
+  # Step 5: env var gone — config still points to custom cache
+  local saved_env="${TGOS_IMAGE_LOCAL_STORAGE-}"
+  unset TGOS_IMAGE_LOCAL_STORAGE
+  local after_unset
+  after_unset="$(grep '^local_storage' "${mock_config}" | sed 's/^local_storage = "\(.*\)"$/\1/')"
+  export TGOS_IMAGE_LOCAL_STORAGE="${saved_env}"
+  assert_eq "custom path persists without env var" \
+    "${TEST_ROOT}/images" \
+    "${after_unset}"
+}
+
+# ---------------------------------------------------------------------------
 # Run all tests
 # ---------------------------------------------------------------------------
 echo "=== bootstrap_image_registry regression tests ==="
@@ -402,6 +523,9 @@ test_case3_default_registry_works
 test_case4_already_bootstrapped
 test_case5_regression_guard
 test_case6_source_does_not_mutate_image_config
+test_case7_persist_updates_local_storage
+test_case8_persist_noop_when_config_missing
+test_case9_persist_after_simulated_pull
 
 echo ""
 echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
