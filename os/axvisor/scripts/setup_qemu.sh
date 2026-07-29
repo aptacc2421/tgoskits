@@ -204,21 +204,23 @@ EOF
   exit 1
 }
 
+# Persist the effective IMAGE_STORAGE_ROOT into .image.toml so subsequent
+# cargo xtask commands (without TGOS_IMAGE_LOCAL_STORAGE) find images at
+# the same location.  Accepts an optional config path override for testing.
+persist_image_storage_config() {
+  local config_path="${1:-${WORKSPACE_ROOT}/tmp/axbuild/.image.toml}"
+  if [ -f "${config_path}" ]; then
+    sed -i 's|^local_storage = .*|local_storage = "'"${IMAGE_STORAGE_ROOT}"'"|' "${config_path}"
+  fi
+}
+
 # Only execute main logic when run directly (not sourced).
 # When sourced (e.g. by test scripts), only function/variable definitions are loaded.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 
-# Sync xtask's persistent config so that `cargo xtask axvisor qemu` finds
-# images at the same path even after this script exits and the env var is gone.
-# NOTE: This intentionally modifies workspace-persistent state. When the env
-# var TGOS_IMAGE_LOCAL_STORAGE is set, subsequent `cargo xtask axvisor qemu`
-# (without the env var) will still read the overridden path from .image.toml.
-# This is existing behavior — kept inside the direct-execution guard so that
-# sourcing this script (e.g. from tests) does NOT mutate the caller's config.
-_image_config="${WORKSPACE_ROOT}/tmp/axbuild/.image.toml"
-if [ -f "${_image_config}" ]; then
-  sed -i 's|^local_storage = .*|local_storage = "'"${IMAGE_STORAGE_ROOT}"'"|' "${_image_config}"
-fi
+# Sync xtask's config so that cargo xtask axvisor qemu (without
+# TGOS_IMAGE_LOCAL_STORAGE) finds images at the same path.
+persist_image_storage_config
 
 GUEST=""
 while [[ $# -gt 0 ]]; do
@@ -320,6 +322,10 @@ if [[ -n "${ROOTFS_IMAGE_NAME}" && ! -f "${ROOTFS_IMAGE}" ]]; then
   echo "  -> Rootfs image not found, downloading ${ROOTFS_IMAGE_NAME}..."
   (cd "${REPO_ROOT}" && cargo xtask image pull -S "${IMAGE_STORAGE_ROOT}" "${ROOTFS_IMAGE_NAME}")
 fi
+# After all image pulls (which may have created .image.toml with default
+# local_storage), persist the effective storage path into the config so
+# that subsequent cargo xtask commands find the same images.
+persist_image_storage_config
 
 if [ ! -f "${KERNEL_IMAGE}" ]; then
   echo "ERROR: kernel image not found at ${KERNEL_IMAGE}" >&2
