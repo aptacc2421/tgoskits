@@ -6,8 +6,8 @@
 > | ----------- | ----------- | -------------------------------------------------------------- |
 > | aarch64     | ✅ 已通过   | 完整 backtrace                                                 |
 > | riscv64     | ✅ 已通过   | 完整 backtrace                                                 |
-> | x86_64      | ✅ 已通过   | 完整 backtrace                                                 |
-> | loongarch64 | ✅ 已通过   | 完整 backtrace（需 QEMU-LVZ 容器）                              |
+> | x86_64      | ⚠️ 未验证  | 需 KVM+UEFI 运行，仅 smoke 覆盖                                |
+> | loongarch64 | ⚠️ 未验证  | 需 QEMU-LVZ 容器，仅 smoke 覆盖                                |
 
 ## 用法
 
