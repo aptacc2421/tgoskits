@@ -332,7 +332,7 @@ setup_qemu_x86_64() {
     run_cmd mkdir -p tmp/{configs,images}
 
     info "Downloading NimbOS image..."
-    run_cmd cargo xtask image pull qemu_x86_64_nimbos --output-dir tmp/images
+    run_cmd cargo xtask image pull qemu-x86_64 --output-dir tmp/images
 
     info "Preparing board config file..."
     run_cmd cp configs/board/qemu-x86_64.toml tmp/configs/
@@ -343,7 +343,7 @@ setup_qemu_x86_64() {
     info "Preparing QEMU config file..."
     run_cmd cp .github/workflows/qemu-x86_64.toml tmp/configs/qemu-x86_64-runtime.toml
 
-    ROOTFS_PATH="$(pwd)/tmp/images/qemu_x86_64_nimbos/rootfs.img"
+    ROOTFS_PATH="$(pwd)/tmp/images/qemu-x86_64/rootfs.img"
     run_cmd sed -i 's|file=${workspaceFolder}/tmp/rootfs.img|file='"$ROOTFS_PATH"'|g' tmp/configs/qemu-x86_64-runtime.toml
 
     info "=== QEMU x86_64 Preparation Complete ==="
@@ -357,7 +357,7 @@ setup_qemu_x86_64_uefi() {
     local firmware_path="${AXVISOR_X86_64_UEFI_FIRMWARE:-}"
     if [ -z "$firmware_path" ]; then
         for candidate in \
-            "$(pwd)/tmp/images/qemu_x86_64_nimbos/OVMF_CODE.fd" \
+            "$(pwd)/tmp/images/qemu-x86_64/OVMF_CODE.fd" \
             "/usr/share/OVMF/OVMF_CODE.fd" \
             "/usr/share/ovmf/OVMF.fd" \
             "/usr/share/qemu/OVMF.fd"; do
@@ -376,14 +376,14 @@ setup_qemu_x86_64_uefi() {
 
     info "Preparing UEFI guest config file..."
     run_cmd cp configs/vms/qemu/x86_64/nimbos-uefi-smp1.toml tmp/configs/nimbos-x86_64-qemu-uefi-smp1.toml
-    run_cmd sed -i 's|^kernel_path = .*|kernel_path = "../images/qemu_x86_64_nimbos/qemu-x86_64"|g' tmp/configs/nimbos-x86_64-qemu-uefi-smp1.toml
+    run_cmd sed -i 's|^kernel_path = .*|kernel_path = "../images/qemu-x86_64/qemu-x86_64"|g' tmp/configs/nimbos-x86_64-qemu-uefi-smp1.toml
     run_cmd sed -i 's|^uefi_firmware_path = .*|uefi_firmware_path = "'"$firmware_path"'"|g' tmp/configs/nimbos-x86_64-qemu-uefi-smp1.toml
 
     info "Preparing UEFI QEMU config file..."
     run_cmd cp .github/workflows/qemu-x86_64-uefi.toml tmp/configs/qemu-x86_64-uefi-runtime.toml
 
     local rootfs_path
-    rootfs_path="$(pwd)/tmp/images/qemu_x86_64_nimbos/rootfs.img"
+    rootfs_path="$(pwd)/tmp/images/qemu-x86_64/rootfs.img"
     run_cmd sed -i 's|file=${workspaceFolder}/tmp/rootfs.img|file='"$rootfs_path"'|g' tmp/configs/qemu-x86_64-uefi-runtime.toml
 
     info "=== QEMU x86_64 UEFI Preparation Complete ==="
@@ -1419,9 +1419,12 @@ cmd_run_rdk_s100() {
 }
 
 # ============================================================================
-# Main Program
+# Main Program — only executes when run directly, not when sourced.
+# When sourced (e.g. by test scripts), only function/variable definitions
+# are loaded.
 # ============================================================================
 
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 check_root_dir
 
 if [ $# -eq 0 ]; then
@@ -1623,3 +1626,4 @@ case "$PLATFORM" in
         exit 1
         ;;
 esac
+fi  # end of source guard: [[ "${BASH_SOURCE[0]}" == "${0}" ]]
