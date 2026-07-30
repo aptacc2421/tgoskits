@@ -107,6 +107,28 @@ fn normalize_image_paths(args: &mut [OsString], invocation_dir: &Path) {
                 matched = true;
                 break;
             }
+
+            // Handle attached short options: -Svalue / -ovalue (no =, no space).
+            // Must come AFTER the =<value> check so -S=cache is still handled
+            // by that branch.
+            if flag.len() == 2
+                && let Some(rest) = try_strip_prefix(&args[i], flag)
+            {
+                // Skip empty (bare -S falls through to space form) and
+                // = prefixed (already handled by the = form above).
+                if !rest.is_empty() && !starts_with_equals(rest) {
+                    let path = Path::new(rest);
+                    if path.is_relative() {
+                        let abs = invocation_dir.join(path);
+                        // Reconstruct as -S/path (no =, preserving attached form)
+                        let mut new_arg = OsString::from(flag);
+                        new_arg.push(abs);
+                        args[i] = new_arg;
+                    }
+                    matched = true;
+                    break;
+                }
+            }
         }
         if matched {
             i += 1;
@@ -164,6 +186,18 @@ fn looks_like_flag(os: &OsStr) -> bool {
 #[cfg(not(unix))]
 fn looks_like_flag(os: &OsStr) -> bool {
     os.to_str().map_or(false, |s| s.starts_with('-'))
+}
+
+/// Returns `true` when `os` starts with an `=` byte.
+#[cfg(unix)]
+fn starts_with_equals(os: &OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    os.as_bytes().first() == Some(&b'=')
+}
+
+#[cfg(not(unix))]
+fn starts_with_equals(os: &OsStr) -> bool {
+    os.to_str().map_or(false, |s| s.starts_with('='))
 }
 
 /// Reconstruct `flag=absolute_path` as an `OsString`, preserving non-UTF-8
@@ -492,5 +526,140 @@ mod tests {
         let mut expected = Vec::from(b"--local-storage=/tmp/work/cache-");
         expected.push(0xff);
         assert_eq!(args[2].as_bytes(), expected.as_slice());
+    }
+
+    #[test]
+    fn attached_short_s_form_is_normalised() {
+        // -Scache → -S/tmp/work/cache (no = sign, attached form preserved)
+        let inv = Path::new("/tmp/work");
+        let mut args = vec![
+            os("xtask"),
+            os("image"),
+            os("-Scache"),
+            os("pull"),
+            os("qemu-aarch64"),
+        ];
+        normalize_image_paths(&mut args, inv);
+        assert_path_eq(&args[2], "-S/tmp/work/cache");
+    }
+
+    #[test]
+    fn attached_short_o_form_is_normalised() {
+        // -oout → -o/home/user/project/out
+        let inv = Path::new("/home/user/project");
+        let mut args = vec![
+            os("xtask"),
+            os("image"),
+            os("pull"),
+            os("-oout"),
+            os("qemu-aarch64"),
+        ];
+        normalize_image_paths(&mut args, inv);
+        assert_path_eq(&args[3], "-o/home/user/project/out");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn attached_short_s_form_non_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let inv = Path::new("/tmp/work");
+        let mut arg_bytes = Vec::from(b"-Scache-");
+        arg_bytes.push(0xff);
+        let arg = OsString::from(OsStr::from_bytes(&arg_bytes));
+        let mut args = vec![
+            OsString::from("xtask"),
+            OsString::from("image"),
+            arg,
+            OsString::from("pull"),
+            OsString::from("qemu-aarch64"),
+        ];
+        normalize_image_paths(&mut args, inv);
+        let mut expected = Vec::from(b"-S/tmp/work/cache-");
+        expected.push(0xff);
+        assert_eq!(args[2].as_bytes(), expected.as_slice());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn attached_short_o_form_non_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let inv = Path::new("/home/user/project");
+        let mut arg_bytes = Vec::from(b"-oout-");
+        arg_bytes.push(0xff);
+        let arg = OsString::from(OsStr::from_bytes(&arg_bytes));
+        let mut args = vec![
+            OsString::from("xtask"),
+            OsString::from("image"),
+            OsString::from("pull"),
+            arg,
+            OsString::from("qemu-aarch64"),
+        ];
+        normalize_image_paths(&mut args, inv);
+        let mut expected = Vec::from(b"-o/home/user/project/out-");
+        expected.push(0xff);
+        assert_eq!(args[3].as_bytes(), expected.as_slice());
+    }
+
+    #[test]
+    fn attached_short_absolute_path_unchanged() {
+        // -S/absolute should not be touched
+        let inv = Path::new("/tmp/work");
+        let mut args = vec![
+            os("xtask"),
+            os("image"),
+            os("-S/usr/local"),
+            os("pull"),
+            os("qemu-aarch64"),
+        ];
+        let expected = args.clone();
+        normalize_image_paths(&mut args, inv);
+        assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn attached_short_equals_form_still_works() {
+        // -S=rel must still be handled by the = form (regression guard)
+        let inv = Path::new("/tmp/work");
+        let mut args = vec![
+            os("xtask"),
+            os("image"),
+            os("-S=rel"),
+            os("pull"),
+            os("qemu-aarch64"),
+        ];
+        normalize_image_paths(&mut args, inv);
+        assert_path_eq(&args[2], "-S=/tmp/work/rel");
+    }
+
+    #[test]
+    fn attached_short_combined_s_o() {
+        // Clap treats -So as -S with value "o", not -S + -o
+        let inv = Path::new("/tmp/work");
+        let mut args = vec![
+            os("xtask"),
+            os("image"),
+            os("-So"),
+            os("pull"),
+            os("qemu-aarch64"),
+        ];
+        normalize_image_paths(&mut args, inv);
+        assert_path_eq(&args[2], "-S/tmp/work/o");
+    }
+
+    #[test]
+    fn attached_short_alone_falls_through() {
+        // Bare -S with no attached value: the fallthrough to space form
+        // must still work (regression guard).
+        let inv = Path::new("/tmp/work");
+        let mut args = vec![
+            os("xtask"),
+            os("image"),
+            os("-S"),
+            os("store"),
+            os("pull"),
+            os("qemu-aarch64"),
+        ];
+        normalize_image_paths(&mut args, inv);
+        assert_path_eq(&args[3], "/tmp/work/store");
     }
 }
