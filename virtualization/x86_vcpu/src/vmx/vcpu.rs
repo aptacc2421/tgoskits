@@ -1675,7 +1675,7 @@ impl<H: X86HostOps> VmxVcpu<H> {
                     }
                     VmxExitReason::HLT => {
                         self.advance_rip(exit_info.exit_instruction_length as _)?;
-                        X86VmExit::PreemptionTimer
+                        X86VmExit::Halt
                     }
                     VmxExitReason::VIRTUALIZED_EOI => X86VmExit::InterruptEnd {
                         vector: self.vlapic.handle_eoi(),

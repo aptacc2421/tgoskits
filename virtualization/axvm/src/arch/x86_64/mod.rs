@@ -188,8 +188,34 @@ impl ArchOps for X86_64Arch {
             }
             X86VmExit::Halt => {
                 debug!("VM[{}] run VCpu[{}] Halt", vm.id(), vcpu.id());
+                // Run the full PreemptionTimer deferred work before deciding to sleep.
+                // This fires immediately-due LAPIC timers, injects PIT IRQ0, and serial IRQs.
+                crate::check_timer_events();
+                let pit_injected = irq::inject_due_pit_irq0(vm, vcpu);
+                let serial_injected = irq::inject_pending_serial_irq(vm, vcpu);
+
+                // check_timer_events() above may have fired LAPIC callbacks that called
+                // queue_interrupt() -> notify_all().  If the vCPU hasn't called wait() yet,
+                // the notify is lost (race).  Protect against this by checking whether any
+                // interrupt was queued or directly injected before sleeping.
+                //
+                // PIT and serial use direct arch-vCPU injection (bypass queue_interrupt),
+                // so they are checked separately via their bool return values.
+                let has_queued = vm
+                    .with_runtime(|rt| Ok(rt.has_pending_interrupts(vcpu.id())))
+                    .unwrap_or(false);
+                let sleep = hlt_should_sleep(has_queued, pit_injected, serial_injected);
+                if sleep {
+                    debug!("VM[{}] VCpu[{}] Halt -> yielding", vm.id(), vcpu.id());
+                } else {
+                    debug!(
+                        "VM[{}] VCpu[{}] Halt: interrupts pending, re-enter guest",
+                        vm.id(),
+                        vcpu.id()
+                    );
+                }
                 Ok(BoundVcpuExit::Complete(VcpuRunAction {
-                    waits_for_event: false,
+                    waits_for_event: sleep,
                     stop_reason: None,
                 }))
             }
@@ -731,6 +757,12 @@ fn restore_host_interrupt_flag(host_rflags: u64) {
     }
 }
 
+/// Returns `true` if the vCPU should sleep (yield) after a HLT VM-exit,
+/// i.e. no pending interrupts from any source.
+fn hlt_should_sleep(has_queued: bool, pit_injected: bool, serial_injected: bool) -> bool {
+    !has_queued && !pit_injected && !serial_injected
+}
+
 #[cfg(test)]
 mod tests {
     use axdevice::{
@@ -839,5 +871,18 @@ mod tests {
                 .is_ok()
         );
         assert!(devices.services().require::<X86PitServiceKey>().is_ok());
+    }
+
+    #[test]
+    fn hlt_should_sleep_decision_matrix() {
+        // All 8 combinations of (has_queued, pit_injected, serial_injected)
+        assert!(!hlt_should_sleep(true, true, true)); // all pending
+        assert!(!hlt_should_sleep(true, true, false)); // queued + PIT
+        assert!(!hlt_should_sleep(true, false, true)); // queued + serial
+        assert!(!hlt_should_sleep(true, false, false)); // queued only
+        assert!(!hlt_should_sleep(false, true, true)); // PIT + serial
+        assert!(!hlt_should_sleep(false, true, false)); // PIT only
+        assert!(!hlt_should_sleep(false, false, true)); // serial only
+        assert!(hlt_should_sleep(false, false, false)); // nothing pending → sleep
     }
 }

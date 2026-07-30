@@ -472,21 +472,22 @@ pub fn register_ioapic_irq_forwarding_activator(
         .map_err(|error| forwarding_route_error(vm.id(), guest_gsi, "activator", error))
 }
 
-pub fn inject_due_pit_irq0(vm: &VMRef, vcpu: &VCpuRef) {
+/// Returns true if a PIT IRQ0 was injected into the vCPU.
+pub fn inject_due_pit_irq0(vm: &VMRef, vcpu: &VCpuRef) -> bool {
     if vm.interrupt_mode() != VMInterruptMode::Passthrough {
-        return;
+        return false;
     }
 
     let now_ns = ax_std::os::arceos::modules::ax_hal::time::monotonic_time_nanos();
     let Ok(devices) = vm.get_devices() else {
-        return;
+        return false;
     };
     if !devices
         .services()
         .require::<X86PitServiceKey>()
         .is_ok_and(|pit| pit.consume_irq0_if_due(now_ns))
     {
-        return;
+        return false;
     }
 
     let Some(irq) = devices
@@ -496,7 +497,7 @@ pub fn inject_due_pit_irq0(vm: &VMRef, vcpu: &VCpuRef) {
         .and_then(|ioapic| ioapic.assert_gsi(PIT_TIMER_GSI))
     else {
         trace!("x86 PIT IRQ0 due but vIOAPIC GSI0 is not ready");
-        return;
+        return false;
     };
 
     vcpu.get_arch_vcpu()
@@ -509,22 +510,24 @@ pub fn inject_due_pit_irq0(vm: &VMRef, vcpu: &VCpuRef) {
             },
         )
         .unwrap();
+    true
 }
 
-pub fn inject_pending_serial_irq(vm: &VMRef, vcpu: &VCpuRef) {
+/// Returns true if a serial IRQ was injected into the vCPU.
+pub fn inject_pending_serial_irq(vm: &VMRef, vcpu: &VCpuRef) -> bool {
     if vm.interrupt_mode() != VMInterruptMode::Passthrough {
-        return;
+        return false;
     }
 
     let Ok(devices) = vm.get_devices() else {
-        return;
+        return false;
     };
     if !devices
         .services()
         .require::<X86SerialServiceKey>()
         .is_ok_and(|serial| serial.poll_irq())
     {
-        return;
+        return false;
     }
 
     let Some(irq) = devices
@@ -534,7 +537,7 @@ pub fn inject_pending_serial_irq(vm: &VMRef, vcpu: &VCpuRef) {
         .and_then(|ioapic| ioapic.assert_gsi(COM1_GSI))
     else {
         trace!("x86 COM1 RX pending but vIOAPIC GSI4 is not ready");
-        return;
+        return false;
     };
 
     trace!("Injecting x86 COM1 RX IRQ vector {:#x}", irq.vector);
@@ -548,6 +551,7 @@ pub fn inject_pending_serial_irq(vm: &VMRef, vcpu: &VCpuRef) {
             },
         )
         .unwrap();
+    true
 }
 
 pub fn inject_pending_ioapic_irq_after_eoi(vm: &VMRef, vcpu: &VCpuRef, vector: u8) {

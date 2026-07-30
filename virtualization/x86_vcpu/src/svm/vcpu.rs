@@ -1631,7 +1631,7 @@ impl<H: X86HostOps> SvmVcpu<H> {
                 }
                 SvmExitCode::HLT => {
                     self.advance_rip(1)?;
-                    X86VmExit::PreemptionTimer
+                    X86VmExit::Halt
                 }
                 SvmExitCode::PAUSE => {
                     self.advance_rip(2)?;
@@ -1640,8 +1640,10 @@ impl<H: X86HostOps> SvmVcpu<H> {
                 SvmExitCode::SHUTDOWN => X86VmExit::SystemDown,
                 _ => {
                     warn!("SVM unsupported VM-exit: {exit_info:#x?}");
-                    warn!("VCpu {self:#x?}");
-                    X86VmExit::Halt
+                    warn!(
+                        "SVM unsupported VM-exit -> PreemptionTimer poll point (VCpu={self:#x?})"
+                    );
+                    X86VmExit::PreemptionTimer
                 }
             })
         }

@@ -300,6 +300,18 @@ impl VmRuntimeHandle {
             .unwrap_or_default()
     }
 
+    /// Non-consuming check — does not drain or modify the pending queue.
+    pub(crate) fn has_pending_interrupts(&self, vcpu_id: usize) -> bool {
+        self.pending_interrupts
+            .lock()
+            .get(&vcpu_id)
+            .is_some_and(|v| !v.is_empty())
+    }
+
+    #[expect(
+        dead_code,
+        reason = "x86 HLT uses wait_until with predicate; other archs use bare wait"
+    )]
     pub(crate) fn wait(&self) {
         self.wait_queue.wait();
     }

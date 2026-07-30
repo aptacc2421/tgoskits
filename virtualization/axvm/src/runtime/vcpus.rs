@@ -30,6 +30,10 @@ const KERNEL_STACK_SIZE: usize = 0x40000; // 256 KiB
 /// # Arguments
 ///
 /// * `vm_id` - The ID of the VM whose VCpu wait queue is used to block the current thread.
+#[expect(
+    dead_code,
+    reason = "x86 HLT uses wait_until with predicate; other archs use bare wait"
+)]
 fn wait(vm_vcpus: &VmRuntimeHandle) {
     vm_vcpus.wait();
 }
@@ -326,7 +330,9 @@ fn vcpu_run() {
             Ok(VcpuRunAction {
                 waits_for_event: true,
                 ..
-            }) => wait(&runtime),
+            }) => wait_for(&runtime, || {
+                runtime.has_pending_interrupts(vcpu_id) || vm.suspending() || vm.stopping()
+            }),
             Ok(VcpuRunAction { .. }) => {}
             Err(err) => {
                 error!("VM[{vm_id}] run VCpu[{vcpu_id}] get error {err:?}");
