@@ -210,7 +210,25 @@ EOF
 persist_image_storage_config() {
   local config_path="${1:-${WORKSPACE_ROOT}/tmp/axbuild/.image.toml}"
   if [ -f "${config_path}" ]; then
-    sed -i 's|^local_storage = .*|local_storage = "'"${IMAGE_STORAGE_ROOT}"'"|' "${config_path}"
+    # Escape \ " \n \t for TOML basic string output. sed replacement strings
+    # interpret & and \, so use awk character-by-character construction instead.
+    _IMAGE_STORAGE_ROOT="${IMAGE_STORAGE_ROOT}" awk '
+      $0 ~ /^local_storage = / {
+        val = ENVIRON["_IMAGE_STORAGE_ROOT"]
+        out = ""
+        for (i = 1; i <= length(val); i++) {
+          c = substr(val, i, 1)
+          if (c == "\\")        out = out "\\\\"
+          else if (c == "\"")   out = out "\\\""
+          else if (c == "\n")   out = out "\\n"
+          else if (c == "\t")   out = out "\\t"
+          else                  out = out c
+        }
+        print "local_storage = \"" out "\""
+        next
+      }
+      { print }
+    ' "${config_path}" > "${config_path}.tmp" && mv "${config_path}.tmp" "${config_path}"
   fi
 }
 
