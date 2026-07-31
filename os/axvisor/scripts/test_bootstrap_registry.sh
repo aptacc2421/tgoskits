@@ -410,7 +410,7 @@ TOML
   persist_image_storage_config "${mock_config}"
 
   local stored_path
-  stored_path="$(grep '^local_storage' "${mock_config}" | sed 's/^local_storage = "\(.*\)"$/\1/')"
+  stored_path="$(grep '^local_storage = ' "${mock_config}" | sed 's/^local_storage = "\(.*\)"$/\1/')"
   assert_eq "local_storage matches IMAGE_STORAGE_ROOT" \
     "${IMAGE_STORAGE_ROOT}" \
     "${stored_path}"
@@ -432,7 +432,7 @@ TOML
   local saved_env="${TGOS_IMAGE_LOCAL_STORAGE-}"
   unset TGOS_IMAGE_LOCAL_STORAGE
   local after_unset
-  after_unset="$(grep '^local_storage' "${mock_config}" | sed 's/^local_storage = "\(.*\)"$/\1/')"
+  after_unset="$(grep '^local_storage = ' "${mock_config}" | sed 's/^local_storage = "\(.*\)"$/\1/')"
   export TGOS_IMAGE_LOCAL_STORAGE="${saved_env}"
   assert_eq "local_storage preserved after env var unset" \
     "${TEST_ROOT}/images" \
@@ -494,7 +494,7 @@ TOML
   persist_image_storage_config "${mock_config}"
 
   local stored_path
-  stored_path="$(grep '^local_storage' "${mock_config}" | sed 's/^local_storage = "\(.*\)"$/\1/')"
+  stored_path="$(grep '^local_storage = ' "${mock_config}" | sed 's/^local_storage = "\(.*\)"$/\1/')"
   assert_eq "local_storage corrected after simulated pull" \
     "${IMAGE_STORAGE_ROOT}" \
     "${stored_path}"
@@ -503,7 +503,7 @@ TOML
   local saved_env="${TGOS_IMAGE_LOCAL_STORAGE-}"
   unset TGOS_IMAGE_LOCAL_STORAGE
   local after_unset
-  after_unset="$(grep '^local_storage' "${mock_config}" | sed 's/^local_storage = "\(.*\)"$/\1/')"
+  after_unset="$(grep '^local_storage = ' "${mock_config}" | sed 's/^local_storage = "\(.*\)"$/\1/')"
   export TGOS_IMAGE_LOCAL_STORAGE="${saved_env}"
   assert_eq "custom path persists without env var" \
     "${TEST_ROOT}/images" \
@@ -519,9 +519,14 @@ TOML
 extract_local_storage() {
   local config_path="$1"
   local line
-  line="$(grep '^local_storage' "${config_path}")"
+  line="$(grep '^local_storage = ' "${config_path}")"
   line="${line#local_storage = \"}"
   line="${line%\"}"
+  # \x01/\x02 are temporary sentinel bytes swapped in one escape at a time so
+  # that a literal "\\n" / "\\t" in the path is not mis-decoded as a control
+  # char. This assumes real paths never contain \x01 or \x02 — safe because
+  # they are non-printing control chars that cannot appear in a TOML basic
+  # string (and persist_image_storage_config never emits \u0001/\u0002).
   line="${line//\\\\/$'\x01'}"
   line="${line//\\\"/$'\x02'}"
   line="${line//\\n/$'\n'}"

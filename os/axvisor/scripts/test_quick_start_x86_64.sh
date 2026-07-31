@@ -129,7 +129,7 @@ test_x86_64_qemu_config_uses_uefi_boot() {
       FAIL=$((FAIL + 1))
       continue
     fi
-    if grep -q '^uefi = true$' "${file}" && grep -q '^to_bin = true$' "${file}"; then
+    if grep -qE '^uefi = true[[:space:]]*$' "${file}" && grep -qE '^to_bin = true[[:space:]]*$' "${file}"; then
       echo "  PASS: ${cfg} — uefi=true and to_bin=true"
       PASS=$((PASS + 1))
     else
