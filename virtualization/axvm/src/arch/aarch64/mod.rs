@@ -15,8 +15,9 @@ use arm_vgic::host::ArmVgicHostIf;
 use ax_crate_interface::impl_interface;
 use ax_memory_addr::{PhysAddr, VirtAddr};
 use axvm_types::{
-    AccessWidth, GuestPhysAddr, NestedPagingConfig, SysRegAddr, VCpuId, VMId, VmArchPerCpuOps,
-    VmArchVcpuOps, VmBackendError as BackendError, VmBackendResult as BackendResult,
+    AccessWidth, GuestPhysAddr, InterruptTriggerMode, NestedPagingConfig, SysRegAddr, VCpuId, VMId,
+    VmArchPerCpuOps, VmArchVcpuOps, VmBackendError as BackendError,
+    VmBackendResult as BackendResult,
 };
 
 use super::{ArchOps, BoundVcpuExit, HypercallExit, MmioReadExit, MmioWriteExit, VcpuRunAction};
@@ -36,6 +37,7 @@ mod npt;
 #[path = "../../architecture/sysreg.rs"]
 mod sysreg;
 mod vm;
+mod vtimer;
 
 pub use capabilities::{host_fdt_bootarg, host_phys_to_virt};
 use cpu_up::{CpuUpExit, CpuUpOps};
@@ -263,6 +265,20 @@ impl VmArchVcpuOps for AxvmArmVcpu {
         arm_result(self.0.inject_interrupt(vector))
     }
 
+    fn inject_interrupt_with_trigger(
+        &mut self,
+        vector: usize,
+        trigger: InterruptTriggerMode,
+    ) -> BackendResult {
+        // The Arm Router/VGIC consumes line trigger semantics before emitting
+        // an INTID. The GIC list-register injection itself is mode-agnostic.
+        match trigger {
+            InterruptTriggerMode::EdgeTriggered | InterruptTriggerMode::LevelTriggered => {
+                arm_result(self.0.inject_interrupt(vector))
+            }
+        }
+    }
+
     fn set_return_value(&mut self, val: usize) {
         self.0.set_return_value(val);
     }
@@ -410,12 +426,23 @@ impl ArmVgicHostIf for ArmVgicHostIfImpl {
         crate::current_vcpu_id().expect("current AArch64 vCPU is not set")
     }
 
+    fn current_vm_id() -> usize {
+        crate::current_vm_id().expect("current AArch64 VM is not set")
+    }
+
     fn current_time_nanos() -> u64 {
         default_host().monotonic_time().as_nanos() as u64
     }
 
-    fn register_timer(deadline: Duration, callback: Box<dyn FnOnce(Duration) + Send + 'static>) {
-        let _ = crate::timer::register_timer(deadline.as_nanos() as u64, callback);
+    fn register_timer(
+        deadline: Duration,
+        callback: Box<dyn FnOnce(Duration) + Send + 'static>,
+    ) -> usize {
+        crate::timer::register_timer(deadline.as_nanos() as u64, callback)
+    }
+
+    fn cancel_timer(token: usize) {
+        crate::timer::cancel_timer(token);
     }
 
     fn read_vgicd_iidr() -> u32 {
@@ -436,5 +463,14 @@ impl ArmVgicHostIf for ArmVgicHostIfImpl {
 
     fn hardware_inject_virtual_interrupt(vector: u8) {
         gic::inject_interrupt(vector as usize);
+    }
+
+    fn inject_vm_vcpu_interrupt(vm_id: usize, vcpu_id: usize, vector: u8) {
+        if let Err(error) = crate::manager::inject_vm_vcpu_interrupt(vm_id, vcpu_id, vector as _) {
+            warn!(
+                "failed to inject AArch64 virtual timer interrupt {vector:#x} into VM[{vm_id}] \
+                 VCpu[{vcpu_id}]: {error:?}"
+            );
+        }
     }
 }
