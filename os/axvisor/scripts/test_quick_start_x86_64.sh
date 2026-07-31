@@ -103,6 +103,43 @@ test_setup_qemu_x86_64_uefi_image_names() {
 }
 
 # ---------------------------------------------------------------------------
+# Test: x86_64 QEMU runtime configs enable UEFI boot.
+# If uefi=false and to_bin=false, ostool passes the Axvisor ELF to QEMU's
+# legacy -kernel flag, which requires a PVH ELF note the ELF lacks, and the
+# boot fails with "Error loading uncompressed kernel without PVH ELF Note".
+# uefi=true + to_bin=true routes to the UEFI pflash path (same as the
+# working smoke-vmx test).
+# ---------------------------------------------------------------------------
+test_x86_64_qemu_config_uses_uefi_boot() {
+  echo ""
+  echo "=== Test: x86_64 QEMU runtime configs enable UEFI boot ==="
+  local workflows_dir
+  workflows_dir="$(cd "${SCRIPT_DIR}/../.github/workflows" && pwd)"
+  local configs=(
+    "qemu-x86_64.toml"
+    "qemu-x86_64-uefi.toml"
+    "qemu-x86_64-kvm.toml"
+    "qemu-x86_64-arceos-uefi.toml"
+  )
+  local cfg
+  for cfg in "${configs[@]}"; do
+    local file="${workflows_dir}/${cfg}"
+    if [ ! -f "${file}" ]; then
+      echo "  FAIL: config not found: ${file}"
+      FAIL=$((FAIL + 1))
+      continue
+    fi
+    if grep -q '^uefi = true$' "${file}" && grep -q '^to_bin = true$' "${file}"; then
+      echo "  PASS: ${cfg} — uefi=true and to_bin=true"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL: ${cfg} — missing uefi=true/to_bin=true (would hit PVH ELF Note error)"
+      FAIL=$((FAIL + 1))
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
 # Run all tests
 # ---------------------------------------------------------------------------
 echo "=== quick-start.sh x86_64 image name regression tests ==="
@@ -111,6 +148,7 @@ echo "Source: ${QUICK_START}"
 test_sourcing_loads_functions
 test_setup_qemu_x86_64_image_names
 test_setup_qemu_x86_64_uefi_image_names
+test_x86_64_qemu_config_uses_uefi_boot
 
 echo ""
 echo "=== Results: ${PASS} passed, ${FAIL} failed ==="

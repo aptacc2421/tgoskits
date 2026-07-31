@@ -511,6 +511,74 @@ TOML
 }
 
 # ---------------------------------------------------------------------------
+# Helper: extract local_storage from a TOML config and unescape the TOML
+# basic-string escapes emitted by persist_image_storage_config (\\, \", \n,
+# \t). Double backslash is protected first so a literal "\\n" is not decoded
+# as a newline.
+# ---------------------------------------------------------------------------
+extract_local_storage() {
+  local config_path="$1"
+  local line
+  line="$(grep '^local_storage' "${config_path}")"
+  line="${line#local_storage = \"}"
+  line="${line%\"}"
+  line="${line//\\\\/$'\x01'}"
+  line="${line//\\\"/$'\x02'}"
+  line="${line//\\n/$'\n'}"
+  line="${line//\\t/$'\t'}"
+  line="${line//$'\x02'/\"}"
+  line="${line//$'\x01'/\\}"
+  printf '%s' "${line}"
+}
+
+# ---------------------------------------------------------------------------
+# Case 10: persist_image_storage_config must handle paths containing special
+# characters. Regression guard for the sed replacement injection bug:
+# & (sed "entire match" backref), | (sed delimiter), \ and " (TOML
+# basic-string escapes).
+# ---------------------------------------------------------------------------
+test_case10_persist_special_character_paths() {
+  echo ""
+  echo "=== Case 10: persist handles special-character paths ==="
+  setup
+
+  local mock_config="${TEST_ROOT}/.image.toml"
+  local special_paths=(
+    '/tmp/cache&foo'     # & would be sed's "entire match" backref
+    '/tmp/cache|foo'     # | is the sed delimiter
+    '/tmp/cache\foo'     # backslash must be escaped in TOML basic strings
+    '/tmp/cache"foo'     # quote must be escaped in TOML basic strings
+  )
+  local p
+  for p in "${special_paths[@]}"; do
+    cat > "${mock_config}" <<-'TOML'
+local_storage = "/default/cache/path"
+registry = "https://example.com/registry/default.toml"
+auto_sync = true
+TOML
+
+    IMAGE_STORAGE_ROOT="${p}" persist_image_storage_config "${mock_config}"
+
+    # 1) local_storage round-trips to the original path (byte-for-byte)
+    local stored
+    stored="$(extract_local_storage "${mock_config}")"
+    assert_eq "local_storage round-trips for '${p}'" "${p}" "${stored}"
+
+    # 2) other TOML fields are preserved
+    local fields_ok=true
+    grep -q '^registry' "${mock_config}" || fields_ok=false
+    grep -q '^auto_sync' "${mock_config}" || fields_ok=false
+    if $fields_ok; then
+      echo "  PASS: other TOML fields preserved for '${p}'"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL: other TOML fields lost for '${p}'"
+      FAIL=$((FAIL + 1))
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
 # Run all tests
 # ---------------------------------------------------------------------------
 echo "=== bootstrap_image_registry regression tests ==="
@@ -526,6 +594,7 @@ test_case6_source_does_not_mutate_image_config
 test_case7_persist_updates_local_storage
 test_case8_persist_noop_when_config_missing
 test_case9_persist_after_simulated_pull
+test_case10_persist_special_character_paths
 
 echo ""
 echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
