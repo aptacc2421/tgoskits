@@ -272,8 +272,10 @@ T2: start()  → InvalidTransition（Running 上 start 非法，状态不变）
 轮询 stop（带 timeout）后再销毁：
 
 ```rust
+use axvm::{AxvmRuntime, StopReason, VmStatus, get_vm_by_id};
+
 let vm = get_vm_by_id(id).ok_or(VmGone)?;   // 从全局注册表取句柄（不存在 → 404）
-vm.stop()?;                                  // 请求停止 → Stopping
+vm.stop(StopReason::Clean)?;                 // 请求停止 → Stopping
 
 let deadline = Instant::now() + timeout;
 loop {
@@ -288,12 +290,14 @@ loop {
 }
 
 vm.destroy()?;                // 阻塞；成功 → Destroyed，资源释放完成
-remove_vm(id);                // 从注册表移除（此后 get_vm_by_id(id) → None）
+AxvmRuntime::remove_vm(id);   // 从注册表移除（此后 get_vm_by_id(id) → None）
 ```
 
 完整生命周期：
 
 ```rust
+use axvm::{AxVM, StopReason};
+
 let vm = AxVM::new(config)?;      // Ready
 vm.start()?;                      // Running（同步）
 vm.pause()?;                      // Paused（状态立即更新；不保证 vCPU 已停）
