@@ -190,7 +190,11 @@ stateDiagram-v2
 
 ## 5. Error handling
 
-所有生命周期 API 均返回 `AxVmResult = Result<(), AxVmError>`。主要错误：
+会改变状态的**生命周期操作**（`start()` / `pause()` / `resume()` / `stop()` / `reset()` /
+`destroy()`）统一返回 `AxVmResult = Result<(), AxVmError>`：`Ok(())` 表示请求被接受（同步操作
+同时表示完成），`Err` 携带 `AxVmError`。**构造与查询 API 不适用此签名**：构造 `new(config) ->
+AxVmResult<AxVMRef>`（返回新建 VM 句柄）；查询 `status() -> VmStatus`、`running()`/`stopping()`/
+`stopped() -> bool`——查询不会失败，直接返回值。生命周期操作的主要错误：
 
 | 错误 | 含义 | 建议处理 |
 |------|------|---------|
