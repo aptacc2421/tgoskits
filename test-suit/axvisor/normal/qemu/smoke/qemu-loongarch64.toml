@@ -6,7 +6,7 @@ args = [
   "-m",
   "2G",
   "-smp",
-  "1",
+  "2",
   "-nographic",
   "-serial",
   "mon:stdio",

@@ -475,7 +475,12 @@ fn vcpu_run() {
         mark_vcpu_running(&vm);
     }
 
-    info!("VM[{}] VCpu[{}] running...", vm.id(), vcpu.id());
+    info!(
+        "VM[{}] VCpu[{}] running on CPU{}...",
+        vm.id(),
+        vcpu.id(),
+        ax_hal::percpu::this_cpu_id()
+    );
 
     loop {
         if vcpu_id == 0 {

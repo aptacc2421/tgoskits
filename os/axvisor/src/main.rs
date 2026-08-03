@@ -57,6 +57,9 @@ fn init_panic_hook() {
 /// 2. Check and enable hardware virtualization on every CPU.
 /// 3. Build and start configured guest VMs.
 /// 4. Run the VM completion waiter and management console concurrently.
+///
+/// The vCPU tasks are pinned to the secondary CPUs via `phys_cpu_ids` in the
+/// VM configs, while the management console stays on the primary CPU.
 fn main() {
     #[cfg(any(feature = "backtrace", feature = "test-panic-no-backtrace"))]
     init_panic_hook();
@@ -89,5 +92,9 @@ fn main() {
 
     info!("[OK] Default guest initialized");
 
+    // The management console runs on the primary CPU (Core 0) while the vCPU
+    // tasks are pinned to Core 1 via `phys_cpu_ids`, so it stays responsive
+    // regardless of guest behavior.
+    info!("shell task on CPU{}", axvm::host::cpu::current_id());
     shell::console_init();
 }
