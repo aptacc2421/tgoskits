@@ -131,11 +131,11 @@ mod lifecycle_test {
     /// issued in that window would strand the vCPU task waiting forever for a
     /// `Running` state it already missed.
     ///
-    /// Note: a `start` *after* stop is deliberately not asserted here. Restarting a
-    /// stopped VM spawns a fresh vCPU task that the scheduler never runs on its
-    /// pinned CPU once that CPU has idled (no IPI wake source in the current
-    /// build), leaving the VM stuck in `Running`. See the network-management
-    /// design doc for the tracked limitation.
+    /// Restarting a stopped VM spawns a fresh vCPU task that the scheduler never
+    /// runs on its pinned CPU once that CPU has idled (no IPI wake source in the
+    /// current build). The API contract rejects `start` on a `Stopped` VM with
+    /// 409 (see `vm_action`) instead of letting it hang in `Running`, and the
+    /// self-test asserts that rejection below.
     pub(super) async fn self_test_lifecycle(router: Router, id: usize) {
         let mut passed = true;
 
@@ -153,6 +153,15 @@ mod lifecycle_test {
         info!("HTTP self-test: POST /api/vms/{id}/stop -> {}", stop);
         passed &= stop == axum::http::StatusCode::OK;
         passed &= poll_status(id, "stopped");
+
+        // Restart-after-stop is unsupported (scheduler limitation); the contract
+        // rejects it with 409 rather than hanging the VM in `Running`.
+        let restart = send_status(&router, "POST", &format!("/api/vms/{id}/start")).await;
+        info!(
+            "HTTP self-test: POST /api/vms/{id}/start on stopped VM -> {}",
+            restart
+        );
+        passed &= restart == axum::http::StatusCode::CONFLICT;
 
         let bad = send_status(&router, "POST", "/api/vms/999/start").await;
         info!("HTTP self-test: POST /api/vms/999/start -> {}", bad);

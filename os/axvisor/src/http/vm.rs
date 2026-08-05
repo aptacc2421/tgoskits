@@ -6,7 +6,7 @@
 //! logic the network path dispatches to.
 
 use axum::{Json, extract::Path, http::StatusCode};
-use axvm::{AxVMRef, AxVmError, VmVcpuState};
+use axvm::{AxVMRef, AxVmError, VmStatus, VmVcpuState};
 use serde_json::{Value, json};
 
 use crate::manager::AxvmManager;
@@ -57,22 +57,40 @@ fn vm_action(id_str: &str, action: VmAction) -> Result<Json<Value>, StatusCode> 
     };
     // No existence pre-check: an unknown VM surfaces as `VmNotFound` from the
     // action and maps to 404 below, keeping the check-then-act window closed.
+    // Restart-after-stop is not supported: a fresh vCPU task on an idled pinned
+    // CPU is never scheduled (no IPI wake source), so `start_vm` would accept
+    // the start and leave the VM stuck in `Running`. Reject it explicitly so the
+    // limitation is a contract error rather than an implicit hang.
+    if matches!(action, VmAction::Start)
+        && AxvmManager::vm_by_id(id).is_some_and(|vm| vm.status() == VmStatus::Stopped)
+    {
+        return Err(StatusCode::CONFLICT);
+    }
     let result = match action {
         VmAction::Start => AxvmManager::start_vm(id),
         VmAction::Stop => AxvmManager::stop_vm(id),
     };
     match result {
-        Ok(()) => Ok(Json(vm_action_json(id))),
+        Ok(()) => Ok(Json(vm_action_json(id, action))),
         Err(error) => Err(map_axvm_error(error)),
     }
 }
 
 /// Report the VM status right after a lifecycle action was accepted.
-fn vm_action_json(id: usize) -> Value {
+///
+/// `stop` is a request: the `Stopped` state arrives only once the vCPU observes
+/// the request and exits asynchronously, so the reported status may still be
+/// `running`/`stopping`. The `"async": true` marker makes that explicit so
+/// callers do not mistake the accepted-request response for a completed stop.
+fn vm_action_json(id: usize, action: VmAction) -> Value {
     let status = AxvmManager::vm_by_id(id)
         .map(|vm| vm.status().as_str())
         .unwrap_or("unknown");
-    json!({ "ok": true, "status": status })
+    json!({
+        "ok": true,
+        "status": status,
+        "async": matches!(action, VmAction::Stop),
+    })
 }
 
 /// Map an AxVM runtime error to an HTTP status code.
