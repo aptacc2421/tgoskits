@@ -53,11 +53,17 @@ impl FileLike for EventFd {
                 if inner.nonblocking {
                     return Err(LinuxError::EAGAIN);
                 }
+                // Busy-wait: there is no wait queue to park on, so a blocking
+                // reader just yields to the cooperative scheduler and re-checks.
+                // With CPU isolation (management plane on Core 0, vCPUs on
+                // Core 1+) a stuck waiter can only spin its own core.
                 drop(inner);
                 crate::sys_sched_yield(); // Wait for a writer.
                 continue;
             }
-            let old_readable = inner.counter > 0;
+            // The counter was `> 0` on entry (guarded above), so the drain makes
+            // it readable→unreadable exactly when it hits zero. Only that
+            // transition must bump the readiness version.
             let value = if inner.semaphore {
                 inner.counter -= 1;
                 1
@@ -66,8 +72,7 @@ impl FileLike for EventFd {
                 inner.counter = 0;
                 v
             };
-            let new_readable = inner.counter > 0;
-            if old_readable != new_readable {
+            if inner.counter == 0 {
                 inner.readiness_version = inner.readiness_version.wrapping_add(1);
             }
             buf[..8].copy_from_slice(&value.to_ne_bytes());
