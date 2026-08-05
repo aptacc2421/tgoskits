@@ -52,6 +52,8 @@ pub use imp::net::{
 };
 #[cfg(feature = "pipe")]
 pub use imp::pipe::sys_pipe;
+#[cfg(feature = "eventfd")]
+pub use imp::eventfd::sys_eventfd;
 #[cfg(feature = "multitask")]
 pub use imp::pthread::mutex::{
     sys_pthread_mutex_destroy, sys_pthread_mutex_init, sys_pthread_mutex_lock,

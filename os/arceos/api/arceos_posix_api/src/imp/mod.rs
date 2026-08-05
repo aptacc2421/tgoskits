@@ -16,5 +16,7 @@ pub mod io_mpx;
 pub mod net;
 #[cfg(feature = "pipe")]
 pub mod pipe;
+#[cfg(feature = "eventfd")]
+pub mod eventfd;
 #[cfg(feature = "multitask")]
 pub mod pthread;
