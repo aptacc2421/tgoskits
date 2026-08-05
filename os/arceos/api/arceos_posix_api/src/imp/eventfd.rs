@@ -55,8 +55,8 @@ impl FileLike for EventFd {
                 }
                 // Busy-wait: there is no wait queue to park on, so a blocking
                 // reader just yields to the cooperative scheduler and re-checks.
-                // With CPU isolation (management plane on Core 0, vCPUs on
-                // Core 1+) a stuck waiter can only spin its own core.
+                // TODO: park on a wait queue once the scheduler grows one, so an
+                // isolated waiter does not spin its own core.
                 drop(inner);
                 crate::sys_sched_yield(); // Wait for a writer.
                 continue;
@@ -102,6 +102,7 @@ impl FileLike for EventFd {
                 if inner.nonblocking {
                     return Err(LinuxError::EAGAIN);
                 }
+                // Busy-wait, same as read(): TODO park on a wait queue.
                 drop(inner);
                 crate::sys_sched_yield(); // Wait for a reader to drain the counter.
                 continue;
@@ -131,9 +132,14 @@ impl FileLike for EventFd {
 
     fn poll(&self) -> LinuxResult<PollState> {
         let inner = self.inner.lock();
+        // Matches Linux `eventfd_poll`: writable only while
+        // `count < ULLONG_MAX - 1`, i.e. while a 1-unit write can still
+        // succeed. The `count == ULLONG_MAX` overflow state Linux reports as
+        // `EPOLLERR` is unreachable here: only the kernel signal path can land
+        // the counter there, and ArceOS writes saturate at `ULLONG_MAX - 1`.
         Ok(PollState {
             readable: inner.counter > 0,
-            writable: inner.counter < u64::MAX,
+            writable: inner.counter < u64::MAX - 1,
             readiness_version: inner.readiness_version,
         })
     }
@@ -152,6 +158,8 @@ pub fn sys_eventfd(initval: c_uint, flags: c_int) -> c_int {
         if flags & !EFD_SUPPORTED_FLAGS != 0 {
             return Err(LinuxError::EINVAL);
         }
+        // `EFD_CLOEXEC` is validated above but deliberately not stored: ArceOS
+        // has no `exec`, so there is no child fd table to close it from.
         let eventfd = EventFd::new(
             initval,
             flags & ctypes::EFD_SEMAPHORE != 0,
