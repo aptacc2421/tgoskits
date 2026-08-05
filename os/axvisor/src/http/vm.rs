@@ -1,4 +1,4 @@
-//! VM status and lifecycle axum handlers.
+//! VM status, lifecycle, and create/delete axum handlers.
 //!
 //! JSON is built with `serde_json::json!()` (no hand-written escaping). These
 //! handlers are shared by the TCP serving path in [`super::server`] and the
@@ -7,6 +7,7 @@
 
 use axum::{Json, extract::Path, http::StatusCode};
 use axvm::{AxVMRef, AxVmError, VmStatus, VmVcpuState};
+use axvmconfig::GuestConfig;
 use serde_json::{Value, json};
 
 use crate::manager::AxvmManager;
@@ -26,6 +27,57 @@ pub async fn vm_detail(Path(id_str): Path<String>) -> Result<Json<Value>, Status
         Some(vm) => Ok(Json(vm_json(&vm, true))),
         None => Err(StatusCode::NOT_FOUND),
     }
+}
+
+/// `POST /api/vms/create` — create a VM from a TOML config in the JSON body.
+///
+/// Body: `{"toml": "<完整 TOML 配置>"}`. The guest kernel must be a build-time
+/// embedded image (`image_location = "memory"`) whose id matches the config's
+/// `base.id`, and that id must not currently be registered. Because embedded
+/// images are matched by id (`memory_images_for_vm`), a config whose id has no
+/// embedded image fails with 500 — the runtime can only realize guest images
+/// that were baked into the hypervisor at build time.
+pub async fn vm_create(Json(payload): Json<Value>) -> Result<Json<Value>, StatusCode> {
+    let toml = payload
+        .get("toml")
+        .and_then(Value::as_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let config = GuestConfig::from_toml(toml).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let id = config.base.id;
+    // Explicit duplicate check: `create_vm_from_toml` fails on a re-registered id
+    // with a plain anyhow string, so surface the conflict as a contract error
+    // (409) instead of an opaque 500.
+    if AxvmManager::vm_by_id(id).is_some() {
+        return Err(StatusCode::CONFLICT);
+    }
+    match AxvmManager::create_vm_from_toml(toml) {
+        Ok(id) => {
+            info!("HTTP: VM[{id}] created via control API");
+            Ok(Json(json!({ "id": id })))
+        }
+        Err(error) => {
+            error!("HTTP: create VM[{id}] failed: {error:#}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// `DELETE /api/vms/{id}` — destroy and unregister a VM.
+///
+/// Two explicit steps so a failed destroy stays retryable: `destroy()` first
+/// (its result is checked), and the registry is only touched on success. This
+/// avoids relying on `Drop`-time destroy, which merely warns on failure after
+/// the VM is already unregistered, leaving no handle to retry with.
+pub async fn vm_delete(Path(id_str): Path<String>) -> Result<StatusCode, StatusCode> {
+    let Ok(id) = id_str.parse::<usize>() else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let vm = AxvmManager::vm_by_id(id).ok_or(StatusCode::NOT_FOUND)?;
+    vm.destroy()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    AxvmManager::remove_vm(id).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    info!("HTTP: VM[{id}] removed via control API");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `POST /api/vms/{id}/start` — start a VM.

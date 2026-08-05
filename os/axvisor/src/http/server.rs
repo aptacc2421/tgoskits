@@ -5,10 +5,12 @@
 //! but dispatch and JSON construction are delegated to axum + serde_json.
 //!
 //! ```text
-//! GET  /api/vms            → 200, JSON array (summary form)
-//! GET  /api/vms/{id}       → 200, JSON detail (with vcpu_states) | 404
-//! POST /api/vms/{id}/start → 200 {"ok":true,"status":...} | 404 | 409 | 503
-//! POST /api/vms/{id}/stop  → 200 {"ok":true,"status":...} | 404 | 409 | 503
+//! GET    /api/vms            → 200, JSON array (summary form)
+//! GET    /api/vms/{id}       → 200, JSON detail (with vcpu_states) | 404
+//! POST   /api/vms/create     → 200 {"id":N} | 400 | 409 | 500 (body {"toml": "..."})
+//! DELETE /api/vms/{id}       → 204 | 404 | 500
+//! POST   /api/vms/{id}/start → 200 {"ok":true,"status":...} | 404 | 409 | 503
+//! POST   /api/vms/{id}/stop  → 200 {"ok":true,"status":...} | 404 | 409 | 503
 //! ```
 //!
 //! The tokio reactor is initialized with `enable_io()` only (no time driver),
@@ -18,7 +20,8 @@
 //! loopback), so the assertions are deterministic and free of task-scheduling
 //! timing. Under `no-auto-start` the default VMs stay in `Ready` and the
 //! self-test additionally drives one VM through a full
-//! start/409/stop/stopped/404 lifecycle.
+//! start/409/stop/stopped/404 lifecycle. `http-dynamic-test` then drives the
+//! same VM through remove -> create -> ready -> 409 -> remove -> 404.
 
 use axum::{Router, routing::get, routing::post};
 
@@ -28,7 +31,8 @@ use crate::http::vm;
 pub fn router() -> Router {
     Router::new()
         .route("/api/vms", get(vm::list_vms))
-        .route("/api/vms/{id}", get(vm::vm_detail))
+        .route("/api/vms/{id}", get(vm::vm_detail).delete(vm::vm_delete))
+        .route("/api/vms/create", post(vm::vm_create))
         .route("/api/vms/{id}/start", post(vm::vm_start))
         .route("/api/vms/{id}/stop", post(vm::vm_stop))
 }
@@ -46,6 +50,8 @@ pub fn serve() {
     rt.block_on(async {
         #[cfg(feature = "http-test")]
         self_test().await;
+        #[cfg(feature = "http-dynamic-test")]
+        dynamic_test::self_test_dynamic().await;
 
         let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
             .await
@@ -218,5 +224,91 @@ mod lifecycle_test {
         }
         warn!("HTTP self-test: VM[{id}] did not reach '{want}' within the poll bound");
         false
+    }
+}
+
+/// The create/delete self-test, only built under `http-dynamic-test`.
+///
+/// Runs after the base control self-test, so the default VM has already been
+/// started and stopped by [`super::lifecycle_test::self_test_lifecycle`] and
+/// sits in `Stopped`. The test removes that VM, recreates it from its own
+/// build-time config (the create body reuses `static_vm_configs().first()`,
+/// whose id owns an embedded guest image), checks it is `Ready`, verifies a
+/// duplicate create is rejected with 409, then removes it again and confirms a
+/// 404.
+#[cfg(feature = "http-dynamic-test")]
+mod dynamic_test {
+    use axum::body::Body;
+    use axum::http::Request;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    use super::{lifecycle_test, send_status};
+
+    /// Drive one VM through remove -> create -> ready -> 409 -> remove -> 404,
+    /// printing a single deterministic PASSED/FAILED sentinel.
+    pub(super) async fn self_test_dynamic() {
+        let router = super::router();
+        let mut passed = true;
+
+        // The create body is the VM's own build-time config: its id owns an
+        // embedded guest image, which is the only way the runtime boot-image
+        // resolver (`memory_images_for_vm`) can satisfy the load.
+        let toml = crate::config::vmcfg::static_vm_configs()
+            .first()
+            .copied()
+            .expect("dynamic self-test requires a static VM config");
+        let id = lifecycle_test::first_vm_id().expect("dynamic self-test requires a default VM");
+
+        // 1. Remove the default VM (registered at boot, left `Stopped` by the
+        //    base control self-test). destroy() + remove_vm() are synchronous.
+        let removed = send_status(&router, "DELETE", &format!("/api/vms/{id}")).await;
+        info!("HTTP self-test: DELETE /api/vms/{id} -> {removed}");
+        passed &= removed == axum::http::StatusCode::NO_CONTENT;
+
+        // 2. Recreate it from the same TOML.
+        let created = send_create(&router, toml).await;
+        info!("HTTP self-test: POST /api/vms/create -> {created}");
+        passed &= created == axum::http::StatusCode::OK;
+
+        // 3. The recreated VM is registered and `Ready`.
+        passed &= lifecycle_test::poll_status(id, "ready");
+
+        // 4. A duplicate id is a contract error (409), not an opaque 500.
+        let dup = send_create(&router, toml).await;
+        info!("HTTP self-test: POST /api/vms/create duplicate -> {dup}");
+        passed &= dup == axum::http::StatusCode::CONFLICT;
+
+        // 5. Remove it again, then confirm it is gone.
+        let removed = send_status(&router, "DELETE", &format!("/api/vms/{id}")).await;
+        info!("HTTP self-test: DELETE /api/vms/{id} -> {removed}");
+        passed &= removed == axum::http::StatusCode::NO_CONTENT;
+
+        let gone = send_status(&router, "GET", &format!("/api/vms/{id}")).await;
+        info!("HTTP self-test: GET /api/vms/{id} -> {gone}");
+        passed &= gone == axum::http::StatusCode::NOT_FOUND;
+
+        if passed {
+            info!("HTTP self-test: dynamic create/delete PASSED");
+        } else {
+            error!("HTTP self-test: dynamic create/delete FAILED");
+        }
+    }
+
+    /// POST a create request with the given TOML body.
+    async fn send_create(router: &axum::Router, toml: &str) -> axum::http::StatusCode {
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/vms/create")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "toml": toml }).to_string()))
+                    .expect("failed to build request"),
+            )
+            .await
+            .expect("request failed")
+            .status()
     }
 }

@@ -97,7 +97,27 @@ curl -s http://localhost:18081/api/vms/1                # 200, status="stopped"�
 curl -s -X POST http://localhost:18081/api/vms/999/start # 404
 curl -s -X POST http://localhost:18081/api/vms/1/stop    # 200 {"ok":true,"status":"stopping","async":true}（对已停 VM 也 200，幂等）
 curl -s -X POST http://localhost:18081/api/vms/1/start   # 409（restart-after-stop 不支持，契约拒绝）
+
+# 动态创建/删除：create -> ready -> 409（重复 id）-> remove -> 404
+curl -s -X DELETE http://localhost:18081/api/vms/1       # 204（先删除默认 VM，释放其 id）
+curl -s -X POST http://localhost:18081/api/vms/create \
+  -H 'Content-Type: application/json' \
+  -d '{"toml": "<完整 TOML 配置，base.id 必须命中已内嵌镜像且未注册>"}'  # 200 {"id":1}
+curl -s http://localhost:18081/api/vms/1                # 200, status="ready"（重建后）
+curl -s -X POST http://localhost:18081/api/vms/create \
+  -H 'Content-Type: application/json' \
+  -d '{"toml": "<同上>"}'                                # 409（id 已注册，重复 create 是契约错误）
+curl -s -X DELETE http://localhost:18081/api/vms/1       # 204
+curl -s http://localhost:18081/api/vms/1                # 404（已移除）
 ```
+
+> **create 的镜像约束：** guest 内核只能在构建期内嵌（`image_location = "memory"` →
+> `build.rs` include_bytes!），运行时按 `base.id` 严格匹配内嵌镜像
+> （`memory_images_for_vm`，boot/images/mod.rs:223-238）。因此 create 只能复现**构建期
+> 已内嵌且当前未注册**的 id（即先 DELETE 释放 id，再用同一 TOML 重建）；新 id 无内嵌镜像
+> → 500。这是受限的 create/delete：验证运行时 VM 生命周期（内存/vCPU/device 初始化、
+> remove 无 task 泄漏、失败回滚），而非任意镜像的运行时加载。对应自测
+> `test-suit/axvisor/normal/qemu-http-axum-dynamic/`（`--test-case http-axum-dynamic`）。
 
 > **stop 是异步请求：** 响应带 `"async": true`，POST stop 返回 200 只表示请求被接受，
 > `Stopped` 要等 vCPU 退出，返回的 `status` 可能仍是 `running`/`stopping`。立即 GET
@@ -168,3 +188,6 @@ pkill -f qemu-system
 | 启动日志报 `VM[1] VCpu[0] run ... error ... VGIC ... Distributor write ... register requires Dword` | 预置 guest 镜像（`arceos-qemu`）在 GIC 初始化处做 byte 宽 GICD 写，VGIC 模拟拒绝。**与 HTTP 控制面无关**（vCPU 侧 device 错误），VM 仍会经 Fault 路径转为 `stopped`，控制流程不受影响。 |
 | 幂等 stop 时日志出现 `Stopping VM[1]: Forced`（前缀 `0:12` = HTTP 任务） | 正常。`stop_vm` 一律用 `StopReason::Forced`（runtime/mod.rs:128）；对已 Stopped VM，`request_stop_with` 是幂等 no-op（machine.rs:322-333），返回 200。`Forced` 是 stop 的标准 reason，不是错误。 |
 | `POST start` 对 stopped VM 返回 409 | 正常，是契约行为。restart-after-stop 是已知调度限制（stopped VM 再 start 时新 vCPU task 在已 idle 的固定核上不被调度），`vm_action` 显式以 409 拒绝，避免 VM 挂起在 `running`。 |
+| `POST /api/vms/create` 返回 500 | create 的 TOML `base.id` 没有构建期内嵌镜像（新 id）→ 运行时 `memory_images_for_vm` 报 NotFound。create 只能复现已内嵌且未注册的 id（先 DELETE 再 create）；TOML 解析失败 → 400，id 已注册 → 409。 |
+| `DELETE /api/vms/{id}` 返回 500 | `vm.destroy()` 失败（VM 停在 `Destroying`）。handler 先 destroy 后 remove，destroy 失败时 VM 仍在注册表内，可重试 DELETE。 |
+| 动态自测日志出现 `VM[1] vCPU runtime cleanup skipped: InvalidState` | 正常。删除从未 start 的 VM 时 `join_all_vcpu_tasks` 无 vCPU runtime 可 join（`cleanup_vm_vcpus` 的 `warn!` 路径），资源仍正确释放（`resources cleanup completed`）。 |

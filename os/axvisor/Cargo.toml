@@ -55,6 +55,10 @@ http-axum = ["dep:axum", "dep:tokio", "dep:serde_json"]
 # Do not auto-boot the default VMs at startup; the HTTP control plane starts
 # and stops them on demand (VMs are created and stay in `Ready`).
 no-auto-start = []
+# Runtime create/delete self-test (`qemu-http-axum-dynamic`). Implies the base
+# control self-test and the no-auto-start lifecycle test, then drives one default
+# VM through remove -> create -> ready -> 409 -> remove -> 404.
+http-dynamic-test = ["http-test", "no-auto-start"]
 
 [dependencies]
 shlex.workspace = true

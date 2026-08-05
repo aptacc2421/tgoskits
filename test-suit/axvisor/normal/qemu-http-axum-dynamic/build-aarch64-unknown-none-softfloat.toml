@@ -1,0 +1,16 @@
+# PR E: runtime create/delete over the axum control API.
+# `http-dynamic-test` implies `http-test` + `no-auto-start`: the base control
+# self-test runs first (start/stop lifecycle), then the dynamic self-test
+# removes the default VM, recreates it from its own build-time config (the id
+# owns an embedded guest image), and removes it again. The guest image is
+# embedded at build time (`image_location = "memory"` -> build.rs
+# include_bytes!), so no `fs` feature is required. The vmconfig is committed
+# next to this file and references the managed `qemu-aarch64` registry image; CI
+# runs `cargo xtask image pull qemu-aarch64 --output-dir tmp/axbuild/images`
+# before the test to provision the guest kernel.
+features = [
+    "http-dynamic-test",
+]
+log = "Info"
+target = "aarch64-unknown-none-softfloat"
+vm_configs = ["test-suit/axvisor/normal/qemu-http-axum-dynamic/aarch64-arceos-http-dynamic.toml"]
