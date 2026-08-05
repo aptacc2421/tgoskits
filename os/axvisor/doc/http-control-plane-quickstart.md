@@ -34,7 +34,15 @@ vCPU (Core 1+) — guest
 控制 API 验证需要 guest 真实 boot，而 `http-test` 内置自测会把 VM stop（Core 1 idle
 触发 restart-after-stop 调度限制）。所以手工验证用**手动 config**（`features =
 ["no-auto-start", "http-axum"]`，**不含 http-test**）构建，默认 VM 保持 `Ready`，由 curl
-驱动启停。config 在 `os/axvisor/tmp/configs/http-control-manual.toml`。
+驱动启停。config 位于 `os/axvisor/tmp/configs/http-control-manual.toml`（本地 gitignore，
+内容如下，可自行重建）：
+
+```toml
+features = ["no-auto-start", "http-axum"]
+log = "Info"
+target = "aarch64-unknown-none-softfloat"
+vm_configs = ["test-suit/axvisor/normal/qemu-http-axum-control/aarch64-arceos-http-control.toml"]
+```
 
 ### 2.1 构建
 
@@ -154,7 +162,7 @@ pkill -f qemu-system
 | 现象 | 原因 / 处理 |
 |------|------------|
 | curl 超时/拒绝连接 | QEMU 未启动或 `hostfwd` 端口被旧实例占用。`pkill -f qemu-system` 后重启。 |
-| 启动日志无 `use NIC 0:` | `net` feature 未启用（检查 build config `features`）。 |
+| 启动日志无 `use NIC 0:` | `net` 能力由 `ax-std` 无条件启用（不通过 axvisor build config 开关），缺该日志说明 QEMU 没给虚拟机提供网卡——检查 `-netdev user` + `-device virtio-net-pci` 是否都在，或 `hostfwd` 端口是否被残留实例占用（`pkill -f qemu-system` 后重启）。 |
 | 无 `management HTTP server` 日志 | `http-axum` feature 缺失——`http::serve()` 整个模块在无该 feature 时不编译。config 必须含 `http-axum`（见 §2.1）。 |
 | 启动后无 VM（`GET /api/vms` 空数组） | 构建用 `http-test` 自测产物（VM 被 stop 且自测驱动过生命周期）；按 §2.1 重生成 `.bin`。 |
 | 启动日志报 `VM[1] VCpu[0] run ... error ... VGIC ... Distributor write ... register requires Dword` | 预置 guest 镜像（`arceos-qemu`）在 GIC 初始化处做 byte 宽 GICD 写，VGIC 模拟拒绝。**与 HTTP 控制面无关**（vCPU 侧 device 错误），VM 仍会经 Fault 路径转为 `stopped`，控制流程不受影响。 |
