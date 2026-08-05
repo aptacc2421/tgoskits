@@ -30,8 +30,6 @@ pub fn selected_tests() -> &'static [TestCase] {
 pub mod debug;
 #[cfg(all(feature = "display-basic", feature = "ax-std"))]
 pub mod display;
-#[cfg(all(feature = "eventfd-epoll", feature = "ax-std"))]
-pub mod io_mpx;
 #[cfg(all(
     feature = "ax-std",
     any(feature = "exception-breakpoint", feature = "exception-page-fault")
@@ -39,6 +37,8 @@ pub mod io_mpx;
 pub mod exception;
 #[cfg(all(feature = "fs-basic", feature = "ax-std"))]
 pub mod fs;
+#[cfg(all(feature = "eventfd-epoll", feature = "ax-std"))]
+pub mod io_mpx;
 #[cfg(all(
     feature = "ax-std",
     any(feature = "lockdep-baseline", feature = "lockdep-detect",)

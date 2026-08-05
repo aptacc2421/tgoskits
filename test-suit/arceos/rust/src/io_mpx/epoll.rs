@@ -14,7 +14,7 @@
 use core::{ffi::c_int, mem};
 use std::println;
 
-use super::syscalls::{self, assert_errno, EpollEvent};
+use super::syscalls::{self, EpollEvent, assert_errno};
 
 const EFD_NONBLOCK: c_int = 0o4000;
 /// `EPOLL_CLOEXEC` = `O_CLOEXEC`.
@@ -37,7 +37,10 @@ fn test_create_rejects_unknown_flags() {
         "epoll_create1 with an unknown flag",
     );
     let epfd = syscalls::epoll_create1(EPOLL_CLOEXEC).expect("epoll_create1(EPOLL_CLOEXEC) failed");
-    assert!(epfd >= 0, "epoll_create1(EPOLL_CLOEXEC) returned an invalid fd");
+    assert!(
+        epfd >= 0,
+        "epoll_create1(EPOLL_CLOEXEC) returned an invalid fd"
+    );
 }
 
 fn test_eventfd_roundtrip_via_epoll() {

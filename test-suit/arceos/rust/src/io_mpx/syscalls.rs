@@ -14,7 +14,7 @@ use core::{ffi::c_int, ptr};
 /// (16-byte struct). Must match `ax-posix-api`'s bindgen `epoll_event`.
 #[cfg(target_arch = "x86_64")]
 #[repr(C, packed)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct EpollEvent {
     pub events: u32,
     pub data: u64,
@@ -22,16 +22,10 @@ pub struct EpollEvent {
 
 #[cfg(not(target_arch = "x86_64"))]
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct EpollEvent {
     pub events: u32,
     pub data: u64,
-}
-
-impl Default for EpollEvent {
-    fn default() -> Self {
-        Self { events: 0, data: 0 }
-    }
 }
 
 impl EpollEvent {
@@ -43,14 +37,15 @@ impl EpollEvent {
 
 /// The `#[no_mangle]` symbols provided by `ax_std::os::libc_compat`.
 mod raw {
-    use super::EpollEvent;
     use core::ffi::c_int;
+
+    use super::EpollEvent;
 
     unsafe extern "C" {
         pub(super) fn eventfd(initval: u32, flags: c_int) -> c_int;
         pub(super) fn epoll_create1(flags: c_int) -> c_int;
         pub(super) fn epoll_ctl(epfd: c_int, op: c_int, fd: c_int, event: *mut EpollEvent)
-            -> c_int;
+        -> c_int;
         pub(super) fn epoll_wait(
             epfd: c_int,
             events: *mut EpollEvent,
@@ -102,12 +97,10 @@ pub fn epoll_ctl(
     fd_syscall(unsafe { raw::epoll_ctl(epfd, op, fd, ptr) })
 }
 
-pub fn epoll_wait(
-    epfd: c_int,
-    events: &mut [EpollEvent],
-    timeout: c_int,
-) -> Result<c_int, c_int> {
-    fd_syscall(unsafe { raw::epoll_wait(epfd, events.as_mut_ptr(), events.len() as c_int, timeout) })
+pub fn epoll_wait(epfd: c_int, events: &mut [EpollEvent], timeout: c_int) -> Result<c_int, c_int> {
+    fd_syscall(unsafe {
+        raw::epoll_wait(epfd, events.as_mut_ptr(), events.len() as c_int, timeout)
+    })
 }
 
 pub fn read(fd: c_int, buf: &mut [u8]) -> Result<usize, c_int> {

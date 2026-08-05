@@ -35,7 +35,10 @@ fn test_create_and_flag_validation() {
 
     let fd = syscalls::eventfd(0, EFD_SEMAPHORE | EFD_CLOEXEC | EFD_NONBLOCK)
         .expect("eventfd with all supported flags failed");
-    assert!(fd >= 0, "eventfd with all supported flags returned an invalid fd");
+    assert!(
+        fd >= 0,
+        "eventfd with all supported flags returned an invalid fd"
+    );
 
     assert_errno(
         syscalls::eventfd(0, EFD_SEMAPHORE | 0x4000_0000),
@@ -55,7 +58,11 @@ fn test_read_empty_nonblocking_eagain() {
 
 fn test_initval_is_readable_and_drains() {
     let fd = syscalls::eventfd(5, EFD_NONBLOCK).expect("create eventfd(5) failed");
-    assert_eq!(syscalls::read_u64(fd).unwrap(), 5, "initval must be readable");
+    assert_eq!(
+        syscalls::read_u64(fd).unwrap(),
+        5,
+        "initval must be readable"
+    );
     assert_errno(
         syscalls::read_u64(fd),
         EAGAIN,
@@ -65,8 +72,16 @@ fn test_initval_is_readable_and_drains() {
 
 fn test_write_read_accumulate_and_reset() {
     let fd = syscalls::eventfd(0, EFD_NONBLOCK).expect("create eventfd failed");
-    assert_eq!(syscalls::write_u64(fd, 3).unwrap(), 8, "write must return 8");
-    assert_eq!(syscalls::write_u64(fd, 4).unwrap(), 8, "write must return 8");
+    assert_eq!(
+        syscalls::write_u64(fd, 3).unwrap(),
+        8,
+        "write must return 8"
+    );
+    assert_eq!(
+        syscalls::write_u64(fd, 4).unwrap(),
+        8,
+        "write must return 8"
+    );
     assert_eq!(
         syscalls::read_u64(fd).unwrap(),
         7,
@@ -110,10 +125,18 @@ fn test_buffer_length_validation() {
 }
 
 fn test_semaphore_decrements_one_at_a_time() {
-    let fd =
-        syscalls::eventfd(2, EFD_SEMAPHORE | EFD_NONBLOCK).expect("create semaphore eventfd failed");
-    assert_eq!(syscalls::read_u64(fd).unwrap(), 1, "semaphore read must return 1");
-    assert_eq!(syscalls::read_u64(fd).unwrap(), 1, "semaphore read must return 1");
+    let fd = syscalls::eventfd(2, EFD_SEMAPHORE | EFD_NONBLOCK)
+        .expect("create semaphore eventfd failed");
+    assert_eq!(
+        syscalls::read_u64(fd).unwrap(),
+        1,
+        "semaphore read must return 1"
+    );
+    assert_eq!(
+        syscalls::read_u64(fd).unwrap(),
+        1,
+        "semaphore read must return 1"
+    );
     assert_errno(
         syscalls::read_u64(fd),
         EAGAIN,

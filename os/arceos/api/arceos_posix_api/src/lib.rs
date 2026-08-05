@@ -32,6 +32,8 @@ pub mod ctypes_gen {
     include!(concat!(env!("OUT_DIR"), "/ctypes_gen.rs"));
 }
 
+#[cfg(feature = "eventfd")]
+pub use imp::eventfd::sys_eventfd;
 #[cfg(feature = "fd")]
 pub use imp::fd_ops::{sys_close, sys_dup, sys_dup2, sys_fcntl};
 #[cfg(feature = "fs")]
@@ -52,8 +54,6 @@ pub use imp::net::{
 };
 #[cfg(feature = "pipe")]
 pub use imp::pipe::sys_pipe;
-#[cfg(feature = "eventfd")]
-pub use imp::eventfd::sys_eventfd;
 #[cfg(feature = "multitask")]
 pub use imp::pthread::mutex::{
     sys_pthread_mutex_destroy, sys_pthread_mutex_init, sys_pthread_mutex_lock,
