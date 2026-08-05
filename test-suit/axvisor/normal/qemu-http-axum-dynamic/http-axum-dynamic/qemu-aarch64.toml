@@ -15,11 +15,15 @@ args = [
 timeout = 600
 # The runner's stream matcher stops at the FIRST match (fail checked before
 # success), so per-step status lines cannot be asserted independently. The
-# self-test verifies every step internally and prints exactly one sentinel:
-# PASSED only if the full create/delete lifecycle
-# (remove -> create -> ready -> 409 -> remove -> 404) met every expectation.
+# binary runs the base control lifecycle self-test first, then the create/delete
+# self-test; each prints its own FAILED sentinel and each has an independent
+# pass/fail result. The create/delete test only prints PASSED if the full
+# remove -> create -> ready -> 409 -> remove -> 404 sequence met every
+# expectation, so both FAILED sentinels must be caught or a control-lifecycle
+# failure followed by a create/delete pass would falsely report success.
 fail_regex = [
   "(?i)\\bpanic(?:ked)?\\b",
+  "HTTP self-test: control lifecycle FAILED",
   "HTTP self-test: dynamic create/delete FAILED",
 ]
 success_regex = [
