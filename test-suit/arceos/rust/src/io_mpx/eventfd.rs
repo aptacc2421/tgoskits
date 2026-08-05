@@ -79,8 +79,8 @@ fn test_write_read_accumulate_and_reset() {
     );
 }
 
-fn test_short_buffer_einval() {
-    let fd = syscalls::eventfd(0, 0).expect("create eventfd failed");
+fn test_buffer_length_validation() {
+    let fd = syscalls::eventfd(0, EFD_NONBLOCK).expect("create eventfd failed");
     let mut small = [0u8; 4];
     assert_errno(
         syscalls::read(fd, &mut small),
@@ -91,6 +91,21 @@ fn test_short_buffer_einval() {
         syscalls::write(fd, &small),
         EINVAL,
         "write of a buffer smaller than 8 bytes",
+    );
+    // Linux read accepts any buffer of at least 8 bytes (it reads exactly 8),
+    // so a longer read must reach the counter (EAGAIN here) rather than fail
+    // with EINVAL. A longer write, however, must fail: fs/eventfd.c demands
+    // `count == sizeof(ucnt)`.
+    let mut long = [0u8; 16];
+    assert_errno(
+        syscalls::read(fd, &mut long),
+        EAGAIN,
+        "read of a buffer larger than 8 bytes must not be EINVAL",
+    );
+    assert_errno(
+        syscalls::write(fd, &long),
+        EINVAL,
+        "write of a buffer larger than 8 bytes",
     );
 }
 
@@ -141,7 +156,7 @@ pub fn run() -> crate::TestResult {
     test_read_empty_nonblocking_eagain();
     test_initval_is_readable_and_drains();
     test_write_read_accumulate_and_reset();
-    test_short_buffer_einval();
+    test_buffer_length_validation();
     test_semaphore_decrements_one_at_a_time();
     test_write_u64_max_einval();
     test_counter_overflow_eagain();

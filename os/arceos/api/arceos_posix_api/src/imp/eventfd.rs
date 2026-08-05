@@ -81,9 +81,10 @@ impl FileLike for EventFd {
     }
 
     fn write(&self, buf: &[u8]) -> LinuxResult<usize> {
-        // Linux copies only the first 8 bytes, so any buffer of at least 8
-        // bytes is accepted; smaller buffers fail with EINVAL.
-        if buf.len() < 8 {
+        // Linux requires the write buffer to be exactly 8 bytes (fs/eventfd.c:
+        // `if (count != sizeof(ucnt)) return -EINVAL;`). Unlike read, which
+        // accepts any buffer of at least 8 bytes, a longer write fails too.
+        if buf.len() != 8 {
             return Err(LinuxError::EINVAL);
         }
         let value = u64::from_ne_bytes(buf[..8].try_into().unwrap());
