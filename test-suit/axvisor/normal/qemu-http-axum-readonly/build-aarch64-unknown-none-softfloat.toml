@@ -1,0 +1,10 @@
+# PR B: axum read-only HTTP API runtime verification.
+# http-test implies http-axum (tokio + axum + serde_json). fs/nvme is not
+# enabled: QEMU has no disk and fs would panic at boot; this test only
+# verifies the management HTTP server runs.
+features = [
+    "http-test",
+]
+log = "Info"
+target = "aarch64-unknown-none-softfloat"
+vm_configs = []

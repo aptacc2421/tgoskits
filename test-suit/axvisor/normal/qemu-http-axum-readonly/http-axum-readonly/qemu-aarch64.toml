@@ -1,0 +1,29 @@
+args = [
+  "-nographic",
+  "-cpu",
+  "cortex-a72",
+  "-machine",
+  "virt,virtualization=on,gic-version=3",
+  "-smp",
+  "2",
+  "-m",
+  "512M",
+]
+# PR B: first in-hypervisor axum runtime verification.
+# - tokio current_thread runtime is initialized with enable_io() only (needs
+#   only epoll, no timerfd syscall).
+# - the tower::ServiceExt::oneshot self-test avoids TCP and prints
+#   deterministic status codes.
+# - if enable_io() is insufficient (time driver / timerfd required), a panic
+#   hits fail_regex.
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?i)kernel panic",
+]
+success_regex = [
+  "HTTP self-test: GET /api/vms -> 200",
+  "HTTP self-test: GET /api/vms/999 -> 404",
+]
+timeout = 120
+to_bin = true
+uefi = false
