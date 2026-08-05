@@ -84,11 +84,12 @@ fn main() {
     manager.init_default_vms();
 
     // The management HTTP server accepts connections in a loop and needs its
-    // own task so neither the shell nor the VMM blocks it. It is spawned
-    // first: under cooperative FIFO scheduling the spawn order is the
-    // ready-queue order, so the server binds here before `launch_default_vms`
-    // queues the vCPU tasks. `http-test` runs its self-test inside `http::serve`
-    // before any socket work.
+    // own task so neither the shell nor the VMM blocks it. It is spawned first
+    // so the management API is ready as early as possible. `ax_std::thread::spawn`
+    // only enqueues the task — the main task keeps running until it yields or
+    // blocks — so the server's bind does not necessarily happen before
+    // `launch_default_vms` queues the vCPU tasks; the ordering is best-effort.
+    // `http-test` runs its self-test inside `http::serve` before any socket work.
     #[cfg(feature = "http-axum")]
     std::thread::Builder::new()
         .name("axvisor-http".into())

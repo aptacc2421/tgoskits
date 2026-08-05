@@ -1,7 +1,7 @@
 //! Read-only VM status axum handlers.
 //!
 //! JSON is built with `serde_json::json!()` (no hand-written escaping). These
-//! handlers are shared by the TCP serving path in [`super::axum`] and the
+//! handlers are shared by the TCP serving path in [`super::server`] and the
 //! `http-test` built-in self-test, so the self-test exercises exactly the same
 //! logic the network path dispatches to.
 
