@@ -1,0 +1,29 @@
+args = [
+  "-nographic",
+  "-cpu",
+  "cortex-a72",
+  "-machine",
+  "virt,virtualization=on,gic-version=3",
+  "-smp",
+  "2",
+  # `-m 1g` (vs the readonly test's 512M): the control test boots a real guest
+  # with a 256M MAP_IDENTICAL region, and the hypervisor plus that region must
+  # both fit in QEMU's total RAM; 512M would be too tight.
+  "-m",
+  "1g",
+]
+timeout = 600
+# The runner's stream matcher stops at the FIRST match (fail checked before
+# success), so per-step status lines cannot be asserted independently. The
+# self-test verifies every step internally and prints exactly one sentinel:
+# PASSED only if the full lifecycle (start -> running -> stop -> stopped -> 404)
+# met every expectation.
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "HTTP self-test: control lifecycle FAILED",
+]
+success_regex = [
+  "HTTP self-test: control lifecycle PASSED",
+]
+to_bin = true
+uefi = false

@@ -52,6 +52,9 @@ test-panic-no-backtrace = ["dep:axbacktrace"]
 # pilot, which is intentionally not carried forward.
 http-test = ["http-axum", "dep:tower"]
 http-axum = ["dep:axum", "dep:tokio", "dep:serde_json"]
+# Do not auto-boot the default VMs at startup; the HTTP control plane starts
+# and stops them on demand (VMs are created and stay in `Ready`).
+no-auto-start = []
 
 [dependencies]
 shlex.workspace = true
@@ -65,14 +68,10 @@ log = "0.4"
 axum = { version = "0.8", optional = true }
 serde_json = { version = "1", optional = true }
 tower = { version = "0.5", optional = true, features = ["util"] }
-tokio = { version = "1", optional = true, features = [
-  "rt",
-  "macros",
-  "net",
-  "time",
-  "sync",
-  "io-util",
-] }
+# The runtime only enables the IO driver (`enable_io()`), so no `time` driver
+# and thus no `timerfd` syscall is needed. `rt` + `net` cover the manually
+# built current-thread runtime and `TcpListener`.
+tokio = { version = "1", optional = true, features = ["rt", "net"] }
 
 # System dependent modules provided by ArceOS.
 ax-api.workspace = true

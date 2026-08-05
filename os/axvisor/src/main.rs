@@ -99,14 +99,22 @@ fn main() {
     let default_vms = manager::AxvmManager::vm_list();
     guest_console::configure_host_console_reader(&default_vms)
         .unwrap_or_else(|error| panic!("failed to configure host console input: {error:#}"));
+
+    // With `no-auto-start` the default VMs are only created (staying in
+    // `Ready`) and the management plane boots them on demand, so nothing is
+    // launched or waited on here.
+    #[cfg(not(feature = "no-auto-start"))]
     let started_vms = manager.launch_default_vms();
+    #[cfg(not(feature = "no-auto-start"))]
     guest_console::attach_default(started_vms);
 
+    #[cfg(not(feature = "no-auto-start"))]
     std::thread::Builder::new()
         .name("axvisor-vm-wait".into())
         .spawn(manager::AxvmManager::wait_for_default_vms)
         .unwrap_or_else(|error| panic!("failed to start VM completion waiter: {error}"));
 
+    #[cfg(not(feature = "no-auto-start"))]
     info!("[OK] Default guest initialized");
 
     // The management console runs on the primary CPU (Core 0) while the vCPU

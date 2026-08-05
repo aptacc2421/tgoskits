@@ -1,8 +1,8 @@
 //! Management HTTP control plane.
 //!
 //! Served by an axum `Router` running on a tokio current-thread runtime
-//! (see [`server`]). The VM list/detail and lifecycle routes live in [`vm`].
-//! JSON is built with `serde_json`.
+//! (see [`server`]). The VM list/detail and start/stop lifecycle routes live
+//! in [`vm`]. JSON is built with `serde_json`.
 //!
 //! This whole module is only compiled under the `http-axum` feature, which is
 //! off by default. The hand-rolled HTTP/1.0 pilot was intentionally not

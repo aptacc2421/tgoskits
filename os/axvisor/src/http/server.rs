@@ -5,20 +5,22 @@
 //! but dispatch and JSON construction are delegated to axum + serde_json.
 //!
 //! ```text
-//! GET  /api/vms      → 200, JSON array (summary form)
-//! GET  /api/vms/{id} → 200, JSON detail (with vcpu_states) | 404
+//! GET  /api/vms            → 200, JSON array (summary form)
+//! GET  /api/vms/{id}       → 200, JSON detail (with vcpu_states) | 404
+//! POST /api/vms/{id}/start → 200 {"ok":true,"status":...} | 404 | 409 | 503
+//! POST /api/vms/{id}/stop  → 200 {"ok":true,"status":...} | 404 | 409 | 503
 //! ```
 //!
-//! PR B is the first in-hypervisor axum runtime validation. Two things are
-//! deliberately exercised:
+//! The tokio reactor is initialized with `enable_io()` only (no time driver),
+//! which needs only epoll, so no `timerfd` syscall is required.
 //!
-//! 1. The tokio reactor initializes with `enable_io()` only (no time driver),
-//!    so no `timerfd` syscall is required. If axum serve turns out to need the
-//!    time driver, PR D (timerfd syscall) becomes mandatory.
-//! 2. `tower::ServiceExt::oneshot` calls the router without TCP, so the
-//!    `http-test` self-test is deterministic and free of task-scheduling timing.
+//! `http-test` drives the router with `tower::ServiceExt::oneshot` (no TCP
+//! loopback), so the assertions are deterministic and free of task-scheduling
+//! timing. Under `no-auto-start` the default VMs stay in `Ready` and the
+//! self-test additionally drives one VM through a full
+//! start/409/stop/stopped/404 lifecycle.
 
-use axum::{Router, routing::get};
+use axum::{Router, routing::get, routing::post};
 
 use crate::http::vm;
 
@@ -27,6 +29,8 @@ pub fn router() -> Router {
     Router::new()
         .route("/api/vms", get(vm::list_vms))
         .route("/api/vms/{id}", get(vm::vm_detail))
+        .route("/api/vms/{id}/start", post(vm::vm_start))
+        .route("/api/vms/{id}/stop", post(vm::vm_stop))
 }
 
 /// Blocking serve: build a tokio current-thread runtime and hand it to axum.
@@ -53,37 +57,157 @@ pub fn serve() {
 
 /// `http-test` built-in self-test: drive the router with
 /// `tower::ServiceExt::oneshot` (no TCP loopback) and print the actual status
-/// codes for QEMU smoke-test regex assertion. Asserts the same contract as the
-/// pilot: `GET /api/vms -> 200` and `GET /api/vms/999 -> 404` (no specific VM
-/// id is bound).
+/// codes for QEMU smoke-test regex assertion. Asserts `GET /api/vms -> 200` and
+/// `GET /api/vms/999 -> 404` (no specific VM id is bound).
 #[cfg(feature = "http-test")]
 async fn self_test() {
+    let router = router();
+
+    let list = send_status(&router, "GET", "/api/vms").await;
+    info!("HTTP self-test: GET /api/vms -> {}", list);
+
+    let detail = send_status(&router, "GET", "/api/vms/999").await;
+    info!("HTTP self-test: GET /api/vms/999 -> {}", detail);
+
+    // With `no-auto-start` the default VMs are created but left in `Ready`, so
+    // the control API can be exercised over a full start/stop cycle.
+    #[cfg(feature = "no-auto-start")]
+    if let Some(id) = lifecycle_test::first_vm_id() {
+        lifecycle_test::self_test_lifecycle(router, id).await;
+    }
+}
+
+/// Send a single request to the router and return its status code.
+#[cfg(feature = "http-test")]
+async fn send_status(router: &Router, method: &str, uri: &str) -> axum::http::StatusCode {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
 
-    let router = router();
-
-    let list = router
+    router
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/vms")
+                .method(method)
+                .uri(uri)
                 .body(Body::empty())
                 .expect("failed to build request"),
         )
         .await
-        .expect("GET /api/vms failed");
-    info!("HTTP self-test: GET /api/vms -> {}", list.status());
+        .expect("request failed")
+        .status()
+}
 
-    let detail = router
-        .oneshot(
-            Request::builder()
-                .uri("/api/vms/999")
-                .body(Body::empty())
-                .expect("failed to build request"),
-        )
-        .await
-        .expect("GET /api/vms/999 failed");
-    info!("HTTP self-test: GET /api/vms/999 -> {}", detail.status());
+/// The control-lifecycle self-test, only built when both `http-test` and
+/// `no-auto-start` are enabled (the default VMs stay in `Ready`).
+///
+/// All polling here parks the task on a timer alarm (`std::thread::sleep` →
+/// ArceOS `run_queue::sleep_until`), which reschedules and lets other Core-0
+/// tasks (shell, VM manager) run while waiting — it does not busy-wait.
+#[cfg(all(feature = "http-test", feature = "no-auto-start"))]
+mod lifecycle_test {
+    use ax_std::time::{Duration, Instant};
+    use axum::Router;
+
+    use super::send_status;
+
+    /// The id of the first registered VM, if any.
+    pub(super) fn first_vm_id() -> Option<usize> {
+        crate::manager::AxvmManager::vm_list()
+            .first()
+            .map(|vm| vm.id())
+    }
+
+    /// Drive one VM through `start -> 409 -> stop -> stopped` and the 404 path,
+    /// verifying each expected outcome internally and printing a single
+    /// deterministic PASSED/FAILED sentinel for the QEMU regex matcher.
+    ///
+    /// `stop` is a request: the `Stopped` state only arrives once the vCPU
+    /// (running on another CPU) observes the request and exits, so the self-test
+    /// polls with explicit sleeps instead of blocking. `start` flips the VM status
+    /// to `Running` synchronously while the vCPU task is still being queued on its
+    /// target CPU, so before issuing a stop the self-test must wait until the vCPU
+    /// task has actually entered the guest (`running_vcpu_count`); otherwise a stop
+    /// issued in that window would strand the vCPU task waiting forever for a
+    /// `Running` state it already missed.
+    ///
+    /// Note: a `start` *after* stop is deliberately not asserted here. Restarting a
+    /// stopped VM spawns a fresh vCPU task that the scheduler never runs on its
+    /// pinned CPU once that CPU has idled (no IPI wake source in the current
+    /// build), leaving the VM stuck in `Running`. See the network-management
+    /// design doc for the tracked limitation.
+    pub(super) async fn self_test_lifecycle(router: Router, id: usize) {
+        let mut passed = true;
+
+        let start = send_status(&router, "POST", &format!("/api/vms/{id}/start")).await;
+        info!("HTTP self-test: POST /api/vms/{id}/start -> {}", start);
+        passed &= start == axum::http::StatusCode::OK;
+        passed &= poll_vcpu_running(id);
+
+        // A `Ready`/`Stopped`/`Running`-incompatible transition is a 409.
+        let invalid = send_status(&router, "POST", &format!("/api/vms/{id}/start")).await;
+        info!("HTTP self-test: POST start on running VM -> {}", invalid);
+        passed &= invalid == axum::http::StatusCode::CONFLICT;
+
+        let stop = send_status(&router, "POST", &format!("/api/vms/{id}/stop")).await;
+        info!("HTTP self-test: POST /api/vms/{id}/stop -> {}", stop);
+        passed &= stop == axum::http::StatusCode::OK;
+        passed &= poll_status(id, "stopped");
+
+        let bad = send_status(&router, "POST", "/api/vms/999/start").await;
+        info!("HTTP self-test: POST /api/vms/999/start -> {}", bad);
+        passed &= bad == axum::http::StatusCode::NOT_FOUND;
+
+        if passed {
+            info!("HTTP self-test: control lifecycle PASSED");
+        } else {
+            error!("HTTP self-test: control lifecycle FAILED");
+        }
+    }
+
+    /// Wait until a vCPU of the VM has actually entered the guest run loop.
+    ///
+    /// `start_vm()` returns as soon as the VM status is `Running`; the vCPU task is
+    /// spawned on the calling CPU and migrated to its pinned CPU asynchronously. A
+    /// stop issued before that migration completes is observed by a vCPU task still
+    /// waiting for the `Running` state and never becomes effective. Polling
+    /// `running_vcpu_count` closes that window deterministically. Returns whether
+    /// the vCPU entered within the poll bound, for the self-test's pass/fail
+    /// accounting.
+    pub(super) fn poll_vcpu_running(id: usize) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            let entered = crate::manager::AxvmManager::vm_by_id(id)
+                .map(|vm| vm.running_vcpu_count() > 0)
+                .unwrap_or(false);
+            if entered {
+                info!("HTTP self-test: VM[{id}] vCPU entered guest");
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        warn!("HTTP self-test: VM[{id}] vCPU did not enter guest within the poll bound");
+        false
+    }
+
+    /// Poll the VM status until it reports `want`, sleeping between checks so other
+    /// primary-CPU tasks are not starved. A wall-clock deadline is used rather than
+    /// an iteration count because the guest boot + stop completion latency is
+    /// timing-dependent (~100 ms in QEMU). Returns whether the status was reached,
+    /// for the self-test's internal pass/fail accounting.
+    pub(super) fn poll_status(id: usize, want: &str) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            let status = crate::manager::AxvmManager::vm_by_id(id)
+                .map(|vm| vm.status().as_str().to_owned())
+                .unwrap_or_default();
+            if status == want {
+                info!("HTTP self-test: VM[{id}] reached status '{want}'");
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        warn!("HTTP self-test: VM[{id}] did not reach '{want}' within the poll bound");
+        false
+    }
 }

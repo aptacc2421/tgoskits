@@ -430,8 +430,11 @@ impl VmRuntimeHandle {
     }
 
     pub(crate) fn mark_vcpu_running(&self) {
+        // Release publishes the "a vCPU has entered the guest" signal to the
+        // control plane, which observes it with an Acquire load
+        // (`running_halting_vcpu_count`) before issuing a request-stop.
         self.running_halting_vcpu_count
-            .fetch_add(1, Ordering::Relaxed);
+            .fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn publish_cpu_on_start_success(&self, ack: &crate::runtime::vcpus::CpuOnStartAck) {
@@ -445,6 +448,12 @@ impl VmRuntimeHandle {
                 count.checked_sub(1)
             })
             == Ok(1)
+    }
+
+    pub(crate) fn running_halting_vcpu_count(&self) -> usize {
+        // Acquire pairs with the Release increment in `mark_vcpu_running`: the
+        // caller observes "a vCPU has entered the guest" before acting on it.
+        self.running_halting_vcpu_count.load(Ordering::Acquire)
     }
 
     pub(crate) fn record_lifecycle_error(&self, error: AxVmError) {
@@ -1187,6 +1196,30 @@ impl AxVM {
                 phys_cpu_set: vcpu.phys_cpu_set(),
             })
             .collect()
+    }
+
+    /// Returns the number of vCPUs whose task has entered the guest run loop
+    /// and not yet finished exiting.
+    ///
+    /// A vCPU increments the count once, right before its first guest entry
+    /// (`vcpu_run`), and decrements it when it stops, so the count covers the
+    /// whole running + halting window: a non-zero value means at least one vCPU
+    /// task has been scheduled and is executing the guest. This differs from
+    /// `start_vm()`, which flips the VM status to `Running` synchronously while
+    /// the vCPU task may still be queued on another CPU.
+    ///
+    /// The count is a publish/observe signal between the vCPU cores and the
+    /// control plane: `mark_vcpu_running` increments it with `Release`, and this
+    /// getter loads it with `Acquire`. The control plane polls it to `> 0`
+    /// before issuing a request-stop, so a stop is only requested after a vCPU
+    /// has actually entered the guest; otherwise a stop issued before the vCPU
+    /// is scheduled would strand the vCPU task waiting forever for a `Running`
+    /// window it already missed. Because the count includes the halting window,
+    /// it must be read only as a monotone "a vCPU has entered" signal, not as an
+    /// exact "still running" count.
+    pub fn running_vcpu_count(&self) -> usize {
+        self.with_runtime(|runtime| Ok(runtime.running_halting_vcpu_count()))
+            .unwrap_or(0)
     }
 
     /// Returns the root address of the nested page table for the VM.
