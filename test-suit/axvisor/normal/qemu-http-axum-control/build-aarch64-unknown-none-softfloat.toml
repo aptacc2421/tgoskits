@@ -2,12 +2,14 @@
 # `no-auto-start` keeps the default VMs in `Ready` so the self-test can drive
 # one VM through the full lifecycle via the HTTP control API. The guest image is
 # embedded at build time (`image_location = "memory"` -> build.rs
-# include_bytes!), so no `fs` feature is required; the vmconfig (untracked under
-# `os/axvisor/tmp/vmconfigs/`) is generated locally.
+# include_bytes!), so no `fs` feature is required. The vmconfig is committed next
+# to this file and references the managed `qemu-aarch64` registry image; CI runs
+# `cargo xtask image pull qemu-aarch64 --output-dir tmp/axbuild/images` before
+# the test to provision the guest kernel (see the timer-stress jobs).
 features = [
     "http-test",
     "no-auto-start",
 ]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
-vm_configs = ["os/axvisor/tmp/vmconfigs/arceos-aarch64-http-control.toml"]
+vm_configs = ["test-suit/axvisor/normal/qemu-http-axum-control/aarch64-arceos-http-control.toml"]

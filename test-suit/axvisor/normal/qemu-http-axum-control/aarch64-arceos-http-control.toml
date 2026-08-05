@@ -1,0 +1,44 @@
+# AxVisor control-plane test guest (aarch64).
+#
+# Booted by the qemu-http-axum-control test via the HTTP start/stop API. The
+# kernel is baked into the hypervisor image at build time (`image_location =
+# "memory"` -> `build.rs` include_bytes!), so no `fs` feature is required.
+#
+# The guest kernel comes from the managed `qemu-aarch64` registry image, pulled
+# by `cargo xtask image pull qemu-aarch64 --output-dir tmp/axbuild/images`
+# (same provisioning step the gicv2/gicv3-timer-stress tests use; CI runs the
+# pull before the test). The path is relative to this file: four levels up
+# reaches the workspace root, then `tmp/axbuild/images/...`.
+#
+# `phys_cpu_ids = [1]` pins the vCPU to physical CPU 1, keeping the management
+# plane (HTTP server) on CPU 0 as PR1's core isolation requires.
+[base]
+id = 1
+name = "arceos-qemu"
+guest_type = "passthrough"
+cpu_num = 1
+phys_cpu_ids = [1]
+
+[kernel]
+entry_point = 0x8020_0000
+image_location = "memory"
+kernel_path = "../../../../tmp/axbuild/images/qemu-aarch64/arceos/arceos-qemu"
+kernel_load_addr = 0x8020_0000
+dtb_load_addr = 0x8000_0000
+
+# Memory regions with format (`base_paddr`, `size`, `flags`, `map_type`).
+# map_type: 0 = MAP_ALLOC, 1 = MAP_IDENTICAL, 2 = MAP_RESERVED.
+#
+# 256M MAP_IDENTICAL: enough for the 442KB ArceOS guest kernel and fits in a
+# `-m 1g` QEMU alongside the hypervisor (a 1G region overruns `-m 1g`). For
+# identical memory the hypervisor re-plans the kernel load address to wherever
+# the region lands (`vm::boot::BootImagePlan`), so the `0x8020_0000` entry/load
+# addresses in `[kernel]` are relative guidance only.
+memory_regions = [
+  [0x8000_0000, 0x1000_0000, 0x7, 1], # System RAM 256M MAP_IDENTICAL
+]
+
+# Physical-device selection. Virtual platform devices are machine-owned.
+[devices]
+passthrough = []
+disabled = [{ path = "/pcie@10000000" }]
