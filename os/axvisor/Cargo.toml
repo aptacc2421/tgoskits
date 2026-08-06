@@ -47,7 +47,7 @@ stack-protector = ["ax-std/stack-protector"]
 backtrace = ["ax-std/backtrace", "dep:axbacktrace"]
 test-backtrace-panic = ["backtrace"]
 test-panic-no-backtrace = ["dep:axbacktrace"]
-# axum-based management HTTP server (see doc/plan/axum-implementation.md).
+# axum-based management HTTP server (see src/http/ for the Router and self-test).
 # Off by default; enabled together with `http-axum`. Replaces the hand-rolled
 # pilot, which is intentionally not carried forward.
 http-test = ["http-axum", "dep:tower"]
