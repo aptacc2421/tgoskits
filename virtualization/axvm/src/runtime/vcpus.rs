@@ -479,7 +479,7 @@ fn vcpu_run() {
         "VM[{}] VCpu[{}] running on CPU{}...",
         vm.id(),
         vcpu.id(),
-        ax_hal::percpu::this_cpu_id()
+        crate::host::cpu::current_id()
     );
 
     loop {
