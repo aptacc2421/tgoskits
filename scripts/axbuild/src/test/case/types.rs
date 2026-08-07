@@ -62,6 +62,36 @@ pub(crate) struct HostHttpServerConfig {
     pub(crate) dir: Option<String>,
 }
 
+/// Host-side TCP probe configuration (`qemu-http-axum-tcp`).
+///
+/// Direction is the reverse of [`HostHttpServerConfig`]: instead of the host
+/// serving fixtures to the guest, the host acts as a *client* that probes a
+/// management API running *inside* the guest, over QEMU user-mode networking
+/// hostfwd (`-netdev user,hostfwd=tcp::<host_port>-:<guest_port>`). The probe
+/// makes real HTTP requests, asserts the response statuses, and relays a single
+/// PASSED/FAILED verdict to a guest endpoint (`POST /__probe_result`), which the
+/// hypervisor mirrors into the serial log for the QEMU runner's stream matcher.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct HostHttpProbeConfig {
+    /// Guest-side port the in-guest HTTP server binds to. The harness forwards a
+    /// freshly picked host port to it via hostfwd, so the two never collide.
+    #[serde(default = "default_probe_guest_port")]
+    pub(crate) guest_port: u16,
+    /// Total seconds the probe may spend retrying the initial TCP connect before
+    /// giving up (guest boot + network init). Must be less than the QEMU case
+    /// `timeout` so a broken server fails on the probe, not on the QEMU timeout.
+    #[serde(default = "default_probe_connect_timeout_secs")]
+    pub(crate) connect_timeout_secs: u64,
+}
+
+fn default_probe_guest_port() -> u16 {
+    8080
+}
+
+fn default_probe_connect_timeout_secs() -> u64 {
+    120
+}
+
 fn default_host_http_bind() -> String {
     "127.0.0.1".to_string()
 }

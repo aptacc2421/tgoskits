@@ -1,0 +1,36 @@
+args = [
+  "-nographic",
+  "-cpu",
+  "cortex-a72",
+  "-machine",
+  "virt,virtualization=on,gic-version=3",
+  "-smp",
+  "2",
+  "-m",
+  "512M",
+]
+# PR B: host->guest TCP integration verification over QEMU user-mode
+# networking. The driver appends `-netdev user,id=net0,hostfwd=tcp::<HOST>-:<GUEST>`
+# and `-device virtio-net-pci,netdev=net0` when `[host_http_probe]` is present,
+# then runs a host-side probe that dials the in-guest management API, checks the
+# response statuses (GET /api/vms -> 200, GET /api/vms/999 -> 404), and POSTs a
+# single PASSED/FAILED verdict to the test-only /__probe_result endpoint. That
+# endpoint relays the verdict into the serial log, and the runner's stream
+# matcher stops at the FIRST marker — so success requires the final `tcp PASSED`
+# sentinel, which only appears when the probe observed the expected statuses
+# over real TCP. The `[host_http_probe]` connect timeout (default 120s) must be
+# less than `timeout` so a broken server fails on the probe, not on the QEMU
+# timeout.
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?i)kernel panic",
+  "HTTP self-test: tcp FAILED",
+]
+success_regex = [
+  "HTTP self-test: tcp PASSED",
+]
+timeout = 180
+to_bin = true
+uefi = false
+
+[host_http_probe]

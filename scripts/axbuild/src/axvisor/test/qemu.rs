@@ -21,7 +21,7 @@ use super::{
 use crate::{
     axvisor::{ArgsTestQemu, Axvisor, build, rootfs},
     context::{AxvisorCliArgs, ResolvedAxvisorRequest, SnapshotPersistence},
-    test::{case as test_case, qemu as test_qemu},
+    test::{case as test_case, host_probe, qemu as test_qemu},
 };
 
 const VCPU_RUNTIME_ERROR: &str = r"VM\[\d+\] run VCpu\[\d+\] get error";
@@ -332,9 +332,41 @@ impl Axvisor {
         asset_config: &test_case::CaseAssetConfig,
     ) -> anyhow::Result<()> {
         let prepare_started = Instant::now();
-        let (qemu, prepared_assets) = self
+        let (mut qemu, prepared_assets) = self
             .load_qemu_case_config(request, case, asset_config)
             .await?;
+
+        // Optional host->guest TCP probe over QEMU user-mode networking. When
+        // `[host_http_probe]` is configured, the host acts as a *client* that
+        // dials a management API inside the guest through a hostfwd port, checks
+        // the response statuses, and relays a PASSED/FAILED verdict to
+        // `POST /__probe_result`. The probe must live for the whole run, so its
+        // guard is spawned here and dropped at scope end (after QEMU exits).
+        let mut host_probe_guard = None;
+        if let Some(probe_config) =
+            test_qemu::load_qemu_case_extra_config(&case.case.case.qemu_config_path)?
+                .host_http_probe
+        {
+            let host_port = pick_free_local_port()?;
+            // Each QEMU option and its value must be a separate argv element
+            // (QEMU takes the value of `-netdev`/`-device` from the following
+            // argument), matching how the `.toml` config stores them.
+            qemu.args.extend([
+                "-netdev".to_string(),
+                format!(
+                    "user,id=net0,hostfwd=tcp::{host_port}-:{}",
+                    probe_config.guest_port
+                ),
+                "-device".to_string(),
+                "virtio-net-pci,netdev=net0".to_string(),
+            ]);
+            host_probe_guard = Some(host_probe::HostHttpProbeGuard::start(
+                &probe_config,
+                host_port,
+                &case.case.case.name,
+            )?);
+        }
+
         test_case::run_qemu_with_prepared_case_assets(
             &mut self.app,
             cargo,
@@ -347,8 +379,23 @@ impl Axvisor {
                 qemu_timing_fields: None,
             },
         )
-        .await
+        .await?;
+
+        // Joins the probe thread now that QEMU has exited.
+        drop(host_probe_guard);
+        Ok(())
     }
+}
+
+/// Pick a free loopback port for the QEMU hostfwd listen, then release it so
+/// QEMU can bind it. A freshly-assigned ephemeral port avoids stale-port
+/// collisions from CI runner reuse (the same ports are never parked on a
+/// previous run's leftover QEMU). A small bind-release-bind TOCTOU window
+/// exists but is acceptable for a local test harness.
+fn pick_free_local_port() -> anyhow::Result<u16> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .context("failed to pick a free local port for QEMU hostfwd")?;
+    Ok(listener.local_addr()?.port())
 }
 
 fn axvisor_qemu_test_build_args(arch: &str, config: Option<PathBuf>) -> AxvisorCliArgs {

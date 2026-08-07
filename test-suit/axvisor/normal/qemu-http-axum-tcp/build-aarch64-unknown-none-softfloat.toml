@@ -1,0 +1,12 @@
+# PR B: axum management HTTP API host->guest TCP integration verification.
+# http-tcp-test implies http-axum (tokio + axum + serde_json) and adds the
+# test-only POST /__probe_result relay endpoint. No tower/oneshot self-test is
+# built: the TcpListener::bind + axum::serve path runs for real, and the host
+# probe (QEMU hostfwd) makes actual HTTP requests to the in-guest API.
+# fs/nvme is not enabled: QEMU has no disk and fs would panic at boot.
+features = [
+    "http-tcp-test",
+]
+log = "Info"
+target = "aarch64-unknown-none-softfloat"
+vm_configs = []

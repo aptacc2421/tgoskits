@@ -3,6 +3,7 @@ pub(crate) mod build;
 pub(crate) mod case;
 pub(crate) mod cross;
 pub(crate) mod host_http;
+pub(crate) mod host_probe;
 pub(crate) mod qemu;
 pub(crate) mod std;
 pub(crate) mod suite;

@@ -93,6 +93,24 @@ pub async fn vm_stop(Path(id_str): Path<String>) -> Result<Json<Value>, StatusCo
     vm_action(&id_str, VmAction::Stop)
 }
 
+/// `POST /__probe_result` — test-only relay endpoint for the host-side TCP probe
+/// (`http-tcp-test` / `qemu-http-axum-tcp`).
+///
+/// The host probe checks the management API over a real TCP connection
+/// (QEMU hostfwd), independently asserting the response statuses, then POSTs a
+/// single `PASSED`/`FAILED` verdict here. This handler only mirrors that verdict
+/// into the serial log, where the QEMU runner's stream matcher picks it up and
+/// terminates the run. The assertion itself happens host-side, so the sentinel
+/// reflects the statuses the probe actually received over the wire.
+#[cfg(feature = "http-tcp-test")]
+pub async fn probe_result(body: String) -> StatusCode {
+    match body.trim() {
+        "PASSED" => info!("HTTP self-test: tcp PASSED"),
+        _ => error!("HTTP self-test: tcp FAILED"),
+    }
+    StatusCode::OK
+}
+
 /// A lifecycle action on a VM.
 enum VmAction {
     Start,

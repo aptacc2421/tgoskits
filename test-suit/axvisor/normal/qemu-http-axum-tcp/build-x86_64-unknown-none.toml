@@ -1,0 +1,18 @@
+# PR B: axum management HTTP API host->guest TCP integration verification
+# (x86_64). http-tcp-test implies http-axum (tokio + axum + serde_json) and
+# adds the test-only POST /__probe_result relay endpoint. fs/nvme is not
+# enabled: this test only verifies the management HTTP server runs.
+features = [
+    "http-tcp-test",
+]
+log = "Info"
+target = "x86_64-unknown-none"
+vm_configs = []
+
+# httparse 1.10 (a hyper HTTP/1 parsing dependency) trips a rustc-LLVM codegen
+# error at opt-level=3 on this bare-metal target where SSE is disabled: its
+# runtime SSE42 fallback (#[target_feature(enable = "sse42")]) cannot be
+# lowered. Disable SIMD via the official escape hatch (x86_64 only; the aarch64
+# NEON path compiles fine and does not need this).
+[env]
+CARGO_CFG_HTTPARSE_DISABLE_SIMD = "1"

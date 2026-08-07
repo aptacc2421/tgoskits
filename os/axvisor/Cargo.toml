@@ -17,6 +17,7 @@ include = [
     "build.rs",
     "configs/**",
     "xtask/src/**",
+    "ui/**",
     "README.md",
     "LICENSE*",
 ]
@@ -52,6 +53,12 @@ test-panic-no-backtrace = ["dep:axbacktrace"]
 # pilot, which is intentionally not carried forward.
 http-test = ["http-axum", "dep:tower"]
 http-axum = ["dep:axum", "dep:tokio", "dep:serde_json"]
+# Real-TCP probe relay (`qemu-http-axum-tcp`): adds the test-only
+# `POST /__probe_result` endpoint so a host-side probe can relay its verdict
+# into the serial log after checking the management API over QEMU hostfwd.
+# Unlike `http-test`, no `tower`/oneshot self-test is built, so the management
+# server binds and serves immediately.
+http-tcp-test = ["http-axum"]
 # Do not auto-boot the default VMs at startup; the HTTP control plane starts
 # and stops them on demand (VMs are created and stay in `Ready`).
 no-auto-start = []
@@ -59,6 +66,11 @@ no-auto-start = []
 # control self-test and the no-auto-start lifecycle test, then drives one default
 # VM through remove -> create -> ready -> 409 -> remove -> 404.
 http-dynamic-test = ["http-test", "no-auto-start"]
+# Serve the web management dashboard from the filesystem. Embeds the UI assets
+# (`ui/`) into the binary at build time and writes them to `/web/` at startup;
+# requires the `fs` feature plus a platform block driver (e.g. `ax-driver/nvme`)
+# so the rootfs is mounted and writable.
+web-ui = ["http-axum", "fs"]
 
 [dependencies]
 shlex.workspace = true
