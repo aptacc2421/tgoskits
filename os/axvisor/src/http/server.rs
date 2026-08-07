@@ -62,9 +62,12 @@ pub fn serve() {
 }
 
 /// `http-test` built-in self-test: drive the router with
-/// `tower::ServiceExt::oneshot` (no TCP loopback) and print the actual status
-/// codes for QEMU smoke-test regex assertion. Asserts `GET /api/vms -> 200` and
-/// `GET /api/vms/999 -> 404` (no specific VM id is bound).
+/// `tower::ServiceExt::oneshot` (no TCP loopback) and assert the read-only
+/// endpoints: `GET /api/vms -> 200` and `GET /api/vms/999 -> 404` (no specific
+/// VM id is bound). The per-request status lines are diagnostics only; the QEMU
+/// regex matcher stops at the FIRST marker it sees, so two independent success
+/// lines could not assert both endpoints. The test therefore prints a single
+/// `readonly PASSED`/`readonly FAILED` sentinel that reflects both assertions.
 #[cfg(feature = "http-test")]
 async fn self_test() {
     let router = router();
@@ -74,6 +77,13 @@ async fn self_test() {
 
     let detail = send_status(&router, "GET", "/api/vms/999").await;
     info!("HTTP self-test: GET /api/vms/999 -> {}", detail);
+
+    let passed = list == axum::http::StatusCode::OK && detail == axum::http::StatusCode::NOT_FOUND;
+    if passed {
+        info!("HTTP self-test: readonly PASSED");
+    } else {
+        error!("HTTP self-test: readonly FAILED");
+    }
 
     // With `no-auto-start` the default VMs are created but left in `Ready`, so
     // the control API can be exercised over a full start/stop cycle.

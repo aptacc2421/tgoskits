@@ -133,7 +133,7 @@ curl -s http://localhost:18081/api/vms/1                # 404（已移除）
 x86_64 需要 OVMF UEFI 引导，产物含 PE32+ EFI app。步骤（工作区根目录执行）：
 
 ```bash
-# 1. 由测试 harness 刷新产物（x86_64 case 用 vmx variant）
+# 1. 由测试 harness 刷新产物（x86_64 case 用 `-cpu host,+vmx-*`，需 Intel KVM 主机）
 cargo xtask axvisor test qemu --test-case http-axum-readonly --arch x86_64
 
 # 2. 手工引导 + hostfwd

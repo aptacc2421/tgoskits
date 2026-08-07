@@ -12,17 +12,22 @@ args = [
 # PR B: first in-hypervisor axum runtime verification.
 # - tokio current_thread runtime is initialized with enable_io() only (needs
 #   only epoll, no timerfd syscall).
-# - the tower::ServiceExt::oneshot self-test avoids TCP and prints
-#   deterministic status codes.
-# - if enable_io() is insufficient (time driver / timerfd required), a panic
-#   hits fail_regex.
+# - the tower::ServiceExt::oneshot self-test avoids TCP and prints the two
+#   read-only status codes, then a single PASSED/FAILED sentinel.
+# - the runner's stream matcher stops at the FIRST marker, so the two per-request
+#   status lines cannot be asserted independently; success requires the final
+#   `readonly PASSED` sentinel, which the self-test prints only when both
+#   GET /api/vms -> 200 and GET /api/vms/999 -> 404 hold.
+# - any assertion failure prints `readonly FAILED` (caught by fail_regex), and
+#   if enable_io() is insufficient (time driver / timerfd required) a panic
+#   also hits fail_regex.
 fail_regex = [
   "(?i)\\bpanic(?:ked)?\\b",
   "(?i)kernel panic",
+  "HTTP self-test: readonly FAILED",
 ]
 success_regex = [
-  "HTTP self-test: GET /api/vms -> 200",
-  "HTTP self-test: GET /api/vms/999 -> 404",
+  "HTTP self-test: readonly PASSED",
 ]
 timeout = 120
 to_bin = true

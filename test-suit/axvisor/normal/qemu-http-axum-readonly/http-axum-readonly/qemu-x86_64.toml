@@ -1,0 +1,37 @@
+args = [
+  "-no-user-config",
+  "-display",
+  "none",
+  "-serial",
+  "stdio",
+  "-monitor",
+  "none",
+  "-cpu",
+  "host,-la57,+vmx-ept,+vmx-unrestricted-guest,+vmx-flexpriority",
+  "-machine",
+  "q35,smbus=off,usb=off,graphics=off",
+  "-smp",
+  "2",
+  "-accel",
+  "kvm",
+  "-m",
+  "512M",
+  "-vga",
+  "none",
+]
+timeout = 600
+# Same single-sentinel contract as qemu-aarch64.toml: the runner's stream
+# matcher stops at the FIRST marker, so success requires the final `readonly
+# PASSED` sentinel (printed only when both GET /api/vms -> 200 and
+# GET /api/vms/999 -> 404 hold); any assertion failure prints `readonly FAILED`,
+# caught by fail_regex. The `+vmx-*` CPU flags require an Intel KVM host; on an
+# AMD host, add a qemu-x86_64-svm.toml variant following the `smoke-svm` case.
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "HTTP self-test: readonly FAILED",
+]
+success_regex = [
+  "HTTP self-test: readonly PASSED",
+]
+to_bin = true
+uefi = true
