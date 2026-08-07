@@ -17,7 +17,6 @@ include = [
     "build.rs",
     "configs/**",
     "xtask/src/**",
-    "ui/**",
     "README.md",
     "LICENSE*",
 ]
@@ -66,11 +65,6 @@ no-auto-start = []
 # control self-test and the no-auto-start lifecycle test, then drives one default
 # VM through remove -> create -> ready -> 409 -> remove -> 404.
 http-dynamic-test = ["http-test", "no-auto-start"]
-# Serve the web management dashboard from the filesystem. Embeds the UI assets
-# (`ui/`) into the binary at build time and writes them to `/web/` at startup;
-# requires the `fs` feature plus a platform block driver (e.g. `ax-driver/nvme`)
-# so the rootfs is mounted and writable.
-web-ui = ["http-axum", "fs"]
 
 [dependencies]
 shlex.workspace = true

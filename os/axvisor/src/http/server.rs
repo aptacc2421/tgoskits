@@ -13,9 +13,6 @@
 //! POST   /api/vms/{id}/stop  → 200 {"ok":true,"status":...} | 404 | 409 | 503
 //! ```
 //!
-//! Under `web-ui`, the dashboard is also served: `GET /` → the index page and
-//! `GET /style.css` / `GET /dashboard.js` → the static assets (see [`web_ui`]).
-//!
 //! The tokio reactor is initialized with `enable_io()` only (no time driver),
 //! which needs only epoll, so no `timerfd` syscall is required.
 //!
@@ -39,11 +36,6 @@ pub fn router() -> Router {
         .route("/api/vms/{id}/start", post(vm::vm_start))
         .route("/api/vms/{id}/stop", post(vm::vm_stop));
 
-    #[cfg(feature = "web-ui")]
-    {
-        router = router.merge(crate::http::web_ui::ui_routes());
-    }
-
     #[cfg(feature = "http-tcp-test")]
     {
         router = router.route("/__probe_result", post(vm::probe_result));
@@ -58,11 +50,6 @@ pub fn router() -> Router {
 /// the runtime is built here. Only the IO driver is enabled — the epoll
 /// reactor suffices for `axum::serve`; a time driver would need `timerfd`.
 pub fn serve() {
-    // Write the embedded web dashboard to the rootfs before serving; the
-    // filesystem is mounted by the time `main` spawns this task.
-    #[cfg(feature = "web-ui")]
-    crate::http::web_ui::init();
-
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()
@@ -110,35 +97,6 @@ async fn self_test() {
     #[cfg(feature = "no-auto-start")]
     if let Some(id) = lifecycle_test::first_vm_id() {
         lifecycle_test::self_test_lifecycle(router, id).await;
-    }
-
-    // Verify the web dashboard routes when `web-ui` is enabled. `init()` has
-    // already written the embedded assets to `/web/` before the runtime was
-    // built, so the filesystem reads below resolve.
-    #[cfg(feature = "web-ui")]
-    {
-        // `router` here is the local binding from the top of `self_test`; use
-        // the qualified path to re-invoke the module-level `router()` builder
-        // (the top binding may already be moved into `lifecycle_test`).
-        let router = self::router();
-        let index = send_status(&router, "GET", "/").await;
-        info!("HTTP self-test: GET / -> {}", index);
-        let css = send_status(&router, "GET", "/style.css").await;
-        info!("HTTP self-test: GET /style.css -> {}", css);
-        let js = send_status(&router, "GET", "/dashboard.js").await;
-        info!("HTTP self-test: GET /dashboard.js -> {}", js);
-        let missing = send_status(&router, "GET", "/nonexistent.js").await;
-        info!("HTTP self-test: GET /nonexistent.js -> {}", missing);
-
-        let passed = index == axum::http::StatusCode::OK
-            && css == axum::http::StatusCode::OK
-            && js == axum::http::StatusCode::OK
-            && missing == axum::http::StatusCode::NOT_FOUND;
-        if passed {
-            info!("HTTP self-test: web-ui PASSED");
-        } else {
-            error!("HTTP self-test: web-ui FAILED");
-        }
     }
 }
 

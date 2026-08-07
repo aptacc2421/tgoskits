@@ -209,10 +209,7 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            mpsc,
-        },
+        sync::atomic::AtomicBool,
         thread,
         time::Duration,
     };
