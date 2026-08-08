@@ -10,9 +10,14 @@
 //! the sentinel and terminates the run, exactly as it does for the in-guest
 //! self-test sentinels.
 //!
-//! The probe is currently hardcoded to the read-only contract (the same two
-//! endpoints `http-test`'s oneshot self-test covers): `GET /api/vms -> 200` and
-//! `GET /api/vms/999 -> 404`.
+//! The probe asserts the management control plane's security boundary over real
+//! TCP: an unauthenticated write request (`POST /api/vms/999/start` with no
+//! `Authorization` header) must be rejected with 401 — the access-denied
+//! regression the security review requires — then verifies the authenticated
+//! contract (`GET /api/vms -> 200`, `GET /api/vms/999 -> 404`, and an
+//! authenticated write to an unknown VM -> 404). All authenticated requests
+//! carry the `token` from the case config, which must match the guest build's
+//! `[env] AXVM_HTTP_TOKEN`.
 
 use std::{
     io::{Read, Write},
@@ -55,12 +60,14 @@ impl HostHttpProbeGuard {
 
         let thread_addr = addr.clone();
         let thread_case_name = case_name.clone();
+        let token = config.token.clone();
         let thread = thread::spawn(move || {
             let _ = ready_tx.send(());
             run_probe(
                 &thread_addr,
                 &thread_case_name,
                 connect_timeout,
+                token.as_deref(),
                 &thread_stop,
             );
         });
@@ -87,13 +94,20 @@ impl Drop for HostHttpProbeGuard {
     }
 }
 
-fn run_probe(addr: &str, case_name: &str, connect_timeout: Duration, stop: &AtomicBool) {
+fn run_probe(
+    addr: &str,
+    case_name: &str,
+    connect_timeout: Duration,
+    token: Option<&str>,
+    stop: &AtomicBool,
+) {
     let started = Instant::now();
 
-    // Wait for the guest HTTP server to accept connections. `GET /api/vms` is
-    // retried until it yields a parsed status (readiness), the connect timeout
-    // elapses, or a stop is requested. A parsed but wrong status is still
-    // "ready"; the assertion below records it as a failure.
+    // Wait for the guest HTTP server to accept connections. `GET /api/vms` is a
+    // read-only route, so this readiness probe needs no token; it is retried
+    // until it yields a parsed status, the connect timeout elapses, or a stop
+    // is requested. A parsed but wrong status is still "ready"; the assertion
+    // below records it as a failure.
     let mut passed = true;
     let list = poll_status(addr, "/api/vms", started, connect_timeout, stop);
     match list {
@@ -110,9 +124,28 @@ fn run_probe(addr: &str, case_name: &str, connect_timeout: Duration, stop: &Atom
         }
     }
 
-    // The server is up; single attempt for the 404 path.
+    // Access-denied regression (security review): an unauthenticated write to a
+    // mutating route must be rejected with 401. The auth gate runs before any
+    // VM lookup, so this holds regardless of whether VM 999 exists.
     if passed {
-        match request_status(addr, "GET", "/api/vms/999", None) {
+        match request_status(addr, "POST", "/api/vms/999/start", None, None) {
+            Some(status) => {
+                println!(
+                    "  host http probe: {case_name}: POST /api/vms/999/start (no token) -> \
+                     {status} (expect 401)"
+                );
+                passed &= status == 401;
+            }
+            None => {
+                eprintln!("  host http probe: {case_name}: unauthenticated write request failed");
+                passed = false;
+            }
+        }
+    }
+
+    // The server is up; single attempt for the authenticated 404 path.
+    if passed {
+        match request_status(addr, "GET", "/api/vms/999", None, token) {
             Some(status) => {
                 println!(
                     "  host http probe: {case_name}: GET /api/vms/999 -> {status} (expect 404)"
@@ -126,12 +159,32 @@ fn run_probe(addr: &str, case_name: &str, connect_timeout: Duration, stop: &Atom
         }
     }
 
-    // Relay the verdict. The hypervisor mirrors it into the serial log, where
-    // the QEMU runner's stream matcher sees the sentinel and ends the run. If
-    // the relay itself fails (e.g. the server disappeared), no sentinel ever
-    // appears in serial and the run ends on the QEMU timeout — still a failure.
+    // Authenticated write: with the token the gate admits the request, and an
+    // unknown VM still yields the contract's 404. Proves writes are reachable
+    // with valid credentials rather than silently open or always denied.
+    if passed {
+        match request_status(addr, "POST", "/api/vms/999/start", None, token) {
+            Some(status) => {
+                println!(
+                    "  host http probe: {case_name}: POST /api/vms/999/start (with token) -> \
+                     {status} (expect 404)"
+                );
+                passed &= status == 404;
+            }
+            None => {
+                eprintln!("  host http probe: {case_name}: authenticated write request failed");
+                passed = false;
+            }
+        }
+    }
+
+    // Relay the verdict (authenticated: `/__probe_result` is a protected route).
+    // The hypervisor mirrors it into the serial log, where the QEMU runner's
+    // stream matcher sees the sentinel and ends the run. If the relay itself
+    // fails (e.g. the server disappeared), no sentinel ever appears in serial
+    // and the run ends on the QEMU timeout — still a failure.
     let verdict = if passed { "PASSED" } else { "FAILED" };
-    match request_status(addr, "POST", "/__probe_result", Some(verdict)) {
+    match request_status(addr, "POST", "/__probe_result", Some(verdict), token) {
         Some(status) => {
             println!("  host http probe: {case_name}: verdict {verdict} relayed (status {status})")
         }
@@ -141,7 +194,8 @@ fn run_probe(addr: &str, case_name: &str, connect_timeout: Duration, stop: &Atom
 
 /// Retry a request until it yields a parsed status, the deadline elapses, or a
 /// stop is requested. Used for the first request, which doubles as the
-/// readiness probe.
+/// readiness probe. The readiness route (`GET /api/vms`) is open, so no token
+/// is sent.
 fn poll_status(
     addr: &str,
     path: &str,
@@ -156,7 +210,7 @@ fn poll_status(
         if started.elapsed() >= connect_timeout {
             return None;
         }
-        if let Some(status) = request_status(addr, "GET", path, None) {
+        if let Some(status) = request_status(addr, "GET", path, None, None) {
             return Some(status);
         }
         thread::sleep(CONNECT_RETRY_INTERVAL);
@@ -165,7 +219,15 @@ fn poll_status(
 
 /// Send one HTTP/1.1 request over a fresh connection and parse the status code.
 /// `body` (when present) is sent as the request body with a JSON content type.
-fn request_status(addr: &str, method: &str, path: &str, body: Option<&str>) -> Option<u16> {
+/// `token` (when present) adds an `Authorization: Bearer <token>` header for
+/// protected (mutating) routes.
+fn request_status(
+    addr: &str,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    token: Option<&str>,
+) -> Option<u16> {
     let Ok(mut stream) = TcpStream::connect(addr) else {
         return None;
     };
@@ -173,6 +235,9 @@ fn request_status(addr: &str, method: &str, path: &str, body: Option<&str>) -> O
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
 
     let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\n");
+    if let Some(token) = token {
+        request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
     if let Some(body) = body {
         request.push_str(&format!(
             "Content-Type: application/json\r\nContent-Length: {}\r\n",
@@ -216,9 +281,18 @@ mod tests {
 
     use super::{parse_status, poll_status, request_status};
 
-    /// Serve canned responses on a background thread: `/api/vms` -> 200,
-    /// `/api/vms/999` -> 404, anything else -> 200 with the request body echoed
-    /// in a header (so the relay POST can be observed).
+    /// Bearer token the fake server accepts, mirroring the guest build's
+    /// `[env] AXVM_HTTP_TOKEN` for the control-plane auth gate.
+    const TEST_TOKEN: &str = "test-token";
+
+    /// Serve canned responses on a background thread, emulating the guest's
+    /// control-plane auth boundary:
+    /// - `GET` routes are open: `/api/vms` -> 200, `/api/vms/999` -> 404.
+    /// - Any unauthenticated write (`POST` with no matching
+    ///   `Authorization: Bearer <token>` header, including the `/__probe_result`
+    ///   relay) -> 401.
+    /// - An authenticated write -> routed normally (404 for the unknown VM,
+    ///   200 for the `/__probe_result` relay).
     fn start_fake_server() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake server");
         let port = listener.local_addr().unwrap().port();
@@ -244,7 +318,13 @@ mod tests {
                 }
                 let head = String::from_utf8_lossy(&request);
                 let first_line = head.lines().next().unwrap_or("");
-                let status = if first_line.contains("/api/vms/999") {
+                let authorized = head
+                    .lines()
+                    .any(|line| line == format!("Authorization: Bearer {TEST_TOKEN}"));
+                let is_write = first_line.starts_with("POST ");
+                let status = if is_write && !authorized {
+                    "401 Unauthorized"
+                } else if first_line.contains("/api/vms/999") {
                     "404 Not Found"
                 } else {
                     "200 OK"
@@ -275,9 +355,34 @@ mod tests {
     fn request_status_returns_expected_codes_from_fake_server() {
         let port = start_fake_server();
         let addr = format!("127.0.0.1:{port}");
-        assert_eq!(request_status(&addr, "GET", "/api/vms", None), Some(200));
         assert_eq!(
-            request_status(&addr, "GET", "/api/vms/999", None),
+            request_status(&addr, "GET", "/api/vms", None, None),
+            Some(200)
+        );
+        assert_eq!(
+            request_status(&addr, "GET", "/api/vms/999", None, None),
+            Some(404)
+        );
+    }
+
+    #[test]
+    fn unauthenticated_write_is_denied_with_401() {
+        let port = start_fake_server();
+        let addr = format!("127.0.0.1:{port}");
+        assert_eq!(
+            request_status(&addr, "POST", "/api/vms/999/start", None, None),
+            Some(401)
+        );
+    }
+
+    #[test]
+    fn authenticated_write_reaches_the_route() {
+        let port = start_fake_server();
+        let addr = format!("127.0.0.1:{port}");
+        // With the token the gate admits the write; the unknown VM still yields
+        // the contract's 404.
+        assert_eq!(
+            request_status(&addr, "POST", "/api/vms/999/start", None, Some(TEST_TOKEN)),
             Some(404)
         );
     }
@@ -316,9 +421,21 @@ mod tests {
     fn request_status_handles_body_relay() {
         let port = start_fake_server();
         let addr = format!("127.0.0.1:{port}");
+        // The relay endpoint is a protected route: authenticated -> 200,
+        // unauthenticated -> 401.
         assert_eq!(
-            request_status(&addr, "POST", "/__probe_result", Some("PASSED")),
+            request_status(
+                &addr,
+                "POST",
+                "/__probe_result",
+                Some("PASSED"),
+                Some(TEST_TOKEN)
+            ),
             Some(200)
+        );
+        assert_eq!(
+            request_status(&addr, "POST", "/__probe_result", Some("FAILED"), None),
+            Some(401)
         );
     }
 
@@ -331,6 +448,6 @@ mod tests {
             .unwrap()
             .port();
         let addr = format!("127.0.0.1:{port}");
-        assert_eq!(request_status(&addr, "GET", "/api/vms", None), None);
+        assert_eq!(request_status(&addr, "GET", "/api/vms", None, None), None);
     }
 }

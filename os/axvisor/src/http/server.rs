@@ -13,6 +13,11 @@
 //! POST   /api/vms/{id}/stop  → 200 {"ok":true,"status":...} | 404 | 409 | 503
 //! ```
 //!
+//! Mutating routes (`create`/`delete`/`start`/`stop`, plus the test-only
+//! `POST /__probe_result`) require `Authorization: Bearer <token>` with the
+//! build-time `[env] AXVM_HTTP_TOKEN`; see [`crate::http::auth`]. GET routes
+//! are open. The listener binds [`bind_addr`], loopback by default.
+//!
 //! The tokio reactor is initialized with `enable_io()` only (no time driver),
 //! which needs only epoll, so no `timerfd` syscall is required.
 //!
@@ -44,6 +49,17 @@ pub fn router() -> Router {
     router
 }
 
+/// Bind address for the management HTTP server.
+///
+/// Defaults to loopback (`127.0.0.1:8080`) so a stock `http-axum` build is not
+/// reachable from the management network. Test/dev flows that need QEMU
+/// hostfwd to reach the in-guest listener must opt in to all interfaces by
+/// setting `[env] AXVM_HTTP_BIND = "0.0.0.0:8080"` in their build config; the
+/// mutating routes still require the bearer token regardless of the bind.
+fn bind_addr() -> &'static str {
+    option_env!("AXVM_HTTP_BIND").unwrap_or("127.0.0.1:8080")
+}
+
 /// Blocking serve: build a tokio current-thread runtime and hand it to axum.
 ///
 /// `main` spawns this on its own task via `std::thread::spawn(|| http::serve())`;
@@ -60,10 +76,11 @@ pub fn serve() {
         #[cfg(feature = "http-dynamic-test")]
         dynamic_test::self_test_dynamic().await;
 
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
+        let bind = bind_addr();
+        let listener = tokio::net::TcpListener::bind(bind)
             .await
             .expect("failed to bind management HTTP server");
-        info!("management HTTP server (axum) listening on 0.0.0.0:8080");
+        info!("management HTTP server (axum) listening on {bind}");
         axum::serve(listener, router()).await.expect("server error");
     });
 }
@@ -101,18 +118,25 @@ async fn self_test() {
 }
 
 /// Send a single request to the router and return its status code.
+///
+/// When the image was built with `[env] AXVM_HTTP_TOKEN`, the request carries
+/// the matching `Authorization: Bearer <token>` header so write-path
+/// self-tests pass the control-plane gate. Builds without a token send no
+/// header (their read-only self-tests hit the open GET routes).
 #[cfg(feature = "http-test")]
 async fn send_status(router: &Router, method: &str, uri: &str) -> axum::http::StatusCode {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
 
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(token) = option_env!("AXVM_HTTP_TOKEN") {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
     router
         .clone()
         .oneshot(
-            Request::builder()
-                .method(method)
-                .uri(uri)
+            builder
                 .body(Body::empty())
                 .expect("failed to build request"),
         )
@@ -312,15 +336,21 @@ mod dynamic_test {
         }
     }
 
-    /// POST a create request with the given TOML body.
+    /// POST a create request with the given TOML body. The request carries the
+    /// build-time bearer token so the write-path gate admits it (the dynamic
+    /// build config sets `[env] AXVM_HTTP_TOKEN`).
     async fn send_create(router: &axum::Router, toml: &str) -> axum::http::StatusCode {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/vms/create")
+            .header("content-type", "application/json");
+        if let Some(token) = option_env!("AXVM_HTTP_TOKEN") {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
         router
             .clone()
             .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/vms/create")
-                    .header("content-type", "application/json")
+                builder
                     .body(Body::from(json!({ "toml": toml }).to_string()))
                     .expect("failed to build request"),
             )

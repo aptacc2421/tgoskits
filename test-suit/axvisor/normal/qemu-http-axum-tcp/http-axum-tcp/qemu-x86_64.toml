@@ -22,10 +22,12 @@ args = [
 # Same single-sentinel contract as qemu-aarch64.toml: the driver appends the
 # hostfwd netdev + virtio-net-pci device when `[host_http_probe]` is present,
 # and a host-side probe drives the in-guest management API over real TCP,
-# POSTing its PASSED/FAILED verdict to /__probe_result. Success requires the
-# final `tcp PASSED` sentinel. The `+vmx-*` CPU flags require an Intel KVM host;
-# on an AMD host, add a qemu-x86_64-svm.toml variant following the `smoke-svm`
-# case.
+# asserting the auth boundary (unauthenticated write -> 401) and the
+# authenticated contract, then POSTing its PASSED/FAILED verdict to
+# /__probe_result. Success requires the final `tcp PASSED` sentinel. `token`
+# must match the guest build's `[env] AXVM_HTTP_TOKEN`. The `+vmx-*` CPU flags
+# require an Intel KVM host; on an AMD host, add a qemu-x86_64-svm.toml variant
+# following the `smoke-svm` case.
 fail_regex = [
   "(?i)\\bpanic(?:ked)?\\b",
   "HTTP self-test: tcp FAILED",
@@ -38,3 +40,4 @@ to_bin = true
 uefi = true
 
 [host_http_probe]
+token = "axvisor-http-test-token"

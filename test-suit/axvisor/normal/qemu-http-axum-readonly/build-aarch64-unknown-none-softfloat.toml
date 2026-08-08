@@ -8,3 +8,10 @@ features = [
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
 vm_configs = []
+
+# This test artifact is also used by the quickstart's manual hostfwd + curl
+# flow, which needs the in-guest listener to accept connections on the guest
+# NIC IP, so opt in to all interfaces. The self-test runs in-process before the
+# bind, so this does not affect the assertions.
+[env]
+AXVM_HTTP_BIND = "0.0.0.0:8080"

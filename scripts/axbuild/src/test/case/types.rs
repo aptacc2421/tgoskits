@@ -82,6 +82,12 @@ pub(crate) struct HostHttpProbeConfig {
     /// `timeout` so a broken server fails on the probe, not on the QEMU timeout.
     #[serde(default = "default_probe_connect_timeout_secs")]
     pub(crate) connect_timeout_secs: u64,
+    /// Bearer token the probe must send on authenticated requests, matching the
+    /// guest build's `[env] AXVM_HTTP_TOKEN`. The probe also asserts that an
+    /// *unauthenticated* write request is rejected with 401 (the access-denied
+    /// regression the management-control-plane security review requires).
+    #[serde(default)]
+    pub(crate) token: Option<String>,
 }
 
 fn default_probe_guest_port() -> u16 {

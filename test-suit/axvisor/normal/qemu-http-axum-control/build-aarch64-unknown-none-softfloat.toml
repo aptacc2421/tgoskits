@@ -13,3 +13,8 @@ features = [
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
 vm_configs = ["test-suit/axvisor/normal/qemu-http-axum-control/aarch64-arceos-http-control.toml"]
+
+# The lifecycle self-test drives start/stop through the router; the mutating
+# routes require the build-time bearer token, so bake one here.
+[env]
+AXVM_HTTP_TOKEN = "axvisor-http-test-token"

@@ -12,15 +12,17 @@ args = [
 # PR B: host->guest TCP integration verification over QEMU user-mode
 # networking. The driver appends `-netdev user,id=net0,hostfwd=tcp::<HOST>-:<GUEST>`
 # and `-device virtio-net-pci,netdev=net0` when `[host_http_probe]` is present,
-# then runs a host-side probe that dials the in-guest management API, checks the
-# response statuses (GET /api/vms -> 200, GET /api/vms/999 -> 404), and POSTs a
-# single PASSED/FAILED verdict to the test-only /__probe_result endpoint. That
-# endpoint relays the verdict into the serial log, and the runner's stream
+# then runs a host-side probe that dials the in-guest management API over real
+# TCP. The probe asserts the control-plane security boundary (an unauthenticated
+# write -> 401) and the authenticated contract (GET /api/vms -> 200,
+# GET /api/vms/999 -> 404, authenticated write to an unknown VM -> 404), then
+# POSTs a single PASSED/FAILED verdict to the test-only /__probe_result endpoint.
+# That endpoint relays the verdict into the serial log, and the runner's stream
 # matcher stops at the FIRST marker — so success requires the final `tcp PASSED`
-# sentinel, which only appears when the probe observed the expected statuses
-# over real TCP. The `[host_http_probe]` connect timeout (default 120s) must be
-# less than `timeout` so a broken server fails on the probe, not on the QEMU
-# timeout.
+# sentinel, which only appears when the probe observed every expected status
+# over real TCP. `token` must match the guest build's `[env] AXVM_HTTP_TOKEN`.
+# The `[host_http_probe]` connect timeout (default 120s) must be less than
+# `timeout` so a broken server fails on the probe, not on the QEMU timeout.
 fail_regex = [
   "(?i)\\bpanic(?:ked)?\\b",
   "(?i)kernel panic",
@@ -34,3 +36,4 @@ to_bin = true
 uefi = false
 
 [host_http_probe]
+token = "axvisor-http-test-token"

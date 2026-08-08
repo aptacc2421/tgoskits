@@ -14,3 +14,9 @@ features = [
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
 vm_configs = ["test-suit/axvisor/normal/qemu-http-axum-dynamic/aarch64-arceos-http-dynamic.toml"]
+
+# The lifecycle + create/delete self-tests drive write routes through the
+# router; the mutating routes require the build-time bearer token, so bake one
+# here.
+[env]
+AXVM_HTTP_TOKEN = "axvisor-http-test-token"

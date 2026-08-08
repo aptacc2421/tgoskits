@@ -10,6 +10,7 @@ use axvm::{AxVMRef, AxVmError, VmStatus, VmVcpuState};
 use axvmconfig::GuestConfig;
 use serde_json::{Value, json};
 
+use crate::http::auth::ApiToken;
 use crate::manager::AxvmManager;
 
 /// `GET /api/vms` — list all known VMs (summary form).
@@ -37,7 +38,10 @@ pub async fn vm_detail(Path(id_str): Path<String>) -> Result<Json<Value>, Status
 /// images are matched by id (`memory_images_for_vm`), a config whose id has no
 /// embedded image fails with 500 — the runtime can only realize guest images
 /// that were baked into the hypervisor at build time.
-pub async fn vm_create(Json(payload): Json<Value>) -> Result<Json<Value>, StatusCode> {
+pub async fn vm_create(
+    _token: ApiToken,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
     let toml = payload
         .get("toml")
         .and_then(Value::as_str)
@@ -68,7 +72,10 @@ pub async fn vm_create(Json(payload): Json<Value>) -> Result<Json<Value>, Status
 /// (its result is checked), and the registry is only touched on success. This
 /// avoids relying on `Drop`-time destroy, which merely warns on failure after
 /// the VM is already unregistered, leaving no handle to retry with.
-pub async fn vm_delete(Path(id_str): Path<String>) -> Result<StatusCode, StatusCode> {
+pub async fn vm_delete(
+    _token: ApiToken,
+    Path(id_str): Path<String>,
+) -> Result<StatusCode, StatusCode> {
     let Ok(id) = id_str.parse::<usize>() else {
         return Err(StatusCode::NOT_FOUND);
     };
@@ -81,7 +88,10 @@ pub async fn vm_delete(Path(id_str): Path<String>) -> Result<StatusCode, StatusC
 }
 
 /// `POST /api/vms/{id}/start` — start a VM.
-pub async fn vm_start(Path(id_str): Path<String>) -> Result<Json<Value>, StatusCode> {
+pub async fn vm_start(
+    _token: ApiToken,
+    Path(id_str): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
     vm_action(&id_str, VmAction::Start)
 }
 
@@ -89,7 +99,10 @@ pub async fn vm_start(Path(id_str): Path<String>) -> Result<Json<Value>, StatusC
 ///
 /// `stop` has request semantics: it returns as soon as the request is accepted,
 /// while the vCPU exits and the VM reaches `Stopped` asynchronously.
-pub async fn vm_stop(Path(id_str): Path<String>) -> Result<Json<Value>, StatusCode> {
+pub async fn vm_stop(
+    _token: ApiToken,
+    Path(id_str): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
     vm_action(&id_str, VmAction::Stop)
 }
 
@@ -103,7 +116,7 @@ pub async fn vm_stop(Path(id_str): Path<String>) -> Result<Json<Value>, StatusCo
 /// terminates the run. The assertion itself happens host-side, so the sentinel
 /// reflects the statuses the probe actually received over the wire.
 #[cfg(feature = "http-tcp-test")]
-pub async fn probe_result(body: String) -> StatusCode {
+pub async fn probe_result(_token: ApiToken, body: String) -> StatusCode {
     match body.trim() {
         "PASSED" => info!("HTTP self-test: tcp PASSED"),
         _ => error!("HTTP self-test: tcp FAILED"),

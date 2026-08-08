@@ -10,3 +10,12 @@ features = [
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
 vm_configs = []
+
+# Control-plane auth + bind. The mutating routes require
+# `Authorization: Bearer <token>`; the host probe sends this same token
+# (`[host_http_probe] token`) and also asserts an unauthenticated write is
+# rejected with 401. The server binds loopback by default; QEMU hostfwd
+# forwards to the guest NIC IP, so this test opts in to all interfaces.
+[env]
+AXVM_HTTP_TOKEN = "axvisor-http-test-token"
+AXVM_HTTP_BIND = "0.0.0.0:8080"

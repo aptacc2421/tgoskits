@@ -14,5 +14,11 @@ vm_configs = []
 # runtime SSE42 fallback (#[target_feature(enable = "sse42")]) cannot be
 # lowered. Disable SIMD via the official escape hatch (x86_64 only; the aarch64
 # NEON path compiles fine and does not need this).
+#
+# Control-plane auth + bind: the mutating routes require the bearer token below
+# (the host probe sends the same token and asserts an unauthenticated write is
+# rejected with 401), and hostfwd reachability requires binding all interfaces.
 [env]
 CARGO_CFG_HTTPARSE_DISABLE_SIMD = "1"
+AXVM_HTTP_TOKEN = "axvisor-http-test-token"
+AXVM_HTTP_BIND = "0.0.0.0:8080"

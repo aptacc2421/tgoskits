@@ -13,5 +13,11 @@ vm_configs = []
 # runtime SSE42 fallback (#[target_feature(enable = "sse42")]) cannot be
 # lowered. Disable SIMD via the official escape hatch (x86_64 only; the aarch64
 # NEON path compiles fine and does not need this).
+#
+# This test artifact is also used by the quickstart's manual hostfwd + curl
+# flow, which needs the in-guest listener to accept connections on the guest
+# NIC IP, so opt in to all interfaces. The self-test runs in-process before the
+# bind, so this does not affect the assertions.
 [env]
 CARGO_CFG_HTTPARSE_DISABLE_SIMD = "1"
+AXVM_HTTP_BIND = "0.0.0.0:8080"

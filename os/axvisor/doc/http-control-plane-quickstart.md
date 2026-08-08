@@ -16,13 +16,15 @@ host: curl http://localhost:18081/...
 QEMU user-mode NAT (hostfwd=tcp::18081-:8080)
         │  转发到虚拟机内 8080
         ▼
-AxVisor (hypervisor, EL2) — 管理 HTTP 服务器 (axum + tokio, 0.0.0.0:8080)
+AxVisor (hypervisor, EL2) — 管理 HTTP 服务器 (axum + tokio, 可配绑定)
         │  同步调用 AxvmManager API
         ▼
 vCPU (Core 1+) — guest
 ```
 
 - **HTTP 服务器运行在 AxVisor（host）上，不在 guest 里。** 网络输入直接进入 hypervisor。
+- **监听地址可配置（默认 loopback）：** 服务器默认绑 `127.0.0.1:8080`；本文档的 hostfwd
+  流程需要监听所有接口，故构建 config 显式设置 `[env] AXVM_HTTP_BIND = "0.0.0.0:8080"`。
 - QEMU user 模式网络在内部做 NAT：host 的 18081 端口 → 虚拟机的 8080 端口。
 - **hostfwd 仅 QEMU user 模式 netdev 可用**（`-netdev user,id=net0,hostfwd=...`），
   不能用 tap/bridge。user 模式性能差，只适合开发/调试。
@@ -42,6 +44,11 @@ features = ["no-auto-start", "http-axum"]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
 vm_configs = ["test-suit/axvisor/normal/qemu-http-axum-control/aarch64-arceos-http-control.toml"]
+
+# hostfwd 需要服务器监听所有接口；写路由用构建期 token 保护（见 §5）
+[env]
+AXVM_HTTP_TOKEN = "axvisor-http-test-token"
+AXVM_HTTP_BIND = "0.0.0.0:8080"
 ```
 
 ### 2.1 构建
@@ -86,28 +93,34 @@ task 12，核隔离：管理面在 Core 0）、`shell task on CPU0`。vCPU 启�
 ### 2.3 curl 全流程
 
 ```bash
-# 只读：VM 保持 Ready
+# 所有写命令（POST/DELETE）都需要 Bearer token（与 config 的 AXVM_HTTP_TOKEN 一致）。
+TOKEN='Authorization: Bearer axvisor-http-test-token'
+
+# 只读（开放，无需 token）：VM 保持 Ready
 curl -s http://localhost:18081/api/vms           # 200, JSON 数组（status="ready"）
 curl -s http://localhost:18081/api/vms/1         # 200, 明细（含 vcpu_states）
 curl -s http://localhost:18081/api/vms/999       # 404
 
+# 无 token 的写请求被拒绝（401）：认证边界回归
+curl -s -i -X POST http://localhost:18081/api/vms/1/start  # 401 Unauthorized
+
 # 控制：start -> guest 运行 -> guest 退出 -> stopped
-curl -s -X POST http://localhost:18081/api/vms/1/start   # 200 {"ok":true,"status":"running","async":false}
+curl -s -X POST -H "$TOKEN" http://localhost:18081/api/vms/1/start   # 200 {"ok":true,"status":"running","async":false}
 curl -s http://localhost:18081/api/vms/1                # 200, status="stopped"（guest 退出后）
-curl -s -X POST http://localhost:18081/api/vms/999/start # 404
-curl -s -X POST http://localhost:18081/api/vms/1/stop    # 200 {"ok":true,"status":"stopping","async":true}（对已停 VM 也 200，幂等）
-curl -s -X POST http://localhost:18081/api/vms/1/start   # 409（restart-after-stop 不支持，契约拒绝）
+curl -s -X POST -H "$TOKEN" http://localhost:18081/api/vms/999/start # 404
+curl -s -X POST -H "$TOKEN" http://localhost:18081/api/vms/1/stop    # 200 {"ok":true,"status":"stopping","async":true}（对已停 VM 也 200，幂等）
+curl -s -X POST -H "$TOKEN" http://localhost:18081/api/vms/1/start   # 409（restart-after-stop 不支持，契约拒绝）
 
 # 动态创建/删除：create -> ready -> 409（重复 id）-> remove -> 404
-curl -s -X DELETE http://localhost:18081/api/vms/1       # 204（先删除默认 VM，释放其 id）
+curl -s -X DELETE -H "$TOKEN" http://localhost:18081/api/vms/1       # 204（先删除默认 VM，释放其 id）
 curl -s -X POST http://localhost:18081/api/vms/create \
-  -H 'Content-Type: application/json' \
+  -H "$TOKEN" -H 'Content-Type: application/json' \
   -d '{"toml": "<完整 TOML 配置，base.id 必须命中已内嵌镜像且未注册>"}'  # 200 {"id":1}
 curl -s http://localhost:18081/api/vms/1                # 200, status="ready"（重建后）
 curl -s -X POST http://localhost:18081/api/vms/create \
-  -H 'Content-Type: application/json' \
+  -H "$TOKEN" -H 'Content-Type: application/json' \
   -d '{"toml": "<同上>"}'                                # 409（id 已注册，重复 create 是契约错误）
-curl -s -X DELETE http://localhost:18081/api/vms/1       # 204
+curl -s -X DELETE -H "$TOKEN" http://localhost:18081/api/vms/1       # 204
 curl -s http://localhost:18081/api/vms/1                # 404（已移除）
 ```
 
@@ -147,9 +160,10 @@ qemu-system-x86_64 -no-user-config -display none -serial stdio -monitor none \
   -netdev user,id=net0,hostfwd=tcp::18080-:8080 \
   -device virtio-net-pci,netdev=net0
 
-# 3. 验证
+# 3. 验证（只读端点开放；写端点需要 Bearer token）
 curl -s -i http://localhost:18080/api/vms      # 200
 curl -s -i http://localhost:18080/api/vms/999  # 404
+curl -s -i -X POST http://localhost:18080/api/vms/1/start  # 401（readonly 产物未烘焙 token，写默认拒绝）
 ```
 
 ---
@@ -164,13 +178,22 @@ pkill -f qemu-system
 
 ---
 
-## 5. 安全边界声明（research/debug interface）
+## 5. 安全边界
 
-> 本节为文档声明，非本期实现目标。
+控制面采用 **认证 + 受限监听** 双层防护：
 
-- **无认证、无加密：** HTTP 服务器运行在 hypervisor 内（EL2），网络输入直接进入
-  hypervisor。`0.0.0.0:8080` 对管理网络全开放。
-- **默认信任管理网络：** 这不是生产级远程管理 API，仅用于开发/调试。
+- **写接口强制认证（Bearer token）：** `create`/`delete`/`start`/`stop` 以及测试专用
+  `POST /__probe_result` 都要求 `Authorization: Bearer <token>` 头，token 在构建期经
+  `[env] AXVM_HTTP_TOKEN` 注入（`option_env!` 读取，与 `shell/command/base.rs` 读
+  `AX_ARCH` 的机制一致）。**默认拒绝**：构建时未设置该变量则所有写路由一律 `401`，
+  没有"回退为允许写入 + 警告"的路径 —— 忘记配置 token 的构建会在测试中直接失败。
+- **受限监听（默认 loopback）：** 服务器默认绑定 `127.0.0.1:8080`，管理网络不可达。
+  需要 hostfwd/对外暴露的构建必须显式设置 `[env] AXVM_HTTP_BIND = "0.0.0.0:8080"` 才
+  会监听所有接口；即便如此，写接口仍受 token 保护。
+- **读接口开放：** `GET` 列表/明细是只读的，用于管理面板/调试仪表盘，不做状态变更。
+  默认 loopback 绑定下管理网络无法访问；对外暴露时仅能枚举 VM 清单（无变更能力）。
+- **仍无加密：** HTTP 明文。在 bare-metal hypervisor 内启用 TLS 超出本期范围；如需暴露
+  到不受信网络，请确保 token 强度、在可信网络段内使用，并考虑前置带 TLS 的反向代理。
 - **与 IVC/hypercall 的关系（互补）：** HTTP 是 **host 管理员**对外入口；IVC
   （`IvcChannelFactory`）和 hypercall 是 **guest ↔ hypervisor** 内部通道。二者是不同
   方向的通信机制，不互相替代。
