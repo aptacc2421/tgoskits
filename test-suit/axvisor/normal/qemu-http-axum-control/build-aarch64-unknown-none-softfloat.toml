@@ -1,20 +1,24 @@
 # PR C: axum start/stop control API runtime verification.
-# `no-auto-start` keeps the default VMs in `Ready` so the self-test can drive
-# one VM through the full lifecycle via the HTTP control API. The guest image is
-# embedded at build time (`image_location = "memory"` -> build.rs
-# include_bytes!), so no `fs` feature is required. The vmconfig is committed next
-# to this file and references the managed `qemu-aarch64` registry image; CI runs
-# `cargo xtask image pull qemu-aarch64 --output-dir tmp/axbuild/images` before
-# the test to provision the guest kernel (see the timer-stress jobs).
+# `no-auto-start` keeps the default VMs in `Ready` so the host probe can drive
+# one through the full lifecycle via the HTTP control API. The default Linux
+# guest (`linux-smp1.toml`) is loaded from the rootfs filesystem at runtime
+# (`image_location = "fs"`, kernel at `/guest/linux/linux-qemu`), so the `fs`
+# feature + NVMe driver are required. CI runs `cargo xtask image pull` before
+# the test to provision the rootfs.
 features = [
-    "http-test",
+    "http-axum",
     "no-auto-start",
+    "fs",
+    "ax-driver/nvme",
 ]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
-vm_configs = ["test-suit/axvisor/normal/qemu-http-axum-control/aarch64-arceos-http-control.toml"]
+vm_configs = ["os/axvisor/configs/vms/qemu/aarch64/linux-smp1.toml"]
 
-# The lifecycle self-test drives start/stop through the router; the mutating
-# routes require the build-time bearer token, so bake one here.
+# Control-plane auth + bind. The mutating routes require
+# `Authorization: Bearer <token>`; the host probe sends this same token
+# (`[host_http_probe] token`), and hostfwd reachability requires binding all
+# interfaces.
 [env]
 AXVM_HTTP_TOKEN = "axvisor-http-test-token"
+AXVM_HTTP_BIND = "0.0.0.0:8080"

@@ -1,17 +1,18 @@
 # PR B: axum read-only HTTP API runtime verification.
-# http-test implies http-axum (tokio + axum + serde_json). fs/nvme is not
-# enabled: QEMU has no disk and fs would panic at boot; this test only
-# verifies the management HTTP server runs.
+# `http-axum` builds the tokio + axum + serde_json management server. fs/nvme is
+# not enabled: QEMU has no disk and this test only verifies the management HTTP
+# server runs. The host-side probe (QEMU hostfwd) drives the API over real TCP
+# and asserts the read contract + auth boundary host-side.
 features = [
-    "http-test",
+    "http-axum",
 ]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
 vm_configs = []
 
-# This test artifact is also used by the quickstart's manual hostfwd + curl
-# flow, which needs the in-guest listener to accept connections on the guest
-# NIC IP, so opt in to all interfaces. The self-test runs in-process before the
-# bind, so this does not affect the assertions.
+# Control-plane auth + bind. The probe's authenticated-write check needs a
+# working bearer token, so one is baked here (`[host_http_probe] token` must
+# match). The server binds all interfaces so QEMU hostfwd can reach it.
 [env]
+AXVM_HTTP_TOKEN = "axvisor-http-test-token"
 AXVM_HTTP_BIND = "0.0.0.0:8080"

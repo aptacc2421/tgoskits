@@ -1,9 +1,9 @@
 # PR B: axum management HTTP API host->guest TCP integration verification
-# (x86_64). http-tcp-test implies http-axum (tokio + axum + serde_json) and
-# adds the test-only POST /__probe_result relay endpoint. fs/nvme is not
-# enabled: this test only verifies the management HTTP server runs.
+# (x86_64). `http-axum` builds the tokio + axum + serde_json management server
+# with no test-only code. fs/nvme is not enabled: this test only verifies the
+# management HTTP server runs.
 features = [
-    "http-tcp-test",
+    "http-axum",
 ]
 log = "Info"
 target = "x86_64-unknown-none"

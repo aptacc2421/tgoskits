@@ -19,8 +19,7 @@ pub mod vm;
 /// Blocking entry point for the management HTTP server.
 ///
 /// Spawned on its own task (see `crate::main`); builds the tokio runtime and
-/// serves until the hypervisor shuts down. Under `http-test` the built-in
-/// self-test runs first and prints deterministic handler results.
+/// serves until the hypervisor shuts down.
 pub fn serve() {
     server::serve();
 }

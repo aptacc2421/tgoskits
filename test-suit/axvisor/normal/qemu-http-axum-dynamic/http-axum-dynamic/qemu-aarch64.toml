@@ -6,28 +6,38 @@ args = [
   "virt,virtualization=on,gic-version=3",
   "-smp",
   "2",
-  # `-m 1g`: the dynamic test's guest uses a 256M MAP_IDENTICAL region, and the
-  # hypervisor plus that region must both fit in QEMU's total RAM (same sizing as
-  # the control test, whose guest config the dynamic guest mirrors).
+  # NVMe rootfs: the hypervisor's `fs` feature reads the guest kernel
+  # (`/guest/linux/linux-qemu`) from this disk, both for the create handler and
+  # for the created VM. The driver rewrites the drive file to the concrete
+  # rootfs path (see `patch_qemu_rootfs_path`).
+  "-device",
+  "nvme,drive=disk0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65",
+  "-drive",
+  "id=disk0,if=none,format=raw,file=${workspace}/tmp/axbuild/rootfs/rootfs-aarch64-alpine.img",
+  # `-m 1g`: the created guest uses a 256M MAP_IDENTICAL region, and the
+  # hypervisor plus that region must both fit in QEMU's total RAM (same sizing
+  # as the control test).
   "-m",
   "1g",
 ]
-timeout = 600
-# The runner's stream matcher stops at the FIRST match (fail checked before
-# success), so per-step status lines cannot be asserted independently. The
-# binary runs the base control lifecycle self-test first, then the create/delete
-# self-test; each prints its own FAILED sentinel and each has an independent
-# pass/fail result. The create/delete test only prints PASSED if the full
-# remove -> create -> ready -> 409 -> remove -> 404 sequence met every
-# expectation, so both FAILED sentinels must be caught or a control-lifecycle
-# failure followed by a create/delete pass would falsely report success.
+# PR E: create/delete verification via a host-side probe.
+# `[host_http_probe]` makes the driver append hostfwd netdev + virtio-net-pci
+# device and run a host probe over real TCP. Scenario `Dynamic` reads the
+# default `linux-smp1.toml` config from the host, `POST /api/vms/create` it,
+# polls the new VM into `ready`, verifies a duplicate create is rejected with
+# 409, then `DELETE` it and polls it gone. The probe then quits QEMU over QMP,
+# and the runner reads its stored verdict as the test result. `success_regex` is
+# empty because the probe result, not serial output, is the verdict; a guest
+# panic still fails via `fail_regex`.
 fail_regex = [
   "(?i)\\bpanic(?:ked)?\\b",
-  "HTTP self-test: control lifecycle FAILED",
-  "HTTP self-test: dynamic create/delete FAILED",
+  "(?i)kernel panic",
 ]
-success_regex = [
-  "HTTP self-test: dynamic create/delete PASSED",
-]
+success_regex = []
+timeout = 600
 to_bin = true
 uefi = false
+
+[host_http_probe]
+token = "axvisor-http-test-token"
+scenario = { Dynamic = { config_toml = "os/axvisor/configs/vms/qemu/aarch64/linux-smp1.toml" } }

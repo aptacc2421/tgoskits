@@ -9,26 +9,24 @@ args = [
   "-m",
   "512M",
 ]
-# PR B: first in-hypervisor axum runtime verification.
-# - tokio current_thread runtime is initialized with enable_io() only (needs
-#   only epoll, no timerfd syscall).
-# - the tower::ServiceExt::oneshot self-test avoids TCP and prints the two
-#   read-only status codes, then a single PASSED/FAILED sentinel.
-# - the runner's stream matcher stops at the FIRST marker, so the two per-request
-#   status lines cannot be asserted independently; success requires the final
-#   `readonly PASSED` sentinel, which the self-test prints only when both
-#   GET /api/vms -> 200 and GET /api/vms/999 -> 404 hold.
-# - any assertion failure prints `readonly FAILED` (caught by fail_regex), and
-#   if enable_io() is insufficient (time driver / timerfd required) a panic
-#   also hits fail_regex.
+# PR B: read-only management HTTP API verification via a host-side probe.
+# - `[host_http_probe]` makes the driver append `-netdev user,id=net0,hostfwd=
+#   tcp::<HOST>-:<GUEST>` + `-device virtio-net-pci,netdev=net0` and run a host
+#   probe that dials the in-guest API over real TCP.
+# - The probe (scenario `ReadOnly`) asserts: GET /api/vms -> 200, an
+#   unauthenticated write -> 401 (access-denied regression), GET /api/vms/999
+#   -> 404, and an authenticated write to an unknown VM -> 404. It then quits
+#   QEMU over QMP, and the runner reads its stored verdict as the test result.
+# - `success_regex` is intentionally empty: the probe result, not serial output,
+#   is the verdict. A guest panic still fails via `fail_regex`.
 fail_regex = [
   "(?i)\\bpanic(?:ked)?\\b",
   "(?i)kernel panic",
-  "HTTP self-test: readonly FAILED",
 ]
-success_regex = [
-  "HTTP self-test: readonly PASSED",
-]
+success_regex = []
 timeout = 120
 to_bin = true
 uefi = false
+
+[host_http_probe]
+token = "axvisor-http-test-token"

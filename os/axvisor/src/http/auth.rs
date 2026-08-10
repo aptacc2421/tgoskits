@@ -1,8 +1,8 @@
 //! Bearer-token access control for the management HTTP control plane.
 //!
-//! Mutating routes (`create`/`delete`/`start`/`stop`, plus the test-only
-//! `POST /__probe_result` relay) require an `Authorization: Bearer <token>`
-//! header matching the build-time token. The token is baked into the image at
+//! Mutating routes (`create`/`delete`/`start`/`stop`) require an
+//! `Authorization: Bearer <token>` header matching the build-time token. The
+//! token is baked into the image at
 //! build time from the `[env] AXVM_HTTP_TOKEN` build-config variable — the same
 //! `option_env!` mechanism `crate::shell::command::base` uses for `AX_ARCH`.
 //!

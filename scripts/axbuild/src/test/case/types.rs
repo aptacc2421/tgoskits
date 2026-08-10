@@ -62,15 +62,16 @@ pub(crate) struct HostHttpServerConfig {
     pub(crate) dir: Option<String>,
 }
 
-/// Host-side TCP probe configuration (`qemu-http-axum-tcp`).
+/// Host-side TCP probe configuration.
 ///
 /// Direction is the reverse of [`HostHttpServerConfig`]: instead of the host
 /// serving fixtures to the guest, the host acts as a *client* that probes a
 /// management API running *inside* the guest, over QEMU user-mode networking
 /// hostfwd (`-netdev user,hostfwd=tcp::<host_port>-:<guest_port>`). The probe
-/// makes real HTTP requests, asserts the response statuses, and relays a single
-/// PASSED/FAILED verdict to a guest endpoint (`POST /__probe_result`), which the
-/// hypervisor mirrors into the serial log for the QEMU runner's stream matcher.
+/// makes real HTTP requests and asserts the responses entirely host-side — there
+/// is no guest-side test relay endpoint. When the probe finishes (pass or fail)
+/// it quits QEMU over its QMP monitor socket, and the runner reads the stored
+/// verdict from the probe guard as the test result.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct HostHttpProbeConfig {
     /// Guest-side port the in-guest HTTP server binds to. The harness forwards a
@@ -88,6 +89,36 @@ pub(crate) struct HostHttpProbeConfig {
     /// regression the management-control-plane security review requires).
     #[serde(default)]
     pub(crate) token: Option<String>,
+    /// Which management-plane behavior the probe exercises.
+    #[serde(default)]
+    pub(crate) scenario: HostHttpProbeScenario,
+}
+
+/// Probe scenario: the set of management API behaviors the host probe drives
+/// and asserts. The probe is host-side by design; nothing in the guest knows a
+/// test is running.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub(crate) enum HostHttpProbeScenario {
+    /// Read-only routes: `GET /api/vms`, the 404 on an unknown VM, and the 401
+    /// access-denied check on an unauthenticated write. No VM is started or
+    /// created, so it works with any axvisor build (even `vm_configs = []`).
+    #[default]
+    ReadOnly,
+    /// Lifecycle: `POST /api/vms/{id}/start`, poll until `running`, then
+    /// `POST /api/vms/{id}/stop` and poll until `stopped`. The target VM is a
+    /// default/static VM that must exist in `Ready` (`no-auto-start`).
+    Lifecycle {
+        /// VM id to drive through start -> running -> stop -> stopped.
+        vm_id: u64,
+    },
+    /// Dynamic create/delete: read a VM config TOML from the host, `POST
+    /// /api/vms/create`, poll until the VM is `Ready`, then `DELETE` it and poll
+    /// until it is gone. The config may reference any guest image available to
+    /// the runtime (an fs-backed kernel on the rootfs, or an embedded image).
+    Dynamic {
+        /// Host path of the VM config TOML to send in the create body.
+        config_toml: String,
+    },
 }
 
 fn default_probe_guest_port() -> u16 {

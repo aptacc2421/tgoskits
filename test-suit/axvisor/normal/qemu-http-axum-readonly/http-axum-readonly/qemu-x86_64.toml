@@ -19,19 +19,19 @@ args = [
   "-vga",
   "none",
 ]
-timeout = 600
-# Same single-sentinel contract as qemu-aarch64.toml: the runner's stream
-# matcher stops at the FIRST marker, so success requires the final `readonly
-# PASSED` sentinel (printed only when both GET /api/vms -> 200 and
-# GET /api/vms/999 -> 404 hold); any assertion failure prints `readonly FAILED`,
-# caught by fail_regex. The `+vmx-*` CPU flags require an Intel KVM host; on an
-# AMD host, add a qemu-x86_64-svm.toml variant following the `smoke-svm` case.
+# Same probe-driven contract as qemu-aarch64.toml: `[host_http_probe]` makes the
+# driver append hostfwd netdev + virtio-net-pci device, and a host-side probe
+# (scenario `ReadOnly`) asserts the read contract + auth boundary, then quits
+# QEMU over QMP. `success_regex` is empty; the probe verdict is the result. The
+# `+vmx-*` CPU flags require an Intel KVM host; on an AMD host, add a
+# qemu-x86_64-svm.toml variant following the `smoke-svm` case.
 fail_regex = [
   "(?i)\\bpanic(?:ked)?\\b",
-  "HTTP self-test: readonly FAILED",
 ]
-success_regex = [
-  "HTTP self-test: readonly PASSED",
-]
+success_regex = []
+timeout = 600
 to_bin = true
 uefi = true
+
+[host_http_probe]
+token = "axvisor-http-test-token"

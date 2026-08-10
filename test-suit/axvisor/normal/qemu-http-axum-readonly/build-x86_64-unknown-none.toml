@@ -1,8 +1,8 @@
 # PR B: axum read-only HTTP API runtime verification (x86_64).
-# http-test implies http-axum (tokio + axum + serde_json). fs/nvme is not
-# enabled: this test only verifies the management HTTP server runs.
+# `http-axum` builds the tokio + axum + serde_json management server. fs/nvme is
+# not enabled: this test only verifies the management HTTP server runs.
 features = [
-    "http-test",
+    "http-axum",
 ]
 log = "Info"
 target = "x86_64-unknown-none"
@@ -14,10 +14,10 @@ vm_configs = []
 # lowered. Disable SIMD via the official escape hatch (x86_64 only; the aarch64
 # NEON path compiles fine and does not need this).
 #
-# This test artifact is also used by the quickstart's manual hostfwd + curl
-# flow, which needs the in-guest listener to accept connections on the guest
-# NIC IP, so opt in to all interfaces. The self-test runs in-process before the
-# bind, so this does not affect the assertions.
+# Control-plane auth + bind: the probe's authenticated-write check needs a
+# working bearer token, so one is baked here (`[host_http_probe] token` must
+# match), and hostfwd reachability requires binding all interfaces.
 [env]
 CARGO_CFG_HTTPARSE_DISABLE_SIMD = "1"
+AXVM_HTTP_TOKEN = "axvisor-http-test-token"
 AXVM_HTTP_BIND = "0.0.0.0:8080"

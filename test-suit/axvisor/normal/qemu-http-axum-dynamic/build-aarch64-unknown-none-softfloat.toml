@@ -1,22 +1,25 @@
 # PR E: runtime create/delete over the axum control API.
-# `http-dynamic-test` implies `http-test` + `no-auto-start`: the base control
-# self-test runs first (start/stop lifecycle), then the dynamic self-test
-# removes the default VM, recreates it from its own build-time config (the id
-# owns an embedded guest image), and removes it again. The guest image is
-# embedded at build time (`image_location = "memory"` -> build.rs
-# include_bytes!), so no `fs` feature is required. The vmconfig is committed
-# next to this file and references the managed `qemu-aarch64` registry image; CI
-# runs `cargo xtask image pull qemu-aarch64 --output-dir tmp/axbuild/images`
-# before the test to provision the guest kernel.
+# No default VMs are registered (`vm_configs = []`): the host probe creates a VM
+# entirely from scratch via `POST /api/vms/create`, driving the *default* Linux
+# guest config (`linux-smp1.toml`) through create -> ready -> duplicate-create
+# 409 -> delete -> gone. The config is sent verbatim as the create body and its
+# kernel is loaded from the rootfs filesystem at runtime
+# (`image_location = "fs"`, `/guest/linux/linux-qemu`), so the `fs` feature +
+# NVMe driver are required. CI runs `cargo xtask image pull` before the test to
+# provision the rootfs.
 features = [
-    "http-dynamic-test",
+    "http-axum",
+    "fs",
+    "ax-driver/nvme",
 ]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
-vm_configs = ["test-suit/axvisor/normal/qemu-http-axum-dynamic/aarch64-arceos-http-dynamic.toml"]
+vm_configs = []
 
-# The lifecycle + create/delete self-tests drive write routes through the
-# router; the mutating routes require the build-time bearer token, so bake one
-# here.
+# Control-plane auth + bind. The mutating routes require
+# `Authorization: Bearer <token>`; the host probe sends this same token
+# (`[host_http_probe] token`), and hostfwd reachability requires binding all
+# interfaces.
 [env]
 AXVM_HTTP_TOKEN = "axvisor-http-test-token"
+AXVM_HTTP_BIND = "0.0.0.0:8080"

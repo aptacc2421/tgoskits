@@ -338,16 +338,44 @@ impl Axvisor {
 
         // Optional host->guest TCP probe over QEMU user-mode networking. When
         // `[host_http_probe]` is configured, the host acts as a *client* that
-        // dials a management API inside the guest through a hostfwd port, checks
-        // the response statuses, and relays a PASSED/FAILED verdict to
-        // `POST /__probe_result`. The probe must live for the whole run, so its
-        // guard is spawned here and dropped at scope end (after QEMU exits).
+        // dials a management API inside the guest through a hostfwd port and
+        // asserts the responses entirely host-side. The probe must live for the
+        // whole run, so its guard is spawned here and dropped at scope end
+        // (after QEMU exits).
+        //
+        // The probe also drives QEMU termination: after it stores its verdict it
+        // connects to a QMP monitor socket and sends `quit`, so the run ends on
+        // the probe result instead of the serial-timeout path. That makes the
+        // probe verdict the authoritative test result (no `/__probe_result`
+        // relay inside the guest).
         let mut host_probe_guard = None;
-        if let Some(probe_config) =
+        if let Some(mut probe_config) =
             test_qemu::load_qemu_case_extra_config(&case.case.case.qemu_config_path)?
                 .host_http_probe
         {
+            // A relative `config_toml` in the dynamic scenario is resolved against
+            // the workspace root (axbuild may be invoked from any directory), so
+            // the probe reads the same file regardless of the caller's CWD.
+            if let test_case::HostHttpProbeScenario::Dynamic {
+                ref mut config_toml,
+            } = probe_config.scenario
+            {
+                let path = PathBuf::from(&*config_toml);
+                if !path.is_absolute() {
+                    *config_toml = self
+                        .app
+                        .workspace_root()
+                        .join(path)
+                        .to_string_lossy()
+                        .into();
+                }
+            }
             let host_port = pick_free_local_port()?;
+            let qmp_socket = std::env::temp_dir().join(format!(
+                "axvisor-qmp-{}-{}.sock",
+                case.case.case.name,
+                std::process::id()
+            ));
             // Each QEMU option and its value must be a separate argv element
             // (QEMU takes the value of `-netdev`/`-device` from the following
             // argument), matching how the `.toml` config stores them.
@@ -359,15 +387,23 @@ impl Axvisor {
                 ),
                 "-device".to_string(),
                 "virtio-net-pci,netdev=net0".to_string(),
+                "-qmp".to_string(),
+                format!("unix:{},server=on,wait=off", qmp_socket.to_string_lossy()),
             ]);
             host_probe_guard = Some(host_probe::HostHttpProbeGuard::start(
                 &probe_config,
                 host_port,
                 &case.case.case.name,
+                Some(qmp_socket),
             )?);
         }
 
-        test_case::run_qemu_with_prepared_case_assets(
+        // QEMU's exit code is not the verdict for probe cases: the probe quits
+        // QEMU (cleanly, or force-kills it if `quit` is ignored) whether it
+        // passed or failed, so the stored probe result decides. For non-probe
+        // cases the serial-success path in
+        // `run_qemu_with_prepared_case_assets` still applies unchanged.
+        let qemu_result = test_case::run_qemu_with_prepared_case_assets(
             &mut self.app,
             cargo,
             qemu,
@@ -379,11 +415,38 @@ impl Axvisor {
                 qemu_timing_fields: None,
             },
         )
-        .await?;
+        .await;
 
         // Joins the probe thread now that QEMU has exited.
+        let probe_configured = host_probe_guard.is_some();
+        let probe_result = host_probe_guard
+            .as_ref()
+            .and_then(|guard| guard.take_result());
+        let killed_by_probe = host_probe_guard
+            .as_ref()
+            .map(|guard| guard.killed_by_probe())
+            .unwrap_or(false);
         drop(host_probe_guard);
-        Ok(())
+
+        match (qemu_result, probe_configured, probe_result, killed_by_probe) {
+            // The probe force-killed QEMU (QMP `quit` was ignored): the stored
+            // probe verdict is authoritative, even though QEMU exited non-zero.
+            (_, true, Some(verdict), true) => verdict,
+            // A real QEMU failure (boot failure, guest crash, serial sentinel)
+            // always wins regardless of probe configuration.
+            (Err(err), ..) => Err(err),
+            // Non-probe case: QEMU exit is the verdict.
+            (Ok(()), false, _, _) => Ok(()),
+            // Probe case: the stored probe verdict decides.
+            (Ok(()), true, Some(Ok(())), _) => Ok(()),
+            (Ok(()), true, Some(Err(err)), _) => Err(err),
+            (Ok(()), true, None, _) => {
+                anyhow::bail!(
+                    "host http probe for `{}` produced no verdict",
+                    case.case.case.name
+                )
+            }
+        }
     }
 }
 

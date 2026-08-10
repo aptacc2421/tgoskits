@@ -89,7 +89,6 @@ fn main() {
     // only enqueues the task — the main task keeps running until it yields or
     // blocks — so the server's bind does not necessarily happen before
     // `launch_default_vms` queues the vCPU tasks; the ordering is best-effort.
-    // `http-test` runs its self-test inside `http::serve` before any socket work.
     #[cfg(feature = "http-axum")]
     std::thread::Builder::new()
         .name("axvisor-http".into())

@@ -6,24 +6,36 @@ args = [
   "virt,virtualization=on,gic-version=3",
   "-smp",
   "2",
+  # NVMe rootfs: the hypervisor's `fs` feature reads the guest kernel
+  # (`/guest/linux/linux-qemu`) from this disk. The driver rewrites the drive
+  # file to the concrete rootfs path (see `patch_qemu_rootfs_path`).
+  "-device",
+  "nvme,drive=disk0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65",
+  "-drive",
+  "id=disk0,if=none,format=raw,file=${workspace}/tmp/axbuild/rootfs/rootfs-aarch64-alpine.img",
   # `-m 1g` (vs the readonly test's 512M): the control test boots a real guest
   # with a 256M MAP_IDENTICAL region, and the hypervisor plus that region must
   # both fit in QEMU's total RAM; 512M would be too tight.
   "-m",
   "1g",
 ]
-timeout = 600
-# The runner's stream matcher stops at the FIRST match (fail checked before
-# success), so per-step status lines cannot be asserted independently. The
-# self-test verifies every step internally and prints exactly one sentinel:
-# PASSED only if the full lifecycle (start -> running -> stop -> stopped -> 404)
-# met every expectation.
+# PR C: lifecycle verification via a host-side probe.
+# `[host_http_probe]` makes the driver append hostfwd netdev + virtio-net-pci
+# device and run a host probe over real TCP. Scenario `Lifecycle` drives the
+# default VM (id 1, `linux-smp1.toml`, kept `Ready` by `no-auto-start`) through
+# start -> running -> stop -> stopped, polling `GET /api/vms/1` for each state.
+# The probe then quits QEMU over QMP, and the runner reads its stored verdict as
+# the test result. `success_regex` is empty because the probe result, not serial
+# output, is the verdict; a guest panic still fails via `fail_regex`.
 fail_regex = [
   "(?i)\\bpanic(?:ked)?\\b",
-  "HTTP self-test: control lifecycle FAILED",
+  "(?i)kernel panic",
 ]
-success_regex = [
-  "HTTP self-test: control lifecycle PASSED",
-]
+success_regex = []
+timeout = 600
 to_bin = true
 uefi = false
+
+[host_http_probe]
+token = "axvisor-http-test-token"
+scenario = { Lifecycle = { vm_id = 1 } }
