@@ -21,12 +21,13 @@ args = [
 ]
 # PR C: lifecycle verification via a host-side probe.
 # `[host_http_probe]` makes the driver append hostfwd netdev + virtio-net-pci
-# device and run a host probe over real TCP. Scenario `Lifecycle` drives the
-# default VM (id 1, `linux-smp1.toml`, kept `Ready` by `no-auto-start`) through
-# start -> running -> stop -> stopped, polling `GET /api/vms/1` for each state.
-# The probe then quits QEMU over QMP, and the runner reads its stored verdict as
-# the test result. `success_regex` is empty because the probe result, not serial
-# output, is the verdict; a guest panic still fails via `fail_regex`.
+# device and run a host probe over real TCP. `probe.sh` drives the default VM
+# (id 1, `linux-smp1.toml`, kept `Ready` by `no-auto-start`) through start ->
+# running -> stop -> stopped, polling `GET /api/vms/1` for each state, then
+# asserts the restart-after-stop rejection (409). The probe then quits QEMU over
+# QMP, and the runner reads its stored verdict as the test result.
+# `success_regex` is empty because the probe result, not serial output, is the
+# verdict; a guest panic still fails via `fail_regex`.
 fail_regex = [
   "(?i)\\bpanic(?:ked)?\\b",
   "(?i)kernel panic",
@@ -38,4 +39,4 @@ uefi = false
 
 [host_http_probe]
 token = "axvisor-http-test-token"
-scenario = { Lifecycle = { vm_id = 1 } }
+script = "probe.sh"

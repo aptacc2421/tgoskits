@@ -22,13 +22,13 @@ args = [
 ]
 # PR E: create/delete verification via a host-side probe.
 # `[host_http_probe]` makes the driver append hostfwd netdev + virtio-net-pci
-# device and run a host probe over real TCP. Scenario `Dynamic` reads the
-# default `linux-smp1.toml` config from the host, `POST /api/vms/create` it,
-# polls the new VM into `ready`, verifies a duplicate create is rejected with
-# 409, then `DELETE` it and polls it gone. The probe then quits QEMU over QMP,
-# and the runner reads its stored verdict as the test result. `success_regex` is
-# empty because the probe result, not serial output, is the verdict; a guest
-# panic still fails via `fail_regex`.
+# device and run a host probe over real TCP. `probe.sh` reads the default
+# `linux-smp1.toml` config from the host (workspace-relative), `POST
+# /api/vms/create` it, polls the new VM into `ready`, verifies a duplicate
+# create is rejected with 409, then `DELETE` it and polls it gone. The probe
+# then quits QEMU over QMP, and the runner reads its stored verdict as the test
+# result. `success_regex` is empty because the probe result, not serial output,
+# is the verdict; a guest panic still fails via `fail_regex`.
 fail_regex = [
   "(?i)\\bpanic(?:ked)?\\b",
   "(?i)kernel panic",
@@ -40,4 +40,4 @@ uefi = false
 
 [host_http_probe]
 token = "axvisor-http-test-token"
-scenario = { Dynamic = { config_toml = "os/axvisor/configs/vms/qemu/aarch64/linux-smp1.toml" } }
+script = "probe.sh"

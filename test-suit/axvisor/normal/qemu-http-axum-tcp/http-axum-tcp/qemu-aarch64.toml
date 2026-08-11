@@ -12,8 +12,8 @@ args = [
 # PR B: host->guest TCP integration verification over QEMU user-mode networking.
 # `[host_http_probe]` makes the driver append `-netdev user,id=net0,hostfwd=
 # tcp::<HOST>-:<GUEST>` and `-device virtio-net-pci,netdev=net0`, then run a
-# host-side probe that dials the in-guest management API over real TCP. Scenario
-# `ReadOnly` asserts the control-plane security boundary (an unauthenticated
+# host-side probe that dials the in-guest management API over real TCP.
+# `probe.sh` asserts the control-plane security boundary (an unauthenticated
 # write -> 401) and the authenticated read contract (GET /api/vms -> 200,
 # GET /api/vms/999 -> 404, authenticated write to an unknown VM -> 404), then
 # quits QEMU over QMP. The runner reads the stored probe verdict as the result;
@@ -32,3 +32,4 @@ uefi = false
 
 [host_http_probe]
 token = "axvisor-http-test-token"
+script = "probe.sh"
