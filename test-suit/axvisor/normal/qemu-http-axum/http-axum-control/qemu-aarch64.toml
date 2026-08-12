@@ -13,13 +13,13 @@ args = [
   "nvme,drive=disk0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65",
   "-drive",
   "id=disk0,if=none,format=raw,file=${workspace}/tmp/axbuild/rootfs/rootfs-aarch64-alpine.img",
-  # `-m 1g` (vs the readonly test's 512M): the control test boots a real guest
-  # with a 256M MAP_IDENTICAL region, and the hypervisor plus that region must
-  # both fit in QEMU's total RAM; 512M would be too tight.
+  # `-m 1g`: this case boots a real guest with a 256M MAP_IDENTICAL region, and
+  # the hypervisor plus that region must both fit in QEMU's total RAM; 512M
+  # would be too tight.
   "-m",
   "1g",
 ]
-# PR C: lifecycle verification via a host-side probe.
+# Lifecycle verification via a host-side probe.
 # `[host_http_probe]` makes the driver append hostfwd netdev + virtio-net-pci
 # device and run a host probe over real TCP. `probe.sh` drives the default VM
 # (id 1, `linux-smp1.toml`, kept `Ready` by `no-auto-start`) through start ->

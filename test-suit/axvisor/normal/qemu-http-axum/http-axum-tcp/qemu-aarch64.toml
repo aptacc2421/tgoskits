@@ -6,10 +6,23 @@ args = [
   "virt,virtualization=on,gic-version=3",
   "-smp",
   "2",
+  # NVMe rootfs: the shared build enables the hypervisor's `fs` feature, whose
+  # boot-time init mounts the guest rootfs from this disk. The default Linux
+  # guest (`linux-smp1.toml`) is registered but kept `Ready` by `no-auto-start`,
+  # so only the hypervisor's own fs init touches the disk here, not a guest
+  # boot. The driver rewrites the drive file to the concrete rootfs path (see
+  # `patch_qemu_rootfs_path`).
+  "-device",
+  "nvme,drive=disk0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65",
+  "-drive",
+  "id=disk0,if=none,format=raw,file=${workspace}/tmp/axbuild/rootfs/rootfs-aarch64-alpine.img",
+  # `-m 1g`: the registered default guest declares a 256M MAP_IDENTICAL region,
+  # and the hypervisor plus that region must both fit in QEMU's total RAM (same
+  # sizing as the control case, which boots a real guest).
   "-m",
-  "512M",
+  "1g",
 ]
-# PR B: host->guest TCP integration verification over QEMU user-mode networking.
+# Host->guest TCP integration verification over QEMU user-mode networking.
 # `[host_http_probe]` makes the driver append `-netdev user,id=net0,hostfwd=
 # tcp::<HOST>-:<GUEST>` and `-device virtio-net-pci,netdev=net0`, then run a
 # host-side probe that dials the in-guest management API over real TCP.

@@ -20,7 +20,7 @@ args = [
   "-m",
   "1g",
 ]
-# PR E: create/delete verification via a host-side probe.
+# Create/delete verification via a host-side probe.
 # `[host_http_probe]` makes the driver append hostfwd netdev + virtio-net-pci
 # device and run a host probe over real TCP. `probe.sh` reads the default
 # `linux-smp1.toml` config from the host (workspace-relative), `POST

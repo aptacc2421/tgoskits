@@ -1,7 +1,9 @@
-# PR C: axum start/stop control API runtime verification.
-# `no-auto-start` keeps the default VMs in `Ready` so the host probe can drive
-# one through the full lifecycle via the HTTP control API. The default Linux
-# guest (`linux-smp1.toml`) is loaded from the rootfs filesystem at runtime
+# Shared HTTP control-plane build for the axum management API test cases
+# (http-axum-control / http-axum-readonly / http-axum-tcp).
+# `no-auto-start` keeps the default Linux guest (`linux-smp1.toml`) in `Ready`:
+# the control case drives it through start/stop via the HTTP control API, while
+# the readonly/tcp cases only read the management server against a registered
+# default VM. The guest kernel is loaded from the rootfs filesystem at runtime
 # (`image_location = "fs"`, kernel at `/guest/linux/linux-qemu`), so the `fs`
 # feature + NVMe driver are required. CI runs `cargo xtask image pull` before
 # the test to provision the rootfs.

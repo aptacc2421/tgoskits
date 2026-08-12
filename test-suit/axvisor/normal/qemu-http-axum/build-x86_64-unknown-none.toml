@@ -1,0 +1,31 @@
+# Shared HTTP control-plane build for the axum management API test cases on
+# x86_64 (http-axum-readonly / http-axum-tcp). Same contract as the shared
+# aarch64 build: `no-auto-start` keeps the default Linux guest
+# (`linux-smp1.toml`) in `Ready` (registered but not booted), and the guest
+# kernel is loaded from the rootfs filesystem at runtime
+# (`image_location = "fs"`, `/guest/linux/linux-qemu`), so the `fs` feature +
+# NVMe driver are required. CI runs `cargo xtask image pull` before the test to
+# provision the rootfs.
+features = [
+    "http-axum",
+    "no-auto-start",
+    "fs",
+    "ax-driver/nvme",
+]
+log = "Info"
+target = "x86_64-unknown-none"
+vm_configs = ["os/axvisor/configs/vms/qemu/x86_64/linux-smp1.toml"]
+
+# httparse 1.10 (a hyper HTTP/1 parsing dependency) trips a rustc-LLVM codegen
+# error at opt-level=3 on this bare-metal target where SSE is disabled: its
+# runtime SSE42 fallback (#[target_feature(enable = "sse42")]) cannot be
+# lowered. Disable SIMD via the official escape hatch (x86_64 only; the aarch64
+# NEON path compiles fine and does not need this).
+#
+# Control-plane auth + bind: the mutating routes require the bearer token below
+# (the host probe sends the same token), and hostfwd reachability requires
+# binding all interfaces.
+[env]
+CARGO_CFG_HTTPARSE_DISABLE_SIMD = "1"
+AXVM_HTTP_TOKEN = "axvisor-http-test-token"
+AXVM_HTTP_BIND = "0.0.0.0:8080"
