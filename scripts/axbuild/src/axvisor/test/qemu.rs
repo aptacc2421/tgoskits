@@ -424,7 +424,12 @@ impl Axvisor {
             .unwrap_or(false);
         drop(host_probe_guard);
 
-        match (qemu_result, probe_configured, script_result, killed_by_probe) {
+        match (
+            qemu_result,
+            probe_configured,
+            script_result,
+            killed_by_probe,
+        ) {
             // The guard force-killed QEMU (QMP `quit` was ignored): the stored
             // script verdict is authoritative, even though QEMU exited non-zero.
             (_, true, Some(verdict), true) => verdict,
@@ -432,7 +437,7 @@ impl Axvisor {
             // always wins regardless of probe configuration.
             (Err(err), ..) => Err(err),
             // Non-probe case: QEMU exit is the verdict.
-            (Ok(()), false, _, _) => Ok(()),
+            (Ok(()), false, ..) => Ok(()),
             // Probe case: the stored script verdict decides.
             (Ok(()), true, Some(Ok(())), _) => Ok(()),
             (Ok(()), true, Some(Err(err)), _) => Err(err),

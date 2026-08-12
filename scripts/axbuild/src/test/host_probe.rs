@@ -17,6 +17,7 @@
 //! script or its QMP quit fails.
 
 use std::{
+    collections::BTreeMap,
     net::TcpStream,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -30,7 +31,6 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use std::collections::BTreeMap;
 
 use crate::test::case::HostHttpProbeConfig;
 
@@ -124,7 +124,8 @@ impl HostHttpProbeGuard {
                     Ok(true) => thread_killed.store(true, Ordering::SeqCst),
                     Ok(false) => {}
                     Err(err) => eprintln!(
-                        "  host http probe: {thread_case_name}: failed to quit QEMU via QMP: {err:#}"
+                        "  host http probe: {thread_case_name}: failed to quit QEMU via QMP: \
+                         {err:#}"
                     ),
                 }
             }
@@ -192,8 +193,9 @@ fn run_probe_script(
     stop: &AtomicBool,
     child_pid_slot: &Mutex<Option<i32>>,
 ) -> anyhow::Result<()> {
-    wait_for_port_ready(addr, connect_timeout, stop)
-        .with_context(|| format!("guest HTTP server never became reachable within {connect_timeout:?}"))?;
+    wait_for_port_ready(addr, connect_timeout, stop).with_context(|| {
+        format!("guest HTTP server never became reachable within {connect_timeout:?}")
+    })?;
 
     let port = addr.rsplit_once(':').map(|(_, p)| p).unwrap_or("");
     let mut cmd = Command::new(script);
@@ -222,7 +224,10 @@ fn run_probe_script(
     } else {
         let code = status.code();
         eprintln!("  host http probe: probe failed (exit status {status})");
-        bail!("probe script {} exited with status {status:?} (code {code:?})", script.display())
+        bail!(
+            "probe script {} exited with status {status:?} (code {code:?})",
+            script.display()
+        )
     }
 }
 
@@ -230,7 +235,11 @@ fn run_probe_script(
 /// elapses, or a stop is requested. A successful connect means the guest's
 /// network stack is up; the in-guest server may still be booting, so the probe
 /// script itself should retry its first request.
-fn wait_for_port_ready(addr: &str, connect_timeout: Duration, stop: &AtomicBool) -> anyhow::Result<()> {
+fn wait_for_port_ready(
+    addr: &str,
+    connect_timeout: Duration,
+    stop: &AtomicBool,
+) -> anyhow::Result<()> {
     let started = Instant::now();
     loop {
         if stop.load(Ordering::Acquire) {
@@ -256,8 +265,10 @@ fn wait_for_port_ready(addr: &str, connect_timeout: Duration, stop: &AtomicBool)
 /// over QEMU's non-zero exit status.
 #[cfg(unix)]
 fn request_qmp_quit(socket: &Path) -> anyhow::Result<bool> {
-    use std::os::unix::net::UnixStream;
-    use std::io::{Read, Write};
+    use std::{
+        io::{Read, Write},
+        os::unix::net::UnixStream,
+    };
 
     let mut stream = None;
     for _ in 0..QMP_CONNECT_RETRIES {
