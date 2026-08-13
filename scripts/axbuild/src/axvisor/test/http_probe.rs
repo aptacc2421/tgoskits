@@ -64,11 +64,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 ///
 /// `addr` is the forwarded host address (`127.0.0.1:<port>`). `config` carries
 /// the bearer token; `case_dir` locates the `vm-memory.toml` create body.
-pub(crate) fn run(
-    addr: &str,
-    config: &HostHttpProbeConfig,
-    case_dir: &Path,
-) -> anyhow::Result<()> {
+pub(crate) fn run(addr: &str, config: &HostHttpProbeConfig, case_dir: &Path) -> anyhow::Result<()> {
     // axbuild already runs on tokio; a nested current-thread runtime in the
     // guard's std thread keeps this probe sequential and reuses the existing
     // async reqwest client (no `blocking` feature needed).
@@ -91,22 +87,33 @@ async fn run_async(
         .build()
         .context("failed to build HTTP probe client")?;
 
-    let vm_config = std::fs::read_to_string(case_dir.join("vm-memory.toml")).with_context(|| {
-        format!(
-            "failed to read VM config fixture {}",
-            case_dir.join("vm-memory.toml").display()
-        )
-    })?;
+    let vm_config =
+        std::fs::read_to_string(case_dir.join("vm-memory.toml")).with_context(|| {
+            format!(
+                "failed to read VM config fixture {}",
+                case_dir.join("vm-memory.toml").display()
+            )
+        })?;
     let create_body = json!({ "toml": vm_config }).to_string();
 
     // 1. Readiness: the guard already waited for the TCP port; retry the first
     //    request briefly in case the axum router is still binding.
-    wait_for_status(&client, Method::GET, &format!("{base}/api/vms"), None, None, 200, INITIAL_READY_DEADLINE).await
-        .with_context(|| "guest management HTTP server never became reachable")?;
+    wait_for_status(
+        &client,
+        Method::GET,
+        &format!("{base}/api/vms"),
+        None,
+        None,
+        200,
+        INITIAL_READY_DEADLINE,
+    )
+    .await
+    .with_context(|| "guest management HTTP server never became reachable")?;
     println!("  http probe: guest management server reachable");
 
     // 2. List: the default VM (id 1) is registered and `Ready`.
-    let (code, body) = request(&client, Method::GET, &format!("{base}/api/vms"), None, None).await?;
+    let (code, body) =
+        request(&client, Method::GET, &format!("{base}/api/vms"), None, None).await?;
     assert_status("GET /api/vms", code, 200)?;
     ensure!(
         body.as_ref()
@@ -120,48 +127,118 @@ async fn run_async(
     );
 
     // 3. Detail of the default VM.
-    let (code, body) = request(&client, Method::GET, &format!("{base}/api/vms/1"), None, None).await?;
+    let (code, body) = request(
+        &client,
+        Method::GET,
+        &format!("{base}/api/vms/1"),
+        None,
+        None,
+    )
+    .await?;
     assert_status("GET /api/vms/1", code, 200)?;
     assert_vm_status("GET /api/vms/1", &body, "ready")?;
 
     // 4-5. Auth: mutating routes reject unauthenticated writes with 401.
-    let (code, _) = request(&client, Method::POST, &format!("{base}/api/vms/1/start"), None, None).await?;
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/1/start"),
+        None,
+        None,
+    )
+    .await?;
     assert_status("POST /api/vms/1/start (no auth)", code, 401)?;
-    let (code, _) = request(&client, Method::POST, &format!("{base}/api/vms/create"), None, None).await?;
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/create"),
+        None,
+        None,
+    )
+    .await?;
     assert_status("POST /api/vms/create (no auth)", code, 401)?;
 
     // 6. Error path: unknown VM detail is 404.
-    let (code, _) = request(&client, Method::GET, &format!("{base}/api/vms/999"), None, None).await?;
+    let (code, _) = request(
+        &client,
+        Method::GET,
+        &format!("{base}/api/vms/999"),
+        None,
+        None,
+    )
+    .await?;
     assert_status("GET /api/vms/999", code, 404)?;
 
     // 7. Start the default VM and poll into `running`.
-    let (code, _) = request(&client, Method::POST, &format!("{base}/api/vms/1/start"), token, None).await?;
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/1/start"),
+        token,
+        None,
+    )
+    .await?;
     assert_status("POST /api/vms/1/start", code, 200)?;
     poll_vm_status(&client, &base, 1, "running").await?;
 
     // 8. Stop is a request: the `stopped` state arrives asynchronously once
     //    the vCPU observes it and exits.
-    let (code, _) = request(&client, Method::POST, &format!("{base}/api/vms/1/stop"), token, None).await?;
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/1/stop"),
+        token,
+        None,
+    )
+    .await?;
     assert_status("POST /api/vms/1/stop", code, 200)?;
     poll_vm_status(&client, &base, 1, "stopped").await?;
 
     // 9. Restart-after-stop is a known scheduling limitation; the contract
     //    rejects it with 409 rather than hanging the VM in `running`.
-    let (code, _) = request(&client, Method::POST, &format!("{base}/api/vms/1/start"), token, None).await?;
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/1/start"),
+        token,
+        None,
+    )
+    .await?;
     assert_status("POST /api/vms/1/start (restart-after-stop)", code, 409)?;
 
     // 10. Duplicate create while id 1 is registered conflicts.
-    let (code, _) = request(&client, Method::POST, &format!("{base}/api/vms/create"), token, Some(&create_body)).await?;
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/create"),
+        token,
+        Some(&create_body),
+    )
+    .await?;
     assert_status("POST /api/vms/create (duplicate id=1)", code, 409)?;
 
     // 11. Delete, then poll until the VM is gone.
-    let (code, _) = request(&client, Method::DELETE, &format!("{base}/api/vms/1"), token, None).await?;
+    let (code, _) = request(
+        &client,
+        Method::DELETE,
+        &format!("{base}/api/vms/1"),
+        token,
+        None,
+    )
+    .await?;
     assert_status("DELETE /api/vms/1", code, 204)?;
     poll_vm_gone(&client, &base, 1).await?;
 
     // 12. Recreate after delete: the embedded image is matched by id, so a
     //     fresh create with the same config succeeds and registers id 1 again.
-    let (code, body) = request(&client, Method::POST, &format!("{base}/api/vms/create"), token, Some(&create_body)).await?;
+    let (code, body) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/create"),
+        token,
+        Some(&create_body),
+    )
+    .await?;
     assert_status("POST /api/vms/create (recreate)", code, 200)?;
     ensure!(
         body.and_then(|v| v.get("id").and_then(Value::as_u64)) == Some(1),
@@ -170,7 +247,14 @@ async fn run_async(
     poll_vm_status(&client, &base, 1, "ready").await?;
 
     // 13. Cleanup: leave the hypervisor without a registered VM.
-    let (code, _) = request(&client, Method::DELETE, &format!("{base}/api/vms/1"), token, None).await?;
+    let (code, _) = request(
+        &client,
+        Method::DELETE,
+        &format!("{base}/api/vms/1"),
+        token,
+        None,
+    )
+    .await?;
     assert_status("DELETE /api/vms/1 (cleanup)", code, 204)?;
     poll_vm_gone(&client, &base, 1).await?;
 
@@ -210,7 +294,10 @@ async fn request(
         None
     } else {
         serde_json::from_slice(&bytes).with_context(|| {
-            format!("HTTP response from {url} was not valid JSON: {:?}", &bytes[..bytes.len().min(256)])
+            format!(
+                "HTTP response from {url} was not valid JSON: {:?}",
+                &bytes[..bytes.len().min(256)]
+            )
         })?
     };
     Ok((status, json))

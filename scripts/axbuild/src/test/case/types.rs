@@ -1,8 +1,4 @@
-use std::{
-    collections::BTreeSet,
-    path::PathBuf,
-    time::Duration,
-};
+use std::{collections::BTreeSet, path::PathBuf, time::Duration};
 
 use serde::Deserialize;
 
