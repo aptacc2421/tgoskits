@@ -13,8 +13,8 @@
 //! When the probe finishes — pass or fail — the guard quits QEMU over the QMP
 //! monitor socket the runner added (`-qmp unix:...,server=on,wait=off`), so the
 //! QEMU process exits cleanly and the runner reads the stored verdict from the
-//! guard as the test result. The case `timeout` remains the backstop if the
-//! probe or its QMP quit fails.
+//! guard as the test result. The runner owns the QEMU child, so the case
+//! `timeout` remains the backstop if the probe or its QMP quit fails.
 
 use std::{
     net::TcpStream,
@@ -43,23 +43,10 @@ const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 /// How long to keep retrying the QMP connect before giving up on quitting QEMU.
 const QMP_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const QMP_CONNECT_RETRIES: usize = 10;
-/// How long to wait after QMP `quit` for QEMU to exit on its own before
-/// force-killing it. QEMU can ignore `quit` when its main loop is stuck in a
-/// busy poll (observed under the axbuild runner), so the guard must not wait
-/// forever for a clean exit.
-#[cfg(target_os = "linux")]
-const QMP_QUIT_GRACE: Duration = Duration::from_secs(3);
-/// Interval for polling whether QEMU is still alive after `quit`.
-#[cfg(target_os = "linux")]
-const QMP_ALIVE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) struct HostHttpProbeGuard {
     stop: Arc<AtomicBool>,
     result: Arc<Mutex<Option<anyhow::Result<()>>>>,
-    /// Set when the guard had to SIGKILL QEMU because it ignored QMP `quit`.
-    /// The runner uses this to prefer the stored probe verdict over QEMU's
-    /// non-zero exit status.
-    killed_by_probe: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -86,8 +73,6 @@ impl HostHttpProbeGuard {
         let thread_stop = stop.clone();
         let result = Arc::new(Mutex::new(None));
         let thread_result = result.clone();
-        let killed_by_probe = Arc::new(AtomicBool::new(false));
-        let thread_killed = killed_by_probe.clone();
         let case_name = case_name.to_string();
         let (ready_tx, ready_rx) = mpsc::channel();
 
@@ -109,20 +94,17 @@ impl HostHttpProbeGuard {
                 probe()
             })();
             *thread_result.lock().unwrap() = Some(verdict);
-            // Quit QEMU so the run ends on the probe verdict instead of the
-            // serial-timeout path. `request_qmp_quit` force-kills QEMU when it
-            // ignores `quit` (a hang observed under the runner); record that so
-            // the runner trusts the stored verdict over QEMU's non-zero exit
-            // status.
-            if let Some(socket) = qmp_socket {
-                match request_qmp_quit(&socket) {
-                    Ok(true) => thread_killed.store(true, Ordering::SeqCst),
-                    Ok(false) => {}
-                    Err(err) => eprintln!(
-                        "  host http probe: {thread_case_name}: failed to quit QEMU via QMP: \
-                         {err:#}"
-                    ),
-                }
+            // Quit QEMU so a successful run ends promptly on the probe verdict
+            // instead of the serial-timeout path. The runner owns the QEMU
+            // child, so it decides whether QEMU actually exits: a `quit` that
+            // is ignored degrades to the case timeout, which then fails the
+            // run — a stuck QEMU must not be reported as a probe success.
+            if let Some(socket) = qmp_socket
+                && let Err(err) = request_qmp_quit(&socket)
+            {
+                eprintln!(
+                    "  host http probe: {thread_case_name}: failed to quit QEMU via QMP: {err:#}"
+                );
             }
         });
 
@@ -135,7 +117,6 @@ impl HostHttpProbeGuard {
         Ok(Self {
             stop,
             result,
-            killed_by_probe,
             thread: Some(thread),
         })
     }
@@ -146,12 +127,6 @@ impl HostHttpProbeGuard {
     /// *before* it quits QEMU, so a clean QEMU exit implies a verdict exists.
     pub(crate) fn take_result(&self) -> Option<anyhow::Result<()>> {
         self.result.lock().unwrap().take()
-    }
-
-    /// Whether the probe had to SIGKILL QEMU (it ignored QMP `quit`). When
-    /// true, the runner prefers the stored probe verdict over QEMU's exit code.
-    pub(crate) fn killed_by_probe(&self) -> bool {
-        self.killed_by_probe.load(Ordering::SeqCst)
     }
 }
 
@@ -188,16 +163,14 @@ fn wait_for_port_ready(
     }
 }
 
-/// Quit QEMU by connecting to its QMP monitor socket and issuing `quit`, then
-/// wait for it to exit. The socket path comes from the `-qmp
-/// unix:...,server=on,wait=off` argument the runner added.
-///
-/// Returns `true` when QEMU had to be SIGKILL'd because it did not exit after
-/// `quit` (a main-loop hang observed under the axbuild runner). In that case
-/// the caller records the kill so the runner trusts the stored probe verdict
-/// over QEMU's non-zero exit status.
+/// Quit QEMU by connecting to its QMP monitor socket and issuing `quit`. The
+/// socket path comes from the `-qmp unix:...,server=on,wait=off` argument the
+/// runner added. Returns once `quit` has been sent; whether QEMU actually exits
+/// is the runner's job — it owns the QEMU child, and an ignored `quit` degrades
+/// to the case timeout, which then fails the run (a stuck QEMU must not be
+/// reported as a probe success).
 #[cfg(unix)]
-fn request_qmp_quit(socket: &Path) -> anyhow::Result<bool> {
+fn request_qmp_quit(socket: &Path) -> anyhow::Result<()> {
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,
@@ -221,8 +194,6 @@ fn request_qmp_quit(socket: &Path) -> anyhow::Result<bool> {
     stream
         .set_write_timeout(Some(Duration::from_millis(200)))
         .ok();
-    #[cfg(target_os = "linux")]
-    let peer_pid = peer_pid(&stream);
     let mut buf = [0_u8; 512];
     let _ = stream.read(&mut buf); // QMP greeting
     stream.write_all(b"{\"execute\":\"qmp_capabilities\"}\r\n")?;
@@ -230,76 +201,10 @@ fn request_qmp_quit(socket: &Path) -> anyhow::Result<bool> {
     let _ = stream.read(&mut buf); // capabilities response
     stream.write_all(b"{\"execute\":\"quit\"}\r\n")?;
     stream.flush()?;
-
-    // Give QEMU a short window to honor `quit` and exit on its own. When it is
-    // still alive afterwards (the hang seen under the runner), SIGKILL it so
-    // the run ends promptly on the probe verdict instead of the serial
-    // timeout.
-    #[cfg(target_os = "linux")]
-    {
-        let Some(pid) = peer_pid else {
-            // Could not learn QEMU's PID; fall back to the case timeout.
-            return Ok(false);
-        };
-        let deadline = Instant::now() + QMP_QUIT_GRACE;
-        while Instant::now() < deadline {
-            if !process_alive(pid) {
-                return Ok(false); // exited cleanly
-            }
-            thread::sleep(QMP_ALIVE_POLL_INTERVAL);
-        }
-        if process_alive(pid) {
-            kill_process(pid);
-            return Ok(true); // force-killed: probe verdict is authoritative
-        }
-    }
-    Ok(false)
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn request_qmp_quit(_socket: &Path) -> anyhow::Result<bool> {
+fn request_qmp_quit(_socket: &Path) -> anyhow::Result<()> {
     bail!("QMP unix sockets are not supported on this host")
-}
-
-/// Peer PID of a connected unix socket via `SO_PEERCRED` (Linux). Returns
-/// `None` when the credential lookup fails.
-#[cfg(target_os = "linux")]
-fn peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<i32> {
-    use std::os::fd::AsRawFd;
-
-    let mut creds: libc::ucred = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: `stream` is an open socket fd owned by the caller, and `creds`
-    // is a valid `ucred` buffer of the correct size.
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            &mut creds as *mut libc::ucred as *mut libc::c_void,
-            &mut len,
-        )
-    };
-    if rc == 0 && creds.pid > 0 {
-        Some(creds.pid)
-    } else {
-        None
-    }
-}
-
-/// Whether the process identified by `pid` is still alive.
-#[cfg(target_os = "linux")]
-fn process_alive(pid: i32) -> bool {
-    // SAFETY: `kill` with signal 0 only performs an existence check and never
-    // delivers a signal.
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
-/// Force-kill the process identified by `pid`.
-#[cfg(target_os = "linux")]
-fn kill_process(pid: i32) {
-    // SAFETY: `pid` came from SO_PEERCRED, i.e. it is the QEMU we connected to.
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-    }
 }

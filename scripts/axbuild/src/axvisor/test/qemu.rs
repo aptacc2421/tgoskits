@@ -345,11 +345,12 @@ impl Axvisor {
         // The guard must live for the whole run, so it is spawned here and
         // dropped at scope end (after QEMU exits).
         //
-        // The guard also drives QEMU termination: after it stores its verdict it
-        // connects to a QMP monitor socket and sends `quit`, so the run ends on
-        // the probe result instead of the serial-timeout path. That makes the
-        // probe verdict the authoritative test result (no `/__probe_result`
-        // relay inside the guest).
+        // The guard also ends the run: after it stores its verdict it connects
+        // to a QMP monitor socket and sends `quit`, so a successful run ends
+        // on the probe result instead of the serial-timeout path. The runner
+        // owns the QEMU child, so a `quit` QEMU ignores degrades to the case
+        // timeout and fails the run (no `/__probe_result` relay inside the
+        // guest).
         let mut host_probe_guard = None;
         if let Some(probe_config) =
             test_qemu::load_qemu_case_extra_config(&case.case.case.qemu_config_path)?
@@ -392,10 +393,10 @@ impl Axvisor {
             )?);
         }
 
-        // QEMU's exit code is not the verdict for probe cases: the probe quits
-        // QEMU (cleanly, or force-kills it if `quit` is ignored) whether it
-        // passed or failed, so the stored probe result decides. For non-probe
-        // cases the serial-success path in
+        // Both conditions must hold for a probe case: QEMU must run cleanly (a
+        // fail_regex match, terminal timeout, or spawn/exit error fails the run
+        // even when the probe passed), and the HTTP probe verdict must be
+        // `Ok`. For non-probe cases the serial-success path in
         // `run_qemu_with_prepared_case_assets` still applies unchanged.
         let qemu_result = test_case::run_qemu_with_prepared_case_assets(
             &mut self.app,
@@ -416,65 +417,30 @@ impl Axvisor {
         let probe_result = host_probe_guard
             .as_ref()
             .and_then(|guard| guard.take_result());
-        let killed_by_probe = host_probe_guard
-            .as_ref()
-            .map(|guard| guard.killed_by_probe())
-            .unwrap_or(false);
         drop(host_probe_guard);
 
-        resolve_probe_verdict(
-            &case.case.case.name,
-            qemu_result,
-            probe_configured,
-            probe_result,
-            killed_by_probe,
-        )
+        combine_results(qemu_result, probe_configured, probe_result)
     }
 }
 
-/// Combine the QEMU runner result, probe configuration/result, and whether the
-/// probe force-killed QEMU into the final case verdict.
-///
-/// Precedence:
-/// 1. A genuine serial failure (the ostool matcher reported a `fail_regex`
-///    match) always wins, even when the probe force-killed QEMU afterwards —
-///    QEMU ignored QMP `quit`, so the matcher's own kill also failed to stop it
-///    and the probe's SIGKILL finished the job. The probe may only override the
-///    *termination* it caused, never a real failure the matcher already observed.
-/// 2. When the probe force-killed QEMU (QMP `quit` was ignored), the stored
-///    probe verdict is authoritative for that termination.
-/// 3. Any other QEMU failure (boot failure, guest crash, exit-status error)
-///    wins regardless of probe configuration.
-/// 4. Otherwise the probe verdict decides.
-fn resolve_probe_verdict(
-    case_name: &str,
+/// Combine the QEMU runner result and the HTTP probe verdict into the final
+/// case result. Both conditions must succeed: `qemu_result` first, then the
+/// probe verdict. A fail_regex match, terminal timeout, or QEMU spawn/exit
+/// failure therefore fails the run even when the probe passed — the probe may
+/// only contribute its verdict once QEMU has run cleanly (e.g. exited via the
+/// probe's QMP `quit`).
+fn combine_results(
     qemu_result: anyhow::Result<()>,
     probe_configured: bool,
     probe_result: Option<anyhow::Result<()>>,
-    killed_by_probe: bool,
 ) -> anyhow::Result<()> {
-    match (qemu_result, probe_configured, probe_result, killed_by_probe) {
-        (Err(err), ..) if qemu_serial_failure(&err) => Err(err),
-        (_, true, Some(verdict), true) => verdict,
-        (Err(err), ..) => Err(err),
-        (Ok(()), false, ..) => Ok(()),
-        (Ok(()), true, Some(Ok(())), _) => Ok(()),
-        (Ok(()), true, Some(Err(err)), _) => Err(err),
-        (Ok(()), true, None, _) => {
-            anyhow::bail!("host http probe for `{case_name}` produced no verdict")
-        }
-    }
-}
+    qemu_result?;
 
-/// Whether a QEMU runner error is a genuine serial failure rather than the
-/// exit-status error left behind when the host probe force-kills QEMU. The two
-/// are distinguishable by error shape: the ostool matcher reports a matched
-/// `fail_regex` as `Fail pattern matched '<regex>': <excerpt>` (stream-match
-/// path), while a probe-attributable kill surfaces only as QEMU's stderr log
-/// (exit-status path), which never contains that marker.
-fn qemu_serial_failure(err: &anyhow::Error) -> bool {
-    err.chain()
-        .any(|cause| cause.to_string().starts_with("Fail pattern matched '"))
+    match (probe_configured, probe_result) {
+        (false, _) => Ok(()),
+        (true, Some(result)) => result,
+        (true, None) => anyhow::bail!("host http probe produced no verdict"),
+    }
 }
 
 /// Pick a free loopback port for the QEMU hostfwd listen, then release it so
@@ -567,7 +533,7 @@ pub(super) fn plan_qemu_case_artifacts<'case, 'artifact, T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{qemu_serial_failure, resolve_probe_verdict};
+    use super::combine_results;
 
     fn ok() -> anyhow::Result<()> {
         Ok(())
@@ -578,80 +544,46 @@ mod tests {
     }
 
     #[test]
-    fn serial_failure_is_detected_by_matcher_marker() {
-        let error =
-            err("Fail pattern matched '(?i)\\bpanic(?:ked)?\\b': panicked at os/axvisor/...");
-        assert!(qemu_serial_failure(&error.unwrap_err()));
-    }
-
-    #[test]
-    fn serial_failure_detection_survives_context_wrapping() {
-        let inner = anyhow::anyhow!("Fail pattern matched '(?i)kernel panic': Kernel panic");
-        let wrapped = inner.context("qemu run failed");
-        assert!(qemu_serial_failure(&wrapped));
-    }
-
-    #[test]
-    fn probe_kill_stderr_error_is_not_a_serial_failure() {
-        let error = err("failed to run QEMU: qemu-system-aarch64: terminating on signal 9");
-        assert!(!qemu_serial_failure(&error.unwrap_err()));
-    }
-
-    #[test]
-    fn empty_stderr_error_is_not_a_serial_failure() {
-        assert!(!qemu_serial_failure(&err("").unwrap_err()));
-    }
-
-    #[test]
-    fn serial_failure_wins_over_successful_probe_after_force_kill() {
-        // The reviewer's case: QEMU ignored QMP `quit` AND the serial matcher
-        // already reported a fail_regex match; the probe's SIGKILL must not let
-        // a passing probe verdict swallow that real failure.
-        let verdict = resolve_probe_verdict(
-            "case",
-            err("Fail pattern matched '(?i)\\bpanic(?:ked)?\\b': panicked at os/axvisor/..."),
-            true,
-            Some(ok()),
-            true,
-        );
-        let message = verdict.unwrap_err().to_string();
-        assert!(message.starts_with("Fail pattern matched '"), "{message}");
-    }
-
-    #[test]
-    fn pure_probe_force_kill_lets_probe_verdict_win() {
-        // Probe force-killed a hung QEMU with no prior serial failure: the
-        // probe verdict is authoritative for that termination.
-        assert!(resolve_probe_verdict("case", err(""), true, Some(ok()), true).is_ok());
-        let probe_fail = resolve_probe_verdict("case", err(""), true, Some(err("probe 404")), true);
-        assert!(probe_fail.unwrap_err().to_string().contains("probe 404"));
-    }
-
-    #[test]
-    fn real_qemu_error_wins_when_probe_did_not_kill() {
-        // The serial matcher (or another QEMU error) already failed the run and
-        // QEMU exited on its own, so the probe never force-killed it: the QEMU
-        // error is the verdict.
+    fn qemu_error_wins_over_successful_probe() {
+        // A fail_regex match, terminal timeout, or QEMU spawn/exit failure must
+        // fail the run even when the HTTP probe passed.
         assert!(
-            resolve_probe_verdict("case", err("boot failed"), true, Some(ok()), false).is_err()
+            combine_results(
+                err("Fail pattern matched '(?i)panic': panicked at ..."),
+                true,
+                Some(ok()),
+            )
+            .is_err()
+        );
+        assert!(combine_results(err("QEMU timeout"), true, Some(ok())).is_err());
+        assert!(combine_results(err("failed to spawn qemu"), true, Some(ok())).is_err());
+    }
+
+    #[test]
+    fn probe_error_wins_on_clean_qemu_exit() {
+        let verdict = combine_results(ok(), true, Some(err("probe: expected 200 got 404")));
+        assert!(
+            verdict
+                .unwrap_err()
+                .to_string()
+                .contains("probe: expected 200")
         );
     }
 
     #[test]
-    fn non_probe_case_uses_qemu_exit_status() {
-        assert!(resolve_probe_verdict("case", ok(), false, None, false).is_ok());
-        assert!(resolve_probe_verdict("case", err("boot failed"), false, None, false).is_err());
-    }
-
-    #[test]
-    fn probe_verdict_decides_on_clean_qemu_exit() {
-        assert!(resolve_probe_verdict("case", ok(), true, Some(ok()), false).is_ok());
-        assert!(resolve_probe_verdict("case", ok(), true, Some(err("probe 404")), false).is_err());
+    fn both_ok_passes() {
+        assert!(combine_results(ok(), true, Some(ok())).is_ok());
     }
 
     #[test]
     fn missing_probe_verdict_on_clean_qemu_exit_fails() {
-        let verdict = resolve_probe_verdict("case", ok(), true, None, false);
+        let verdict = combine_results(ok(), true, None);
         assert!(verdict.unwrap_err().to_string().contains("no verdict"));
+    }
+
+    #[test]
+    fn non_probe_case_uses_qemu_result() {
+        assert!(combine_results(ok(), false, None).is_ok());
+        assert!(combine_results(err("boot failed"), false, None).is_err());
     }
 }
