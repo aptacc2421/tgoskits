@@ -9,10 +9,8 @@ name = "arceos-qemu"
 guest_type = "passthrough"
 # The number of virtual CPUs.
 cpu_num = 1
-# Guest vm physical cpu ids (required on FDT paths and the only effective knob:
-# logical index 1 -> mask 0b10 = Core 1; set_phys_cpu_sets recomputes and
-# overwrites phys_cpu_sets at boot, so phys_cpu_sets is not set here).
-phys_cpu_ids = [1]
+# Guest vm physical cpu ids.
+phys_cpu_ids = [0]
 
 #
 # Vm kernel configs

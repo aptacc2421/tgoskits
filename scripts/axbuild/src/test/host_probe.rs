@@ -1,26 +1,24 @@
-//! Host-side probe script runner for QEMU hostfwd integration tests.
+//! Host-side probe runner for QEMU hostfwd integration tests.
 //!
 //! The probe is the reverse of [`super::host_http`]: instead of serving host
 //! fixtures to the guest, it acts as a *client* that dials a management API
 //! running *inside* the guest through QEMU user-mode networking
-//! (`-netdev user,hostfwd=tcp::<host_port>-:<guest_port>`). The actual
-//! assertions are written as a plain shell script (`curl` + `grep`/`jq`) that
-//! lives in the test-case directory — axbuild only provides the generic
-//! orchestration: wait for the forwarded port, spawn the script, and treat its
-//! exit code as the verdict (0 = pass, non-zero = fail). Nothing in the
-//! hypervisor knows a test is running.
+//! (`-netdev user,hostfwd=tcp::<host_port>-:<guest_port>`). The actual HTTP
+//! assertions live in a typed probe module (see
+//! [`crate::axvisor::test::http_probe`]) that the runner wires in as a
+//! callback; this module only provides the generic orchestration: wait for the
+//! forwarded port, invoke the probe, and store its result as the verdict.
+//! Nothing in the hypervisor knows a test is running.
 //!
-//! When the script finishes — pass or fail — the guard quits QEMU over the QMP
+//! When the probe finishes — pass or fail — the guard quits QEMU over the QMP
 //! monitor socket the runner added (`-qmp unix:...,server=on,wait=off`), so the
 //! QEMU process exits cleanly and the runner reads the stored verdict from the
 //! guard as the test result. The case `timeout` remains the backstop if the
-//! script or its QMP quit fails.
+//! probe or its QMP quit fails.
 
 use std::{
-    collections::BTreeMap,
     net::TcpStream,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -33,6 +31,12 @@ use std::{
 use anyhow::{Context, bail};
 
 use crate::test::case::HostHttpProbeConfig;
+
+/// The probe callback invoked by the guard once the forwarded port accepts
+/// connections. Returns the verdict (`Ok` = pass, `Err` = fail). The probe is a
+/// `FnOnce` so it may own everything it needs (base address, token, config
+/// paths) and runs on the guard's worker thread.
+pub(crate) type HostHttpProbeFn = Box<dyn FnOnce() -> anyhow::Result<()> + Send + 'static>;
 
 /// Sleep between readiness retries.
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
@@ -48,11 +52,6 @@ const QMP_QUIT_GRACE: Duration = Duration::from_secs(3);
 /// Interval for polling whether QEMU is still alive after `quit`.
 #[cfg(target_os = "linux")]
 const QMP_ALIVE_POLL_INTERVAL: Duration = Duration::from_millis(100);
-/// Env var injected into the probe script carrying the forwarded host port.
-const PROBE_PORT_ENV: &str = "AXBUILD_PROBE_PORT";
-/// Env var injected into the probe script carrying the bearer token, matching
-/// the guest build's `[env] AXVM_HTTP_TOKEN`.
-const PROBE_TOKEN_ENV: &str = "AXVM_HTTP_TOKEN";
 
 pub(crate) struct HostHttpProbeGuard {
     stop: Arc<AtomicBool>,
@@ -61,29 +60,25 @@ pub(crate) struct HostHttpProbeGuard {
     /// The runner uses this to prefer the stored probe verdict over QEMU's
     /// non-zero exit status.
     killed_by_probe: Arc<AtomicBool>,
-    /// PID of the running probe-script child, so the guard can kill it on drop
-    /// if QEMU died before the script finished. Stored as a plain PID (not the
-    /// `Child`) so `Drop` never contends with the probe thread's `wait()` on
-    /// the same lock.
-    child_pid: Arc<Mutex<Option<i32>>>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl HostHttpProbeGuard {
-    /// Spawn the probe-script runner thread and return a guard that owns its
+    /// Spawn the probe runner thread and return a guard that owns its
     /// lifecycle.
     ///
-    /// `script` is the resolved host-side probe script path. `qmp_socket` is
-    /// the path QEMU binds from its `-qmp unix:...` argument; the guard
-    /// connects to it after the script finishes to quit QEMU. When `None`, the
-    /// guard only stores the verdict and relies on the case timeout to end the
-    /// run.
+    /// `probe` is the host-side probe callback (the typed HTTP assertions);
+    /// the guard waits for the forwarded port to accept connections, invokes
+    /// it, and stores its result as the verdict. `qmp_socket` is the path QEMU
+    /// binds from its `-qmp unix:...` argument; the guard connects to it after
+    /// the probe finishes to quit QEMU. When `None`, the guard only stores the
+    /// verdict and relies on the case timeout to end the run.
     pub(crate) fn start(
         config: &HostHttpProbeConfig,
-        script: PathBuf,
         host_port: u16,
         case_name: &str,
         qmp_socket: Option<PathBuf>,
+        probe: HostHttpProbeFn,
     ) -> anyhow::Result<Self> {
         let addr = format!("127.0.0.1:{host_port}");
         let connect_timeout = Duration::from_secs(config.connect_timeout_secs);
@@ -93,28 +88,28 @@ impl HostHttpProbeGuard {
         let thread_result = result.clone();
         let killed_by_probe = Arc::new(AtomicBool::new(false));
         let thread_killed = killed_by_probe.clone();
-        let child_pid = Arc::new(Mutex::new(None));
-        let thread_child_pid = child_pid.clone();
         let case_name = case_name.to_string();
         let (ready_tx, ready_rx) = mpsc::channel();
 
         let thread_addr = addr.clone();
         let thread_case_name = case_name.clone();
-        let token = config.token.clone();
-        let env = config.env.clone();
         let thread = thread::spawn(move || {
             let _ = ready_tx.send(());
-            let verdict = run_probe_script(
-                &script,
-                &thread_addr,
-                connect_timeout,
-                token.as_deref(),
-                &env,
-                &thread_stop,
-                &thread_child_pid,
-            );
+            // The guard waits for the forwarded port (guest boot + network
+            // init); the probe then runs the HTTP assertions. The probe is
+            // consumed exactly once.
+            let verdict = (|| -> anyhow::Result<()> {
+                wait_for_port_ready(&thread_addr, connect_timeout, &thread_stop).with_context(
+                    || {
+                        format!(
+                            "guest HTTP server never became reachable within {connect_timeout:?}"
+                        )
+                    },
+                )?;
+                probe()
+            })();
             *thread_result.lock().unwrap() = Some(verdict);
-            // Quit QEMU so the run ends on the script verdict instead of the
+            // Quit QEMU so the run ends on the probe verdict instead of the
             // serial-timeout path. `request_qmp_quit` force-kills QEMU when it
             // ignores `quit` (a hang observed under the runner); record that so
             // the runner trusts the stored verdict over QEMU's non-zero exit
@@ -141,7 +136,6 @@ impl HostHttpProbeGuard {
             stop,
             result,
             killed_by_probe,
-            child_pid,
             thread: Some(thread),
         })
     }
@@ -164,77 +158,16 @@ impl HostHttpProbeGuard {
 impl Drop for HostHttpProbeGuard {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        // If QEMU died before the script finished, kill the script child so the
-        // join below does not wait forever on a probe whose server is gone. The
-        // thread reaps the child, so the PID slot is cleared once it exits;
-        // killing a reaped/reused PID is avoided because the slot is only
-        // non-None while the thread is still waiting.
-        #[cfg(target_os = "linux")]
-        if let Some(pid) = self.child_pid.lock().unwrap().take() {
-            kill_process(pid);
-        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
 }
 
-/// Run the probe script and report the verdict: wait for the forwarded host
-/// port to accept connections (guest boot + network init), spawn the script
-/// with the port/token/env injected, and map its exit code to a result. The
-/// script's stdout/stderr are inherited so its output appears in the runner
-/// log.
-fn run_probe_script(
-    script: &Path,
-    addr: &str,
-    connect_timeout: Duration,
-    token: Option<&str>,
-    env: &BTreeMap<String, String>,
-    stop: &AtomicBool,
-    child_pid_slot: &Mutex<Option<i32>>,
-) -> anyhow::Result<()> {
-    wait_for_port_ready(addr, connect_timeout, stop).with_context(|| {
-        format!("guest HTTP server never became reachable within {connect_timeout:?}")
-    })?;
-
-    let port = addr.rsplit_once(':').map(|(_, p)| p).unwrap_or("");
-    let mut cmd = Command::new(script);
-    cmd.env(PROBE_PORT_ENV, port);
-    if let Some(token) = token {
-        cmd.env(PROBE_TOKEN_ENV, token);
-    }
-    cmd.envs(env);
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::inherit());
-    cmd.stderr(Stdio::inherit());
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to spawn probe script {}", script.display()))?;
-    // Publish the PID so `Drop` can SIGKILL the script if QEMU dies while it is
-    // still running. The slot is cleared after `wait` reaps the child, so a
-    // dead/reused PID is never killed.
-    *child_pid_slot.lock().unwrap() = Some(child.id() as i32);
-    let status = child
-        .wait()
-        .with_context(|| format!("failed to wait for probe script {}", script.display()))?;
-    *child_pid_slot.lock().unwrap() = None;
-    if status.success() {
-        println!("  host http probe: probe passed");
-        Ok(())
-    } else {
-        let code = status.code();
-        eprintln!("  host http probe: probe failed (exit status {status})");
-        bail!(
-            "probe script {} exited with status {status:?} (code {code:?})",
-            script.display()
-        )
-    }
-}
-
 /// Poll the forwarded host port until a TCP connection succeeds, the deadline
 /// elapses, or a stop is requested. A successful connect means the guest's
 /// network stack is up; the in-guest server may still be booting, so the probe
-/// script itself should retry its first request.
+/// itself should retry its first request.
 fn wait_for_port_ready(
     addr: &str,
     connect_timeout: Duration,

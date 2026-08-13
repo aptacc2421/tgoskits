@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     path::PathBuf,
     time::Duration,
 };
@@ -66,17 +66,18 @@ pub(crate) struct HostHttpServerConfig {
     pub(crate) dir: Option<String>,
 }
 
-/// Host-side probe script configuration.
+/// Host-side probe configuration.
 ///
 /// Direction is the reverse of [`HostHttpServerConfig`]: instead of the host
 /// serving fixtures to the guest, the host acts as a *client* that probes a
 /// management API running *inside* the guest, over QEMU user-mode networking
 /// hostfwd (`-netdev user,hostfwd=tcp::<host_port>-:<guest_port>`). The probe
-/// is a plain host-side shell script (`curl` + `grep`/`jq`) that makes real
-/// HTTP requests and asserts the responses entirely host-side — there is no
-/// guest-side test relay endpoint. The script's exit code is the verdict (0 =
-/// pass, non-zero = fail); the runner then quits QEMU over its QMP monitor
-/// socket.
+/// itself is a typed Rust module that makes real HTTP requests with `reqwest`
+/// and asserts the responses entirely host-side — there is no guest-side test
+/// relay endpoint. The probe's return value is the verdict; the runner then
+/// quits QEMU over its QMP monitor socket. axbuild only orchestrates (forward
+/// the port, run the probe, report its result); the HTTP assertions live in
+/// the probe module the runner wires in.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct HostHttpProbeConfig {
     /// Guest-side port the in-guest HTTP server binds to. The harness forwards a
@@ -94,13 +95,6 @@ pub(crate) struct HostHttpProbeConfig {
     /// regression the management-control-plane security review requires).
     #[serde(default)]
     pub(crate) token: Option<String>,
-    /// Path of the host-side probe script, relative to the case directory. The
-    /// runner resolves it against the workspace root before spawning.
-    pub(crate) script: PathBuf,
-    /// Extra environment variables injected into the probe script process, e.g.
-    /// `{ TOKEN = "..." }` so the script can read `$TOKEN`.
-    #[serde(default)]
-    pub(crate) env: BTreeMap<String, String>,
 }
 
 fn default_probe_guest_port() -> u16 {

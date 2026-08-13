@@ -9,8 +9,8 @@ name = "arceos-qemu"
 guest_type = "passthrough"
 # The number of virtual CPUs.
 cpu_num = 1
-# Guest vm physical cpu sets (CPU mask bitmap: Core 1 = 0b10 = 2; `1` is Core 0).
-phys_cpu_sets = [2]
+# Guest vm physical cpu sets.
+phys_cpu_sets = [1]
 
 #
 # Vm kernel configs

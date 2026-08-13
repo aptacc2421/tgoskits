@@ -339,32 +339,22 @@ impl Axvisor {
         // Optional host->guest TCP probe over QEMU user-mode networking. When
         // `[host_http_probe]` is configured, the host acts as a *client* that
         // dials a management API inside the guest through a hostfwd port and
-        // asserts the responses entirely host-side. The assertions live in a
-        // case-dir shell script (`probe.sh`), whose exit code is the verdict;
-        // axbuild only orchestrates: forward the port, spawn the script, and
-        // report its result. The guard must live for the whole run, so it is
-        // spawned here and dropped at scope end (after QEMU exits).
+        // asserts the responses entirely host-side. The assertions live in the
+        // typed probe module ([`super::http_probe`]); axbuild only
+        // orchestrates: forward the port, run the probe, and report its result.
+        // The guard must live for the whole run, so it is spawned here and
+        // dropped at scope end (after QEMU exits).
         //
         // The guard also drives QEMU termination: after it stores its verdict it
         // connects to a QMP monitor socket and sends `quit`, so the run ends on
-        // the script result instead of the serial-timeout path. That makes the
-        // script verdict the authoritative test result (no `/__probe_result`
+        // the probe result instead of the serial-timeout path. That makes the
+        // probe verdict the authoritative test result (no `/__probe_result`
         // relay inside the guest).
         let mut host_probe_guard = None;
         if let Some(probe_config) =
             test_qemu::load_qemu_case_extra_config(&case.case.case.qemu_config_path)?
                 .host_http_probe
         {
-            // A relative `script` is resolved against the case directory (where
-            // the qemu config lives), so axbuild may be invoked from any CWD.
-            let script = {
-                let path = PathBuf::from(&probe_config.script);
-                if path.is_absolute() {
-                    path
-                } else {
-                    case.case.case.case_dir.join(path)
-                }
-            };
             let host_port = pick_free_local_port()?;
             let qmp_socket = std::env::temp_dir().join(format!(
                 "axvisor-qmp-{}-{}.sock",
@@ -385,12 +375,20 @@ impl Axvisor {
                 "-qmp".to_string(),
                 format!("unix:{},server=on,wait=off", qmp_socket.to_string_lossy()),
             ]);
+            // The typed probe owns the create-body fixture (`vm-memory.toml`)
+            // read from the case directory; the guard stays orchestration-only.
+            let probe_addr = format!("127.0.0.1:{host_port}");
+            let probe_owned = probe_config.clone();
+            let probe_case_dir = case.case.case.case_dir.clone();
+            let probe: host_probe::HostHttpProbeFn = Box::new(move || {
+                super::http_probe::run(&probe_addr, &probe_owned, &probe_case_dir)
+            });
             host_probe_guard = Some(host_probe::HostHttpProbeGuard::start(
                 &probe_config,
-                script,
                 host_port,
                 &case.case.case.name,
                 Some(qmp_socket),
+                probe,
             )?);
         }
 
@@ -415,7 +413,7 @@ impl Axvisor {
 
         // Joins the probe thread now that QEMU has exited.
         let probe_configured = host_probe_guard.is_some();
-        let script_result = host_probe_guard
+        let probe_result = host_probe_guard
             .as_ref()
             .and_then(|guard| guard.take_result());
         let killed_by_probe = host_probe_guard
@@ -427,18 +425,18 @@ impl Axvisor {
         match (
             qemu_result,
             probe_configured,
-            script_result,
+            probe_result,
             killed_by_probe,
         ) {
             // The guard force-killed QEMU (QMP `quit` was ignored): the stored
-            // script verdict is authoritative, even though QEMU exited non-zero.
+            // probe verdict is authoritative, even though QEMU exited non-zero.
             (_, true, Some(verdict), true) => verdict,
             // A real QEMU failure (boot failure, guest crash, serial sentinel)
             // always wins regardless of probe configuration.
             (Err(err), ..) => Err(err),
             // Non-probe case: QEMU exit is the verdict.
             (Ok(()), false, ..) => Ok(()),
-            // Probe case: the stored script verdict decides.
+            // Probe case: the stored probe verdict decides.
             (Ok(()), true, Some(Ok(())), _) => Ok(()),
             (Ok(()), true, Some(Err(err)), _) => Err(err),
             (Ok(()), true, None, _) => {

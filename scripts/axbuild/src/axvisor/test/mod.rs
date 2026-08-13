@@ -1,6 +1,7 @@
 mod assets;
 mod board;
 mod discovery;
+mod http_probe;
 mod initramfs;
 mod ovmf;
 mod qemu;
