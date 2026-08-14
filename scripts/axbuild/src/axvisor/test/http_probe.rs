@@ -5,7 +5,7 @@
 //! user-mode networking hostfwd, and asserts the responses entirely host-side.
 //! All assertions live here as typed `reqwest` requests with `serde_json`
 //! parsing — there is no guest-side test relay endpoint and no shell script.
-//! The runner's [`HostHttpProbeGuard`](crate::test::host_probe::HostHttpProbeGuard)
+//! The runner's [`HostHttpProbeGuard`](super::host_probe::HostHttpProbeGuard)
 //! only orchestrates: wait for the forwarded port, invoke this probe, store its
 //! verdict, and quit QEMU over QMP.
 //!
@@ -54,6 +54,10 @@
 
 use std::{
     path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -61,7 +65,7 @@ use anyhow::{Context, ensure};
 use reqwest::Method;
 use serde_json::{Value, json};
 
-use crate::test::case::HostHttpProbeConfig;
+use super::types::AxvisorHttpProbeConfig;
 
 /// Poll deadline for VM state transitions (boot, stop, delete), mirroring the
 /// case `timeout` headroom requirement: must stay well below the QEMU case
@@ -77,8 +81,15 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 ///
 /// `addr` is the forwarded host address (`127.0.0.1:<port>`). `config` carries
 /// the bearer token and timeouts; `case_dir` locates the `vm-memory.toml`
-/// create body.
-pub(crate) fn run(addr: &str, config: &HostHttpProbeConfig, case_dir: &Path) -> anyhow::Result<()> {
+/// create body. `stop` is the shared abort flag: the poll loops check it so a
+/// run whose QEMU already failed aborts on the next poll instead of waiting
+/// out the deadline.
+pub(crate) fn run(
+    addr: &str,
+    config: &AxvisorHttpProbeConfig,
+    case_dir: &Path,
+    stop: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
     // axbuild already runs on tokio; a nested current-thread runtime in the
     // guard's std thread keeps this probe sequential and reuses the existing
     // async reqwest client (no `blocking` feature needed).
@@ -86,13 +97,14 @@ pub(crate) fn run(addr: &str, config: &HostHttpProbeConfig, case_dir: &Path) -> 
         .enable_all()
         .build()
         .context("failed to build HTTP probe tokio runtime")?;
-    runtime.block_on(run_async(addr, config, case_dir))
+    runtime.block_on(run_async(addr, config, case_dir, stop))
 }
 
 async fn run_async(
     addr: &str,
-    config: &HostHttpProbeConfig,
+    config: &AxvisorHttpProbeConfig,
     case_dir: &Path,
+    stop: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let base = format!("http://{addr}");
     let token = config.token.as_deref();
@@ -114,12 +126,10 @@ async fn run_async(
     //    request briefly in case the axum router is still binding.
     wait_for_status(
         &client,
-        Method::GET,
         &format!("{base}/api/vms"),
-        None,
-        None,
         200,
         INITIAL_READY_DEADLINE,
+        &stop,
     )
     .await
     .with_context(|| "guest management HTTP server never became reachable")?;
@@ -301,7 +311,7 @@ async fn run_async(
     .await?;
     assert_status("POST /api/vms/1/start", code, 200)?;
     assert_action("POST /api/vms/1/start", &body, true, false)?;
-    poll_vm_status(&client, &base, 1, "running").await?;
+    poll_vm_status(&client, &base, 1, "running", &stop).await?;
 
     // 17. Re-starting an already-running VM conflicts.
     let (code, _) = request(
@@ -326,7 +336,7 @@ async fn run_async(
     .await?;
     assert_status("POST /api/vms/1/stop", code, 200)?;
     assert_action("POST /api/vms/1/stop", &body, true, true)?;
-    poll_vm_status(&client, &base, 1, "stopped").await?;
+    poll_vm_status(&client, &base, 1, "stopped", &stop).await?;
 
     // 19. Restart-after-stop is a known scheduling limitation; the contract
     //     rejects it with 409 rather than hanging the VM in `running`.
@@ -350,7 +360,7 @@ async fn run_async(
     )
     .await?;
     assert_status("DELETE /api/vms/1", code, 204)?;
-    poll_vm_gone(&client, &base, 1).await?;
+    poll_vm_gone(&client, &base, 1, &stop).await?;
 
     // 21. Recreate after delete: the embedded image is matched by id, so a
     //     fresh create with the same config succeeds and registers id 1 again.
@@ -367,7 +377,7 @@ async fn run_async(
         body.and_then(|v| v.get("id").and_then(Value::as_u64)) == Some(1),
         "recreate did not return id=1"
     );
-    poll_vm_status(&client, &base, 1, "ready").await?;
+    poll_vm_status(&client, &base, 1, "ready", &stop).await?;
 
     // 22. The re-registered id conflicts with a second create.
     let (code, _) = request(
@@ -393,7 +403,7 @@ async fn run_async(
     )
     .await?;
     assert_status("POST /api/vms/1/start (recreated)", code, 200)?;
-    poll_vm_status(&client, &base, 1, "running").await?;
+    poll_vm_status(&client, &base, 1, "running", &stop).await?;
     let (code, _) = request(
         &client,
         Method::POST,
@@ -403,7 +413,7 @@ async fn run_async(
     )
     .await?;
     assert_status("POST /api/vms/1/stop (recreated)", code, 200)?;
-    poll_vm_status(&client, &base, 1, "stopped").await?;
+    poll_vm_status(&client, &base, 1, "stopped", &stop).await?;
 
     // 26. Cleanup: leave the hypervisor without a registered VM.
     let (code, _) = request(
@@ -415,7 +425,7 @@ async fn run_async(
     )
     .await?;
     assert_status("DELETE /api/vms/1 (cleanup)", code, 204)?;
-    poll_vm_gone(&client, &base, 1).await?;
+    poll_vm_gone(&client, &base, 1, &stop).await?;
 
     println!("  http probe: full control-plane contract passed");
     Ok(())
@@ -535,17 +545,22 @@ fn assert_action(
     Ok(())
 }
 
-/// Poll `GET /api/vms/{id}` until its status equals `expected` or the deadline
-/// elapses. Retries transport errors (the server may be mid-transition).
+/// Poll `GET /api/vms/{id}` until its status equals `expected`, the deadline
+/// elapses, or a stop is requested. Retries transport errors (the server may be
+/// mid-transition).
 async fn poll_vm_status(
     client: &reqwest::Client,
     base: &str,
     id: u64,
     expected: &str,
+    stop: &AtomicBool,
 ) -> anyhow::Result<()> {
     let url = format!("{base}/api/vms/{id}");
     let started = Instant::now();
     loop {
+        if stop.load(Ordering::Acquire) {
+            anyhow::bail!("host http probe stopped");
+        }
         match request(client, Method::GET, &url, None, None).await {
             Ok((code, body)) if code.as_u16() == 200 => {
                 if vm_status(&body)? == expected {
@@ -571,10 +586,18 @@ async fn poll_vm_status(
 }
 
 /// Poll `GET /api/vms/{id}` until it returns 404 (the VM was deleted).
-async fn poll_vm_gone(client: &reqwest::Client, base: &str, id: u64) -> anyhow::Result<()> {
+async fn poll_vm_gone(
+    client: &reqwest::Client,
+    base: &str,
+    id: u64,
+    stop: &AtomicBool,
+) -> anyhow::Result<()> {
     let url = format!("{base}/api/vms/{id}");
     let started = Instant::now();
     loop {
+        if stop.load(Ordering::Acquire) {
+            anyhow::bail!("host http probe stopped");
+        }
         match request(client, Method::GET, &url, None, None).await {
             Ok((code, _)) if code.as_u16() == 404 => {
                 println!("  http probe: VM[{id}] -> gone");
@@ -595,19 +618,22 @@ async fn poll_vm_gone(client: &reqwest::Client, base: &str, id: u64) -> anyhow::
     }
 }
 
-/// Poll one request until it returns `expected` or the deadline elapses.
+/// Poll one unauthenticated `GET url` until it returns `expected`, the deadline
+/// elapses, or a stop is requested. Used only for the initial readiness check,
+/// whose request needs no token or body.
 async fn wait_for_status(
     client: &reqwest::Client,
-    method: Method,
     url: &str,
-    token: Option<&str>,
-    body: Option<&str>,
     expected: u16,
     deadline: Duration,
+    stop: &AtomicBool,
 ) -> anyhow::Result<()> {
     let started = Instant::now();
     loop {
-        if let Ok((code, _)) = request(client, method.clone(), url, token, body).await
+        if stop.load(Ordering::Acquire) {
+            anyhow::bail!("host http probe stopped");
+        }
+        if let Ok((code, _)) = request(client, Method::GET, url, None, None).await
             && code.as_u16() == expected
         {
             return Ok(());

@@ -10,10 +10,7 @@ use serde::Deserialize;
 
 use crate::{
     context::validate_supported_target,
-    test::case::{
-        HostHttpProbeConfig, HostHttpServerConfig, TestQemuCase, TestQemuSubcase,
-        TestQemuSubcaseKind,
-    },
+    test::case::{HostHttpServerConfig, TestQemuCase, TestQemuSubcase, TestQemuSubcaseKind},
 };
 
 const TIMEOUT_SCALE_ENV: &str = "AXBUILD_TEST_TIMEOUT_SCALE";

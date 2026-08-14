@@ -1,12 +1,13 @@
 //! Host-side probe runner for QEMU hostfwd integration tests.
 //!
-//! The probe is the reverse of [`super::host_http`]: instead of serving host
-//! fixtures to the guest, it acts as a *client* that dials a management API
-//! running *inside* the guest through QEMU user-mode networking
+//! The probe is the reverse of the generic host fixture server
+//! ([`crate::test::host_http`]): instead of serving host fixtures to the guest,
+//! it acts as a *client* that dials the AxVisor management HTTP API running
+//! *inside* the guest through QEMU user-mode networking
 //! (`-netdev user,hostfwd=tcp::<host_port>-:<guest_port>`). The actual HTTP
 //! assertions live in a typed probe module (see
 //! [`crate::axvisor::test::http_probe`]) that the runner wires in as a
-//! callback; this module only provides the generic orchestration: wait for the
+//! callback; this module only provides the orchestration: wait for the
 //! forwarded port, invoke the probe, and store its result as the verdict.
 //! Nothing in the hypervisor knows a test is running.
 //!
@@ -30,7 +31,7 @@ use std::{
 
 use anyhow::{Context, bail};
 
-use crate::test::case::HostHttpProbeConfig;
+use super::types::AxvisorHttpProbeConfig;
 
 /// The probe callback invoked by the guard once the forwarded port accepts
 /// connections. Returns the verdict (`Ok` = pass, `Err` = fail). The probe is a
@@ -70,16 +71,21 @@ impl HostHttpProbeGuard {
     /// binds from its `-qmp unix:...` argument; the guard connects to it after
     /// the probe finishes to quit QEMU. When `None`, the guard only stores the
     /// verdict and relies on the case timeout to end the run.
+    ///
+    /// `stop` is the shared abort flag the probe's poll loops check so a run
+    /// whose QEMU already failed (fail_regex match, timeout, spawn error) can
+    /// abort the probe thread on its next poll instead of waiting out the
+    /// deadline. The runner owns it: it stores `true` when the case is over.
     pub(crate) fn start(
-        config: &HostHttpProbeConfig,
+        config: &AxvisorHttpProbeConfig,
         host_port: u16,
         case_name: &str,
         qmp_socket: Option<PathBuf>,
+        stop: Arc<AtomicBool>,
         probe: HostHttpProbeFn,
     ) -> anyhow::Result<Self> {
         let addr = format!("127.0.0.1:{host_port}");
         let connect_timeout = Duration::from_secs(config.connect_timeout_secs);
-        let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let result = Arc::new(Mutex::new(None));
         let thread_result = result.clone();

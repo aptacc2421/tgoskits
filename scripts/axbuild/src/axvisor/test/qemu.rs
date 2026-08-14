@@ -1,11 +1,13 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::{Arc, atomic::AtomicBool},
     time::Instant,
 };
 
 use anyhow::Context;
 use ostool::{build::config::Cargo, run::qemu::QemuConfig};
+use serde::Deserialize;
 
 use super::{
     AXVISOR_NORMAL_GROUP, AxvisorQemuCase,
@@ -14,14 +16,15 @@ use super::{
     discovery::{
         discover_test_group_names, qemu_list_error_is_ignorable, test_suite_dir, test_suite_root,
     },
+    host_probe,
     initramfs::prepare_configured_busybox_initramfs,
     parse_target,
-    types::PreparedAxvisorQemuCase,
+    types::{AxvisorHttpProbeConfig, PreparedAxvisorQemuCase},
 };
 use crate::{
     axvisor::{ArgsTestQemu, Axvisor, build, rootfs},
     context::{AxvisorCliArgs, ResolvedAxvisorRequest, SnapshotPersistence},
-    test::{case as test_case, host_probe, qemu as test_qemu},
+    test::{case as test_case, qemu as test_qemu},
 };
 
 const VCPU_RUNTIME_ERROR: &str = r"VM\[\d+\] run VCpu\[\d+\] get error";
@@ -353,8 +356,7 @@ impl Axvisor {
         // guest).
         let mut host_probe_guard = None;
         if let Some(probe_config) =
-            test_qemu::load_qemu_case_extra_config(&case.case.case.qemu_config_path)?
-                .host_http_probe
+            load_axvisor_http_probe_config(&case.case.case.qemu_config_path)?
         {
             let host_port = pick_free_local_port()?;
             let qmp_socket = std::env::temp_dir().join(format!(
@@ -376,19 +378,26 @@ impl Axvisor {
                 "-qmp".to_string(),
                 format!("unix:{},server=on,wait=off", qmp_socket.to_string_lossy()),
             ]);
+            // Stop flag shared with the probe thread's poll loops: the runner
+            // stores `true` when the case is over (QEMU failure, timeout, or
+            // the guard's Drop), so the probe aborts on its next poll instead
+            // of waiting out its deadline.
+            let stop = Arc::new(AtomicBool::new(false));
             // The typed probe owns the create-body fixture (`vm-memory.toml`)
             // read from the case directory; the guard stays orchestration-only.
             let probe_addr = format!("127.0.0.1:{host_port}");
             let probe_owned = probe_config.clone();
             let probe_case_dir = case.case.case.case_dir.clone();
+            let probe_stop = stop.clone();
             let probe: host_probe::HostHttpProbeFn = Box::new(move || {
-                super::http_probe::run(&probe_addr, &probe_owned, &probe_case_dir)
+                super::http_probe::run(&probe_addr, &probe_owned, &probe_case_dir, probe_stop)
             });
             host_probe_guard = Some(host_probe::HostHttpProbeGuard::start(
                 &probe_config,
                 host_port,
                 &case.case.case.name,
                 Some(qmp_socket),
+                stop,
                 probe,
             )?);
         }
@@ -452,6 +461,27 @@ fn pick_free_local_port() -> anyhow::Result<u16> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
         .context("failed to pick a free local port for QEMU hostfwd")?;
     Ok(listener.local_addr()?.port())
+}
+
+/// Parse the optional `[host_http_probe]` section from an Axvisor qemu case
+/// config. The section is axvisor-specific, so it is read directly from the
+/// case toml here instead of going through the generic
+/// [`test_qemu::load_qemu_case_extra_config`] (which no longer carries the
+/// field).
+fn load_axvisor_http_probe_config(
+    qemu_config_path: &Path,
+) -> anyhow::Result<Option<AxvisorHttpProbeConfig>> {
+    #[derive(Deserialize)]
+    struct ProbeSection {
+        #[serde(default)]
+        host_http_probe: Option<AxvisorHttpProbeConfig>,
+    }
+
+    let content = std::fs::read_to_string(qemu_config_path)
+        .with_context(|| format!("failed to read {}", qemu_config_path.display()))?;
+    Ok(toml::from_str::<ProbeSection>(&content)
+        .with_context(|| format!("failed to parse {}", qemu_config_path.display()))?
+        .host_http_probe)
 }
 
 fn axvisor_qemu_test_build_args(arch: &str, config: Option<PathBuf>) -> AxvisorCliArgs {
