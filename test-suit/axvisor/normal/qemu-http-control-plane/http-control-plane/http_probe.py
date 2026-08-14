@@ -90,8 +90,8 @@ def request(method, path, token=None, body=None):
 
     A JSON `body` is sent with `Content-Type: application/json`. A non-2xx
     response is not an error here — the caller asserts the status. A transport
-    error (connection refused/reset while the guest server is coming up or
-    mid-transition) raises RuntimeError for the caller to retry or fail.
+    error (connection refused/reset/timeout while the guest server is coming up
+    or mid-transition) raises RuntimeError for the caller to retry or fail.
     """
     headers = {}
     if token:
@@ -110,6 +110,14 @@ def request(method, path, token=None, body=None):
         raw = err.read()
     except urllib.error.URLError as err:
         raise RuntimeError("request %s %s failed: %s" % (method, path, err.reason))
+    except OSError as err:
+        # `resp.read()` raises a bare `socket.timeout` (an OSError) that the
+        # URLError handler above does not wrap. QEMU's user-mode hostfwd accepts
+        # the host-side connection as soon as QEMU starts, before the in-guest
+        # management server binds, so a first request can stall to the request
+        # timeout. Converting it to a retryable RuntimeError here lets the poll
+        # loops retry instead of crashing the probe in the boot window.
+        raise RuntimeError("request %s %s failed: %s" % (method, path, err))
     if not raw:
         return status, None
     return status, json.loads(raw.decode("utf-8"))
