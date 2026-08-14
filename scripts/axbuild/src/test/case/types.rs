@@ -85,6 +85,11 @@ pub(crate) struct HostHttpProbeConfig {
     /// `timeout` so a broken server fails on the probe, not on the QEMU timeout.
     #[serde(default = "default_probe_connect_timeout_secs")]
     pub(crate) connect_timeout_secs: u64,
+    /// Per-request HTTP timeout so a hung in-guest server fails a single request
+    /// fast and the probe's poll loops can retry instead of blocking the runner
+    /// thread forever. Applies to the whole probe `reqwest::Client`.
+    #[serde(default = "default_probe_request_timeout_secs")]
+    pub(crate) request_timeout_secs: u64,
     /// Bearer token the probe must send on authenticated requests, matching the
     /// guest build's `[env] AXVM_HTTP_TOKEN`. The probe also asserts that an
     /// *unauthenticated* write request is rejected with 401 (the access-denied
@@ -99,6 +104,10 @@ fn default_probe_guest_port() -> u16 {
 
 fn default_probe_connect_timeout_secs() -> u64 {
     120
+}
+
+fn default_probe_request_timeout_secs() -> u64 {
+    5
 }
 
 fn default_host_http_bind() -> String {

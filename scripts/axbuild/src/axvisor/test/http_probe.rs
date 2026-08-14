@@ -13,28 +13,44 @@
 //! (`test-suit/axvisor/normal/qemu-http-control-plane/`). Its default VM is
 //! `http-control-plane/vm-memory.toml`, a build-time embedded (`memory`)
 //! guest image registered with `base.id = 1` and kept `Ready` by the
-//! `no-auto-start` feature. The probe exercises the whole lifecycle in one
-//! boot, mirroring `os/axvisor/doc/http-control-plane-quickstart.md`:
+//! `no-auto-start` feature. The probe exercises the whole lifecycle — including
+//! the destroy-then-recreate resource re-acquire regression — in one boot,
+//! mirroring `os/axvisor/doc/http-control-plane-quickstart.md`:
 //!
 //! ```text
-//! GET    /api/vms          -> 200            (list)
-//! GET    /api/vms/1        -> 200 ready      (detail)
-//! POST   /api/vms/1/start  -> 401            (auth required)
-//! POST   /api/vms/create   -> 401            (auth required)
-//! GET    /api/vms/999      -> 404            (unknown VM)
-//! POST   /api/vms/1/start  -> 200 -> running (lifecycle)
-//! POST   /api/vms/1/stop   -> 200 -> stopped (async)
-//! POST   /api/vms/1/start  -> 409            (restart-after-stop)
-//! POST   /api/vms/create   -> 409            (id 1 still registered)
-//! DELETE /api/vms/1        -> 204 -> 404     (gone)
-//! POST   /api/vms/create   -> 200 {id:1}     (recreate)
-//! DELETE /api/vms/1        -> 204 -> 404     (cleanup)
+//! GET    /api/vms            -> 200            (list; id=1 present)
+//! GET    /api/vms/1          -> 200 ready      (detail; id/name/cpu_num/vcpu_states)
+//! GET    /api/vms/not-an-id  -> 404            (non-numeric id)
+//! GET    /api/vms/999        -> 404            (unknown VM)
+//! POST   /api/vms/create     -> 401            (no token)
+//! POST   /api/vms/1/start    -> 401            (no token)
+//! POST   /api/vms/1/stop     -> 401            (no token)
+//! DELETE /api/vms/1          -> 401            (no token)
+//! POST   /api/vms/create {}  -> 400            (missing toml)
+//! POST   /api/vms/create <bad toml> -> 400     (invalid TOML)
+//! POST   /api/vms/999/start  -> 404            (auth'd unknown VM)
+//! POST   /api/vms/999/stop   -> 404            (auth'd unknown VM)
+//! DELETE /api/vms/999        -> 404            (auth'd unknown VM)
+//! POST   /api/vms/create     -> 409            (id=1 already registered)
+//! POST   /api/vms/1/start    -> 200 -> running (async=false)
+//! POST   /api/vms/1/start    -> 409            (already running)
+//! POST   /api/vms/1/stop     -> 200 -> stopped (async=true)
+//! POST   /api/vms/1/start    -> 409            (restart-after-stop)
+//! DELETE /api/vms/1          -> 204 -> 404     (gone)
+//! POST   /api/vms/create     -> 200 {id:1}     (recreate after delete)
+//! POST   /api/vms/create     -> 409            (id=1 re-registered)
+//! POST   /api/vms/1/start    -> 200 -> running (recreated VM usable)
+//! POST   /api/vms/1/stop     -> 200 -> stopped
+//! DELETE /api/vms/1          -> 204 -> 404     (cleanup)
 //! ```
 //!
-//! `vm-memory.toml` is matched by `base.id` against the build-time embedded
-//! images, so the create body carries that file verbatim (the `kernel_path` /
-//! `ramdisk_path` `${workspace}` placeholders are unused at runtime for memory
-//! images).
+//! The last recreate -> start -> stop -> delete block is the resource
+//! re-acquire regression: it proves destroy freed guest memory, vCPUs, devices,
+//! and the registry entry so a fresh VM can be rebuilt from the same embedded
+//! image. `vm-memory.toml` is matched by `base.id` against the build-time
+//! embedded images, so the create body carries that file verbatim (the
+//! `kernel_path` / `ramdisk_path` `${workspace}` placeholders are unused at
+//! runtime for memory images).
 
 use std::{
     path::Path,
@@ -47,9 +63,6 @@ use serde_json::{Value, json};
 
 use crate::test::case::HostHttpProbeConfig;
 
-/// Per-request timeout so a hung guest server fails a request fast and the
-/// poll loops below can retry instead of blocking the runner thread forever.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Poll deadline for VM state transitions (boot, stop, delete), mirroring the
 /// case `timeout` headroom requirement: must stay well below the QEMU case
 /// timeout (600s) so a stuck transition fails on the probe, not on the timeout.
@@ -63,7 +76,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Run the full management-control-plane contract against one boot.
 ///
 /// `addr` is the forwarded host address (`127.0.0.1:<port>`). `config` carries
-/// the bearer token; `case_dir` locates the `vm-memory.toml` create body.
+/// the bearer token and timeouts; `case_dir` locates the `vm-memory.toml`
+/// create body.
 pub(crate) fn run(addr: &str, config: &HostHttpProbeConfig, case_dir: &Path) -> anyhow::Result<()> {
     // axbuild already runs on tokio; a nested current-thread runtime in the
     // guard's std thread keeps this probe sequential and reuses the existing
@@ -83,7 +97,7 @@ async fn run_async(
     let base = format!("http://{addr}");
     let token = config.token.as_deref();
     let client = reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
+        .timeout(Duration::from_secs(config.request_timeout_secs))
         .build()
         .context("failed to build HTTP probe client")?;
 
@@ -116,17 +130,11 @@ async fn run_async(
         request(&client, Method::GET, &format!("{base}/api/vms"), None, None).await?;
     assert_status("GET /api/vms", code, 200)?;
     ensure!(
-        body.as_ref()
-            .and_then(|v| v.as_array())
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|item| item.get("id").and_then(Value::as_u64) == Some(1))
-            }),
+        list_has_vm(&body, 1),
         "GET /api/vms did not list the default VM id=1"
     );
 
-    // 3. Detail of the default VM.
+    // 3. Detail of the default VM: identity, shape, and ready status.
     let (code, body) = request(
         &client,
         Method::GET,
@@ -137,8 +145,61 @@ async fn run_async(
     .await?;
     assert_status("GET /api/vms/1", code, 200)?;
     assert_vm_status("GET /api/vms/1", &body, "ready")?;
+    let detail = body
+        .as_ref()
+        .with_context(|| "GET /api/vms/1 had no JSON body")?;
+    ensure!(
+        detail.get("id").and_then(Value::as_u64) == Some(1),
+        "GET /api/vms/1 did not report id=1"
+    );
+    ensure!(
+        detail.get("name").and_then(Value::as_str) == Some("linux-http-control-plane"),
+        "GET /api/vms/1 did not report the fixture name"
+    );
+    ensure!(
+        detail.get("cpu_num").and_then(Value::as_u64) == Some(1),
+        "GET /api/vms/1 did not report cpu_num=1"
+    );
+    let vcpus = detail
+        .get("vcpu_states")
+        .and_then(Value::as_array)
+        .with_context(|| "GET /api/vms/1 had no vcpu_states array")?;
+    ensure!(
+        !vcpus.is_empty(),
+        "GET /api/vms/1 reported an empty vcpu_states array"
+    );
 
-    // 4-5. Auth: mutating routes reject unauthenticated writes with 401.
+    // 4-5. Error path: non-numeric and unknown ids are 404.
+    let (code, _) = request(
+        &client,
+        Method::GET,
+        &format!("{base}/api/vms/not-an-id"),
+        None,
+        None,
+    )
+    .await?;
+    assert_status("GET /api/vms/not-an-id", code, 404)?;
+    let (code, _) = request(
+        &client,
+        Method::GET,
+        &format!("{base}/api/vms/999"),
+        None,
+        None,
+    )
+    .await?;
+    assert_status("GET /api/vms/999", code, 404)?;
+
+    // 6-9. Auth: every mutating route rejects an unauthenticated write with
+    //      401, before any VM lookup or body parse.
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/create"),
+        None,
+        None,
+    )
+    .await?;
+    assert_status("POST /api/vms/create (no auth)", code, 401)?;
     let (code, _) = request(
         &client,
         Method::POST,
@@ -151,62 +212,73 @@ async fn run_async(
     let (code, _) = request(
         &client,
         Method::POST,
-        &format!("{base}/api/vms/create"),
-        None,
-        None,
-    )
-    .await?;
-    assert_status("POST /api/vms/create (no auth)", code, 401)?;
-
-    // 6. Error path: unknown VM detail is 404.
-    let (code, _) = request(
-        &client,
-        Method::GET,
-        &format!("{base}/api/vms/999"),
-        None,
-        None,
-    )
-    .await?;
-    assert_status("GET /api/vms/999", code, 404)?;
-
-    // 7. Start the default VM and poll into `running`.
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/1/start"),
-        token,
-        None,
-    )
-    .await?;
-    assert_status("POST /api/vms/1/start", code, 200)?;
-    poll_vm_status(&client, &base, 1, "running").await?;
-
-    // 8. Stop is a request: the `stopped` state arrives asynchronously once
-    //    the vCPU observes it and exits.
-    let (code, _) = request(
-        &client,
-        Method::POST,
         &format!("{base}/api/vms/1/stop"),
-        token,
+        None,
         None,
     )
     .await?;
-    assert_status("POST /api/vms/1/stop", code, 200)?;
-    poll_vm_status(&client, &base, 1, "stopped").await?;
+    assert_status("POST /api/vms/1/stop (no auth)", code, 401)?;
+    let (code, _) = request(
+        &client,
+        Method::DELETE,
+        &format!("{base}/api/vms/1"),
+        None,
+        None,
+    )
+    .await?;
+    assert_status("DELETE /api/vms/1 (no auth)", code, 401)?;
 
-    // 9. Restart-after-stop is a known scheduling limitation; the contract
-    //    rejects it with 409 rather than hanging the VM in `running`.
+    // 10-11. Create validates its body: a missing `toml` and an invalid TOML
+    //        document both reject with 400.
     let (code, _) = request(
         &client,
         Method::POST,
-        &format!("{base}/api/vms/1/start"),
+        &format!("{base}/api/vms/create"),
+        token,
+        Some("{}"),
+    )
+    .await?;
+    assert_status("POST /api/vms/create (missing toml)", code, 400)?;
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/create"),
+        token,
+        Some(&json!({ "toml": "this is not [[ valid toml {{{" }).to_string()),
+    )
+    .await?;
+    assert_status("POST /api/vms/create (invalid toml)", code, 400)?;
+
+    // 12-14. Authenticated writes to an unknown VM are 404.
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/999/start"),
         token,
         None,
     )
     .await?;
-    assert_status("POST /api/vms/1/start (restart-after-stop)", code, 409)?;
+    assert_status("POST /api/vms/999/start (auth'd)", code, 404)?;
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/999/stop"),
+        token,
+        None,
+    )
+    .await?;
+    assert_status("POST /api/vms/999/stop (auth'd)", code, 404)?;
+    let (code, _) = request(
+        &client,
+        Method::DELETE,
+        &format!("{base}/api/vms/999"),
+        token,
+        None,
+    )
+    .await?;
+    assert_status("DELETE /api/vms/999 (auth'd)", code, 404)?;
 
-    // 10. Duplicate create while id 1 is registered conflicts.
+    // 15. Duplicate create while id=1 is registered conflicts.
     let (code, _) = request(
         &client,
         Method::POST,
@@ -217,7 +289,58 @@ async fn run_async(
     .await?;
     assert_status("POST /api/vms/create (duplicate id=1)", code, 409)?;
 
-    // 11. Delete, then poll until the VM is gone.
+    // 16. Start the default VM: accepted synchronously (`async=false`), then
+    //     poll the detail into `running`.
+    let (code, body) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/1/start"),
+        token,
+        None,
+    )
+    .await?;
+    assert_status("POST /api/vms/1/start", code, 200)?;
+    assert_action("POST /api/vms/1/start", &body, true, false)?;
+    poll_vm_status(&client, &base, 1, "running").await?;
+
+    // 17. Re-starting an already-running VM conflicts.
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/1/start"),
+        token,
+        None,
+    )
+    .await?;
+    assert_status("POST /api/vms/1/start (already running)", code, 409)?;
+
+    // 18. Stop is a request (`async=true`): the `stopped` state arrives
+    //     asynchronously once the vCPU observes it and exits.
+    let (code, body) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/1/stop"),
+        token,
+        None,
+    )
+    .await?;
+    assert_status("POST /api/vms/1/stop", code, 200)?;
+    assert_action("POST /api/vms/1/stop", &body, true, true)?;
+    poll_vm_status(&client, &base, 1, "stopped").await?;
+
+    // 19. Restart-after-stop is a known scheduling limitation; the contract
+    //     rejects it with 409 rather than hanging the VM in `running`.
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/1/start"),
+        token,
+        None,
+    )
+    .await?;
+    assert_status("POST /api/vms/1/start (restart-after-stop)", code, 409)?;
+
+    // 20. Delete the stopped VM, then poll until it is gone.
     let (code, _) = request(
         &client,
         Method::DELETE,
@@ -229,7 +352,7 @@ async fn run_async(
     assert_status("DELETE /api/vms/1", code, 204)?;
     poll_vm_gone(&client, &base, 1).await?;
 
-    // 12. Recreate after delete: the embedded image is matched by id, so a
+    // 21. Recreate after delete: the embedded image is matched by id, so a
     //     fresh create with the same config succeeds and registers id 1 again.
     let (code, body) = request(
         &client,
@@ -246,7 +369,43 @@ async fn run_async(
     );
     poll_vm_status(&client, &base, 1, "ready").await?;
 
-    // 13. Cleanup: leave the hypervisor without a registered VM.
+    // 22. The re-registered id conflicts with a second create.
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/create"),
+        token,
+        Some(&create_body),
+    )
+    .await?;
+    assert_status("POST /api/vms/create (recreate duplicate)", code, 409)?;
+
+    // 23-25. The recreated VM must be fully usable, not merely re-registered:
+    //        destroy must have freed guest memory, vCPUs, devices, and the
+    //        registry entry so a fresh VM can be rebuilt and run from the same
+    //        embedded image. This is the resource re-acquire regression.
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/1/start"),
+        token,
+        None,
+    )
+    .await?;
+    assert_status("POST /api/vms/1/start (recreated)", code, 200)?;
+    poll_vm_status(&client, &base, 1, "running").await?;
+    let (code, _) = request(
+        &client,
+        Method::POST,
+        &format!("{base}/api/vms/1/stop"),
+        token,
+        None,
+    )
+    .await?;
+    assert_status("POST /api/vms/1/stop (recreated)", code, 200)?;
+    poll_vm_status(&client, &base, 1, "stopped").await?;
+
+    // 26. Cleanup: leave the hypervisor without a registered VM.
     let (code, _) = request(
         &client,
         Method::DELETE,
@@ -314,6 +473,17 @@ fn assert_status(label: &str, actual: reqwest::StatusCode, expected: u16) -> any
     Ok(())
 }
 
+/// Whether a `GET /api/vms` body lists a VM with the given id.
+fn list_has_vm(body: &Option<Value>, id: u64) -> bool {
+    body.as_ref()
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.get("id").and_then(Value::as_u64) == Some(id))
+        })
+}
+
 /// Extract the top-level `status` string of a VM detail body.
 fn vm_status(body: &Option<Value>) -> anyhow::Result<&str> {
     let value = body
@@ -332,6 +502,35 @@ fn assert_vm_status(label: &str, body: &Option<Value>, expected: &str) -> anyhow
     ensure!(
         status == expected,
         "{label} reported status {status}, expected {expected}"
+    );
+    Ok(())
+}
+
+/// Assert a lifecycle action response reports the expected `ok` and `async`
+/// markers. `async` distinguishes a synchronous start from a request-style
+/// stop whose `Stopped` state arrives later.
+fn assert_action(
+    label: &str,
+    body: &Option<Value>,
+    ok_expected: bool,
+    async_expected: bool,
+) -> anyhow::Result<()> {
+    let value = body
+        .as_ref()
+        .with_context(|| format!("{label} had no JSON body"))?;
+    let ok = value.get("ok").and_then(Value::as_bool);
+    let is_async = value.get("async").and_then(Value::as_bool);
+    println!(
+        "  http probe: {label} -> ok={ok:?} async={is_async:?} (expect ok={ok_expected} \
+         async={async_expected})"
+    );
+    ensure!(
+        ok == Some(ok_expected),
+        "{label} reported ok={ok:?}, expected {ok_expected}"
+    );
+    ensure!(
+        is_async == Some(async_expected),
+        "{label} reported async={is_async:?}, expected {async_expected}"
     );
     Ok(())
 }
@@ -448,5 +647,32 @@ mod tests {
         assert_eq!(vm_status(&body).unwrap(), "running");
         assert!(vm_status(&None).is_err());
         assert!(vm_status(&Some(json!({ "id": 1 }))).is_err());
+    }
+
+    #[test]
+    fn list_has_vm_matches_by_id() {
+        let body = Some(json!([{ "id": 2 }, { "id": 1 }]));
+        assert!(list_has_vm(&body, 1));
+        assert!(!list_has_vm(&body, 3));
+        assert!(!list_has_vm(&None, 1));
+        assert!(!list_has_vm(&Some(json!({ "id": 1 })), 1)); // object, not array
+    }
+
+    #[test]
+    fn assert_action_checks_ok_and_async() {
+        let start = Some(json!({ "ok": true, "status": "running", "async": false }));
+        assert!(assert_action("start", &start, true, false).is_ok());
+        assert!(assert_action("start", &start, true, true).is_err());
+        assert!(assert_action("start", &start, false, false).is_err());
+        assert!(
+            assert_action(
+                "stop",
+                &Some(json!({ "ok": true, "async": true })),
+                true,
+                true
+            )
+            .is_ok()
+        );
+        assert!(assert_action("start", &None, true, false).is_err());
     }
 }
