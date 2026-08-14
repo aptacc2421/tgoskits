@@ -342,11 +342,13 @@ impl Axvisor {
         // Optional host->guest TCP probe over QEMU user-mode networking. When
         // `[host_http_probe]` is configured, the host acts as a *client* that
         // dials a management API inside the guest through a hostfwd port and
-        // asserts the responses entirely host-side. The assertions live in the
-        // typed probe module ([`super::http_probe`]); axbuild only
-        // orchestrates: forward the port, run the probe, and report its result.
-        // The guard must live for the whole run, so it is spawned here and
-        // dropped at scope end (after QEMU exits).
+        // asserts the responses entirely host-side. The concrete requests,
+        // fixtures, and assertions live with the test-suit case as an
+        // executable probe asset (default `http_probe.py` in the case
+        // directory); axbuild only orchestrates: forward the port, execute the
+        // asset, collect its exit code, and report the result. The guard must
+        // live for the whole run, so it is spawned here and dropped at scope
+        // end (after QEMU exits).
         //
         // The guard also ends the run: after it stores its verdict it connects
         // to a QMP monitor socket and sends `quit`, so a successful run ends
@@ -383,8 +385,9 @@ impl Axvisor {
             // the guard's Drop), so the probe aborts on its next poll instead
             // of waiting out its deadline.
             let stop = Arc::new(AtomicBool::new(false));
-            // The typed probe owns the create-body fixture (`vm-memory.toml`)
-            // read from the case directory; the guard stays orchestration-only.
+            // The probe asset owns the concrete test content (fixtures such as
+            // `vm-memory.toml` and the assertions) in the case directory; the
+            // guard stays orchestration-only.
             let probe_addr = format!("127.0.0.1:{host_port}");
             let probe_owned = probe_config.clone();
             let probe_case_dir = case.case.case.case_dir.clone();

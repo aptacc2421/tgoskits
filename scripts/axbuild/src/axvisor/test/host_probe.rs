@@ -4,12 +4,12 @@
 //! ([`crate::test::host_http`]): instead of serving host fixtures to the guest,
 //! it acts as a *client* that dials the AxVisor management HTTP API running
 //! *inside* the guest through QEMU user-mode networking
-//! (`-netdev user,hostfwd=tcp::<host_port>-:<guest_port>`). The actual HTTP
-//! assertions live in a typed probe module (see
-//! [`crate::axvisor::test::http_probe`]) that the runner wires in as a
-//! callback; this module only provides the orchestration: wait for the
-//! forwarded port, invoke the probe, and store its result as the verdict.
-//! Nothing in the hypervisor knows a test is running.
+//! (`-netdev user,hostfwd=tcp::<host_port>-:<guest_port>`). The concrete HTTP
+//! requests and assertions live with the test-suit case as an executable probe
+//! asset (see [`crate::axvisor::test::http_probe`], which executes the asset
+//! and collects its exit code); this module only provides the orchestration:
+//! wait for the forwarded port, invoke the probe, and store its result as the
+//! verdict. Nothing in the hypervisor knows a test is running.
 //!
 //! When the probe finishes — pass or fail — the guard quits QEMU over the QMP
 //! monitor socket the runner added (`-qmp unix:...,server=on,wait=off`), so the

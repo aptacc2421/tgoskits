@@ -1,704 +1,279 @@
-//! Typed host-side probe for the AxVisor management HTTP control plane.
+//! Generic host-side probe runner for the AxVisor management HTTP control plane.
 //!
-//! Direction is host -> guest: the probe acts as a *client* that dials the
-//! axum management API running *inside* the AxVisor guest through QEMU
-//! user-mode networking hostfwd, and asserts the responses entirely host-side.
-//! All assertions live here as typed `reqwest` requests with `serde_json`
-//! parsing — there is no guest-side test relay endpoint and no shell script.
-//! The runner's [`HostHttpProbeGuard`](super::host_probe::HostHttpProbeGuard)
-//! only orchestrates: wait for the forwarded port, invoke this probe, store its
-//! verdict, and quit QEMU over QMP.
+//! Direction is host -> guest: the probe dials the axum management API running
+//! *inside* the AxVisor guest through QEMU user-mode networking hostfwd, and
+//! asserts the responses entirely host-side. The *test content* — the concrete
+//! requests, fixtures, and assertions — lives with the test-suit case as an
+//! executable probe asset (default `http_probe.py` in the case directory; see
+//! [`AxvisorHttpProbeConfig::probe_script`](super::types::AxvisorHttpProbeConfig::probe_script)).
+//! New HTTP scenarios or API-contract changes therefore edit the case asset,
+//! never this crate.
 //!
-//! The probe drives the single converged `http-control-plane` test case
-//! (`test-suit/axvisor/normal/qemu-http-control-plane/`). Its default VM is
-//! `http-control-plane/vm-memory.toml`, a build-time embedded (`memory`)
-//! guest image registered with `base.id = 1` and kept `Ready` by the
-//! `no-auto-start` feature. The probe exercises the whole lifecycle — including
-//! the destroy-then-recreate resource re-acquire regression — in one boot,
-//! mirroring `os/axvisor/doc/http-control-plane-quickstart.md`:
+//! This module is generic orchestration only: resolve the probe asset, spawn it
+//! once the forwarded port is reachable, and collect its exit code as the
+//! verdict. The runner's
+//! [`HostHttpProbeGuard`](super::host_probe::HostHttpProbeGuard) does the rest
+//! of the orchestration: wait for the forwarded port, invoke this probe, store
+//! its verdict, and quit QEMU over QMP.
+//!
+//! The probe asset is executed directly (its shebang selects the interpreter)
+//! with the environment:
 //!
 //! ```text
-//! GET    /api/vms            -> 200            (list; id=1 present)
-//! GET    /api/vms/1          -> 200 ready      (detail; id/name/cpu_num/vcpu_states)
-//! GET    /api/vms/not-an-id  -> 404            (non-numeric id)
-//! GET    /api/vms/999        -> 404            (unknown VM)
-//! POST   /api/vms/create     -> 401            (no token)
-//! POST   /api/vms/1/start    -> 401            (no token)
-//! POST   /api/vms/1/stop     -> 401            (no token)
-//! DELETE /api/vms/1          -> 401            (no token)
-//! POST   /api/vms/create {}  -> 400            (missing toml)
-//! POST   /api/vms/create <bad toml> -> 400     (invalid TOML)
-//! POST   /api/vms/999/start  -> 404            (auth'd unknown VM)
-//! POST   /api/vms/999/stop   -> 404            (auth'd unknown VM)
-//! DELETE /api/vms/999        -> 404            (auth'd unknown VM)
-//! POST   /api/vms/create     -> 409            (id=1 already registered)
-//! POST   /api/vms/1/start    -> 200 -> running (async=false)
-//! POST   /api/vms/1/start    -> 409            (already running)
-//! POST   /api/vms/1/stop     -> 200 -> stopped (async=true)
-//! POST   /api/vms/1/start    -> 409            (restart-after-stop)
-//! DELETE /api/vms/1          -> 204 -> 404     (gone)
-//! POST   /api/vms/create     -> 200 {id:1}     (recreate after delete)
-//! POST   /api/vms/create     -> 409            (id=1 re-registered)
-//! POST   /api/vms/1/start    -> 200 -> running (recreated VM usable)
-//! POST   /api/vms/1/stop     -> 200 -> stopped
-//! DELETE /api/vms/1          -> 204 -> 404     (cleanup)
+//! AXVISOR_HTTP_BASE            http://127.0.0.1:<host_port> (forwarded)
+//! AXVISOR_HTTP_TOKEN           bearer token (may be empty)
+//! AXVISOR_HTTP_CASE_DIR        case directory (fixtures like `vm-memory.toml`)
+//! AXVISOR_HTTP_CONNECT_TIMEOUT seconds for the initial reachability wait
+//! AXVISOR_HTTP_REQUEST_TIMEOUT seconds per HTTP request
 //! ```
 //!
-//! The last recreate -> start -> stop -> delete block is the resource
-//! re-acquire regression: it proves destroy freed guest memory, vCPUs, devices,
-//! and the registry entry so a fresh VM can be rebuilt from the same embedded
-//! image. `vm-memory.toml` is matched by `base.id` against the build-time
-//! embedded images, so the create body carries that file verbatim (the
-//! `kernel_path` / `ramdisk_path` `${workspace}` placeholders are unused at
-//! runtime for memory images).
+//! Exit code 0 is a pass; any nonzero exit fails the case. The asset streams
+//! its own progress to the runner's stdout/stderr so CI logs show the steps.
 
 use std::{
     path::Path,
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    thread,
+    time::Duration,
 };
 
-use anyhow::{Context, ensure};
-use reqwest::Method;
-use serde_json::{Value, json};
+use anyhow::{Context, bail};
 
 use super::types::AxvisorHttpProbeConfig;
 
-/// Poll deadline for VM state transitions (boot, stop, delete), mirroring the
-/// case `timeout` headroom requirement: must stay well below the QEMU case
-/// timeout (600s) so a stuck transition fails on the probe, not on the timeout.
-const POLL_DEADLINE: Duration = Duration::from_secs(120);
-/// Extra retry window for the very first request: the guard's TCP port wait
-/// proves the guest is listening, but the axum router may still be wiring up.
-const INITIAL_READY_DEADLINE: Duration = Duration::from_secs(30);
-/// Poll interval for state transitions.
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Poll interval while waiting for the probe asset to exit.
+const PROBE_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Run the full management-control-plane contract against one boot.
+/// Run the case's HTTP probe asset against one boot.
 ///
 /// `addr` is the forwarded host address (`127.0.0.1:<port>`). `config` carries
-/// the bearer token and timeouts; `case_dir` locates the `vm-memory.toml`
-/// create body. `stop` is the shared abort flag: the poll loops check it so a
-/// run whose QEMU already failed aborts on the next poll instead of waiting
-/// out the deadline.
+/// the bearer token, timeouts, and the probe-asset name; `case_dir` locates
+/// the asset (and its fixtures). `stop` is the shared abort flag: when the
+/// runner marks the case over (QEMU failure, timeout), a still-running asset is
+/// killed instead of waiting it out.
 pub(crate) fn run(
     addr: &str,
     config: &AxvisorHttpProbeConfig,
     case_dir: &Path,
     stop: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
-    // axbuild already runs on tokio; a nested current-thread runtime in the
-    // guard's std thread keeps this probe sequential and reuses the existing
-    // async reqwest client (no `blocking` feature needed).
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to build HTTP probe tokio runtime")?;
-    runtime.block_on(run_async(addr, config, case_dir, stop))
+    let script = case_dir.join(&config.probe_script);
+    ensure_probe_asset(&script)?;
+    println!(
+        "  host http probe: running probe asset {}",
+        script.display()
+    );
+    let mut child = spawn_probe_asset(&script, addr, config, case_dir)?;
+    match wait_probe_asset(&mut child, &stop) {
+        Some(status) if status.success() => Ok(()),
+        Some(status) => bail!(
+            "probe asset {} exited with code {}",
+            script.display(),
+            status.code().unwrap_or(-1)
+        ),
+        None => bail!("probe asset {} was killed", script.display()),
+    }
 }
 
-async fn run_async(
+/// Fail fast when the configured probe asset is missing, so a case that
+/// references a nonexistent asset errors clearly instead of spawning a `not
+/// found` and misreporting it as a probe failure.
+fn ensure_probe_asset(script: &Path) -> anyhow::Result<()> {
+    if !script.is_file() {
+        bail!(
+            "probe asset {} does not exist; add it to the case directory (or set \
+             [host_http_probe] probe_script)",
+            script.display()
+        );
+    }
+    Ok(())
+}
+
+/// Spawn the probe asset with the forwarded base URL, token, and timeouts as
+/// environment. The asset is executed directly so its shebang picks the
+/// interpreter; stdout/stderr are inherited so CI logs show the asset's steps.
+fn spawn_probe_asset(
+    script: &Path,
     addr: &str,
     config: &AxvisorHttpProbeConfig,
     case_dir: &Path,
-    stop: Arc<AtomicBool>,
-) -> anyhow::Result<()> {
-    let base = format!("http://{addr}");
-    let token = config.token.as_deref();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(config.request_timeout_secs))
-        .build()
-        .context("failed to build HTTP probe client")?;
-
-    let vm_config =
-        std::fs::read_to_string(case_dir.join("vm-memory.toml")).with_context(|| {
-            format!(
-                "failed to read VM config fixture {}",
-                case_dir.join("vm-memory.toml").display()
-            )
-        })?;
-    let create_body = json!({ "toml": vm_config }).to_string();
-
-    // 1. Readiness: the guard already waited for the TCP port; retry the first
-    //    request briefly in case the axum router is still binding.
-    wait_for_status(
-        &client,
-        &format!("{base}/api/vms"),
-        200,
-        INITIAL_READY_DEADLINE,
-        &stop,
-    )
-    .await
-    .with_context(|| "guest management HTTP server never became reachable")?;
-    println!("  http probe: guest management server reachable");
-
-    // 2. List: the default VM (id 1) is registered and `Ready`.
-    let (code, body) =
-        request(&client, Method::GET, &format!("{base}/api/vms"), None, None).await?;
-    assert_status("GET /api/vms", code, 200)?;
-    ensure!(
-        list_has_vm(&body, 1),
-        "GET /api/vms did not list the default VM id=1"
-    );
-
-    // 3. Detail of the default VM: identity, shape, and ready status.
-    let (code, body) = request(
-        &client,
-        Method::GET,
-        &format!("{base}/api/vms/1"),
-        None,
-        None,
-    )
-    .await?;
-    assert_status("GET /api/vms/1", code, 200)?;
-    assert_vm_status("GET /api/vms/1", &body, "ready")?;
-    let detail = body
-        .as_ref()
-        .with_context(|| "GET /api/vms/1 had no JSON body")?;
-    ensure!(
-        detail.get("id").and_then(Value::as_u64) == Some(1),
-        "GET /api/vms/1 did not report id=1"
-    );
-    ensure!(
-        detail.get("name").and_then(Value::as_str) == Some("linux-http-control-plane"),
-        "GET /api/vms/1 did not report the fixture name"
-    );
-    ensure!(
-        detail.get("cpu_num").and_then(Value::as_u64) == Some(1),
-        "GET /api/vms/1 did not report cpu_num=1"
-    );
-    let vcpus = detail
-        .get("vcpu_states")
-        .and_then(Value::as_array)
-        .with_context(|| "GET /api/vms/1 had no vcpu_states array")?;
-    ensure!(
-        !vcpus.is_empty(),
-        "GET /api/vms/1 reported an empty vcpu_states array"
-    );
-
-    // 4-5. Error path: non-numeric and unknown ids are 404.
-    let (code, _) = request(
-        &client,
-        Method::GET,
-        &format!("{base}/api/vms/not-an-id"),
-        None,
-        None,
-    )
-    .await?;
-    assert_status("GET /api/vms/not-an-id", code, 404)?;
-    let (code, _) = request(
-        &client,
-        Method::GET,
-        &format!("{base}/api/vms/999"),
-        None,
-        None,
-    )
-    .await?;
-    assert_status("GET /api/vms/999", code, 404)?;
-
-    // 6-9. Auth: every mutating route rejects an unauthenticated write with
-    //      401, before any VM lookup or body parse.
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/create"),
-        None,
-        None,
-    )
-    .await?;
-    assert_status("POST /api/vms/create (no auth)", code, 401)?;
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/1/start"),
-        None,
-        None,
-    )
-    .await?;
-    assert_status("POST /api/vms/1/start (no auth)", code, 401)?;
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/1/stop"),
-        None,
-        None,
-    )
-    .await?;
-    assert_status("POST /api/vms/1/stop (no auth)", code, 401)?;
-    let (code, _) = request(
-        &client,
-        Method::DELETE,
-        &format!("{base}/api/vms/1"),
-        None,
-        None,
-    )
-    .await?;
-    assert_status("DELETE /api/vms/1 (no auth)", code, 401)?;
-
-    // 10-11. Create validates its body: a missing `toml` and an invalid TOML
-    //        document both reject with 400.
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/create"),
-        token,
-        Some("{}"),
-    )
-    .await?;
-    assert_status("POST /api/vms/create (missing toml)", code, 400)?;
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/create"),
-        token,
-        Some(&json!({ "toml": "this is not [[ valid toml {{{" }).to_string()),
-    )
-    .await?;
-    assert_status("POST /api/vms/create (invalid toml)", code, 400)?;
-
-    // 12-14. Authenticated writes to an unknown VM are 404.
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/999/start"),
-        token,
-        None,
-    )
-    .await?;
-    assert_status("POST /api/vms/999/start (auth'd)", code, 404)?;
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/999/stop"),
-        token,
-        None,
-    )
-    .await?;
-    assert_status("POST /api/vms/999/stop (auth'd)", code, 404)?;
-    let (code, _) = request(
-        &client,
-        Method::DELETE,
-        &format!("{base}/api/vms/999"),
-        token,
-        None,
-    )
-    .await?;
-    assert_status("DELETE /api/vms/999 (auth'd)", code, 404)?;
-
-    // 15. Duplicate create while id=1 is registered conflicts.
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/create"),
-        token,
-        Some(&create_body),
-    )
-    .await?;
-    assert_status("POST /api/vms/create (duplicate id=1)", code, 409)?;
-
-    // 16. Start the default VM: accepted synchronously (`async=false`), then
-    //     poll the detail into `running`.
-    let (code, body) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/1/start"),
-        token,
-        None,
-    )
-    .await?;
-    assert_status("POST /api/vms/1/start", code, 200)?;
-    assert_action("POST /api/vms/1/start", &body, true, false)?;
-    poll_vm_status(&client, &base, 1, "running", &stop).await?;
-
-    // 17. Re-starting an already-running VM conflicts.
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/1/start"),
-        token,
-        None,
-    )
-    .await?;
-    assert_status("POST /api/vms/1/start (already running)", code, 409)?;
-
-    // 18. Stop is a request (`async=true`): the `stopped` state arrives
-    //     asynchronously once the vCPU observes it and exits.
-    let (code, body) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/1/stop"),
-        token,
-        None,
-    )
-    .await?;
-    assert_status("POST /api/vms/1/stop", code, 200)?;
-    assert_action("POST /api/vms/1/stop", &body, true, true)?;
-    poll_vm_status(&client, &base, 1, "stopped", &stop).await?;
-
-    // 19. Restart-after-stop is a known scheduling limitation; the contract
-    //     rejects it with 409 rather than hanging the VM in `running`.
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/1/start"),
-        token,
-        None,
-    )
-    .await?;
-    assert_status("POST /api/vms/1/start (restart-after-stop)", code, 409)?;
-
-    // 20. Delete the stopped VM, then poll until it is gone.
-    let (code, _) = request(
-        &client,
-        Method::DELETE,
-        &format!("{base}/api/vms/1"),
-        token,
-        None,
-    )
-    .await?;
-    assert_status("DELETE /api/vms/1", code, 204)?;
-    poll_vm_gone(&client, &base, 1, &stop).await?;
-
-    // 21. Recreate after delete: the embedded image is matched by id, so a
-    //     fresh create with the same config succeeds and registers id 1 again.
-    let (code, body) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/create"),
-        token,
-        Some(&create_body),
-    )
-    .await?;
-    assert_status("POST /api/vms/create (recreate)", code, 200)?;
-    ensure!(
-        body.and_then(|v| v.get("id").and_then(Value::as_u64)) == Some(1),
-        "recreate did not return id=1"
-    );
-    poll_vm_status(&client, &base, 1, "ready", &stop).await?;
-
-    // 22. The re-registered id conflicts with a second create.
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/create"),
-        token,
-        Some(&create_body),
-    )
-    .await?;
-    assert_status("POST /api/vms/create (recreate duplicate)", code, 409)?;
-
-    // 23-25. The recreated VM must be fully usable, not merely re-registered:
-    //        destroy must have freed guest memory, vCPUs, devices, and the
-    //        registry entry so a fresh VM can be rebuilt and run from the same
-    //        embedded image. This is the resource re-acquire regression.
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/1/start"),
-        token,
-        None,
-    )
-    .await?;
-    assert_status("POST /api/vms/1/start (recreated)", code, 200)?;
-    poll_vm_status(&client, &base, 1, "running", &stop).await?;
-    let (code, _) = request(
-        &client,
-        Method::POST,
-        &format!("{base}/api/vms/1/stop"),
-        token,
-        None,
-    )
-    .await?;
-    assert_status("POST /api/vms/1/stop (recreated)", code, 200)?;
-    poll_vm_status(&client, &base, 1, "stopped", &stop).await?;
-
-    // 26. Cleanup: leave the hypervisor without a registered VM.
-    let (code, _) = request(
-        &client,
-        Method::DELETE,
-        &format!("{base}/api/vms/1"),
-        token,
-        None,
-    )
-    .await?;
-    assert_status("DELETE /api/vms/1 (cleanup)", code, 204)?;
-    poll_vm_gone(&client, &base, 1, &stop).await?;
-
-    println!("  http probe: full control-plane contract passed");
-    Ok(())
+) -> anyhow::Result<Child> {
+    Command::new(script)
+        .env("AXVISOR_HTTP_BASE", format!("http://{addr}"))
+        .env(
+            "AXVISOR_HTTP_TOKEN",
+            config.token.clone().unwrap_or_default(),
+        )
+        .env("AXVISOR_HTTP_CASE_DIR", case_dir)
+        .env(
+            "AXVISOR_HTTP_CONNECT_TIMEOUT",
+            config.connect_timeout_secs.to_string(),
+        )
+        .env(
+            "AXVISOR_HTTP_REQUEST_TIMEOUT",
+            config.request_timeout_secs.to_string(),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("failed to spawn probe asset {}", script.display()))
 }
 
-/// One HTTP request; returns the status code and JSON body (if any). A
-/// transport error (connection refused/reset while the guest server is still
-/// coming up) is converted to a `reqwest::Error` for the caller to retry.
-async fn request(
-    client: &reqwest::Client,
-    method: Method,
-    url: &str,
-    token: Option<&str>,
-    body: Option<&str>,
-) -> anyhow::Result<(reqwest::StatusCode, Option<Value>)> {
-    let mut builder = client.request(method, url);
-    if let Some(token) = token {
-        builder = builder.bearer_auth(token);
-    }
-    if let Some(body) = body {
-        builder = builder
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_string());
-    }
-    let response = builder
-        .send()
-        .await
-        .with_context(|| format!("HTTP request {url} failed"))?;
-    let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| format!("HTTP response body from {url} failed to read"))?;
-    let json = if bytes.is_empty() {
-        None
-    } else {
-        serde_json::from_slice(&bytes).with_context(|| {
-            format!(
-                "HTTP response from {url} was not valid JSON: {:?}",
-                &bytes[..bytes.len().min(256)]
-            )
-        })?
-    };
-    Ok((status, json))
-}
-
-/// Assert that `actual` equals `expected`, printing a progress line.
-fn assert_status(label: &str, actual: reqwest::StatusCode, expected: u16) -> anyhow::Result<()> {
-    let actual_u16 = actual.as_u16();
-    println!("  http probe: {label} -> {actual_u16} (expect {expected})");
-    ensure!(
-        actual_u16 == expected,
-        "{label} returned {actual_u16}, expected {expected}"
-    );
-    Ok(())
-}
-
-/// Whether a `GET /api/vms` body lists a VM with the given id.
-fn list_has_vm(body: &Option<Value>, id: u64) -> bool {
-    body.as_ref()
-        .and_then(Value::as_array)
-        .is_some_and(|items| {
-            items
-                .iter()
-                .any(|item| item.get("id").and_then(Value::as_u64) == Some(id))
-        })
-}
-
-/// Extract the top-level `status` string of a VM detail body.
-fn vm_status(body: &Option<Value>) -> anyhow::Result<&str> {
-    let value = body
-        .as_ref()
-        .with_context(|| "VM detail response had no JSON body")?;
-    value
-        .get("status")
-        .and_then(Value::as_str)
-        .with_context(|| format!("VM detail response had no status string: {value}"))
-}
-
-/// Assert the VM detail body reports a specific status.
-fn assert_vm_status(label: &str, body: &Option<Value>, expected: &str) -> anyhow::Result<()> {
-    let status = vm_status(body)?;
-    println!("  http probe: {label} -> status {status} (expect {expected})");
-    ensure!(
-        status == expected,
-        "{label} reported status {status}, expected {expected}"
-    );
-    Ok(())
-}
-
-/// Assert a lifecycle action response reports the expected `ok` and `async`
-/// markers. `async` distinguishes a synchronous start from a request-style
-/// stop whose `Stopped` state arrives later.
-fn assert_action(
-    label: &str,
-    body: &Option<Value>,
-    ok_expected: bool,
-    async_expected: bool,
-) -> anyhow::Result<()> {
-    let value = body
-        .as_ref()
-        .with_context(|| format!("{label} had no JSON body"))?;
-    let ok = value.get("ok").and_then(Value::as_bool);
-    let is_async = value.get("async").and_then(Value::as_bool);
-    println!(
-        "  http probe: {label} -> ok={ok:?} async={is_async:?} (expect ok={ok_expected} \
-         async={async_expected})"
-    );
-    ensure!(
-        ok == Some(ok_expected),
-        "{label} reported ok={ok:?}, expected {ok_expected}"
-    );
-    ensure!(
-        is_async == Some(async_expected),
-        "{label} reported async={is_async:?}, expected {async_expected}"
-    );
-    Ok(())
-}
-
-/// Poll `GET /api/vms/{id}` until its status equals `expected`, the deadline
-/// elapses, or a stop is requested. Retries transport errors (the server may be
-/// mid-transition).
-async fn poll_vm_status(
-    client: &reqwest::Client,
-    base: &str,
-    id: u64,
-    expected: &str,
-    stop: &AtomicBool,
-) -> anyhow::Result<()> {
-    let url = format!("{base}/api/vms/{id}");
-    let started = Instant::now();
+/// Wait for the probe asset to exit, killing it if the runner marks the case
+/// over. Returns `Some(status)` on a normal exit and `None` if it was killed.
+fn wait_probe_asset(child: &mut Child, stop: &AtomicBool) -> Option<ExitStatus> {
     loop {
         if stop.load(Ordering::Acquire) {
-            anyhow::bail!("host http probe stopped");
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
         }
-        match request(client, Method::GET, &url, None, None).await {
-            Ok((code, body)) if code.as_u16() == 200 => {
-                if vm_status(&body)? == expected {
-                    println!("  http probe: VM[{id}] -> {expected}");
-                    return Ok(());
-                }
-            }
-            Ok((code, _)) => {
-                // A non-200 during a transition is transient (e.g. the VM is
-                // being torn down); keep polling until the deadline.
-                eprintln!("  http probe: VM[{id}] poll saw HTTP {code}");
-            }
-            Err(error) => {
-                eprintln!("  http probe: VM[{id}] poll transport error: {error:#}");
-            }
+        if let Some(status) = child.try_wait().ok().flatten() {
+            return Some(status);
         }
-        ensure!(
-            started.elapsed() < POLL_DEADLINE,
-            "VM[{id}] never became {expected} within {POLL_DEADLINE:?}"
-        );
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-}
-
-/// Poll `GET /api/vms/{id}` until it returns 404 (the VM was deleted).
-async fn poll_vm_gone(
-    client: &reqwest::Client,
-    base: &str,
-    id: u64,
-    stop: &AtomicBool,
-) -> anyhow::Result<()> {
-    let url = format!("{base}/api/vms/{id}");
-    let started = Instant::now();
-    loop {
-        if stop.load(Ordering::Acquire) {
-            anyhow::bail!("host http probe stopped");
-        }
-        match request(client, Method::GET, &url, None, None).await {
-            Ok((code, _)) if code.as_u16() == 404 => {
-                println!("  http probe: VM[{id}] -> gone");
-                return Ok(());
-            }
-            Ok((code, _)) => {
-                eprintln!("  http probe: VM[{id}] gone-poll saw HTTP {code}");
-            }
-            Err(error) => {
-                eprintln!("  http probe: VM[{id}] gone-poll transport error: {error:#}");
-            }
-        }
-        ensure!(
-            started.elapsed() < POLL_DEADLINE,
-            "VM[{id}] never disappeared within {POLL_DEADLINE:?}"
-        );
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-}
-
-/// Poll one unauthenticated `GET url` until it returns `expected`, the deadline
-/// elapses, or a stop is requested. Used only for the initial readiness check,
-/// whose request needs no token or body.
-async fn wait_for_status(
-    client: &reqwest::Client,
-    url: &str,
-    expected: u16,
-    deadline: Duration,
-    stop: &AtomicBool,
-) -> anyhow::Result<()> {
-    let started = Instant::now();
-    loop {
-        if stop.load(Ordering::Acquire) {
-            anyhow::bail!("host http probe stopped");
-        }
-        if let Ok((code, _)) = request(client, Method::GET, url, None, None).await
-            && code.as_u16() == expected
-        {
-            return Ok(());
-        }
-        ensure!(
-            started.elapsed() < deadline,
-            "request {url} never returned HTTP {expected} within {deadline:?}"
-        );
-        tokio::time::sleep(POLL_INTERVAL).await;
+        thread::sleep(PROBE_EXIT_POLL_INTERVAL);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::PathBuf;
 
-    #[test]
-    fn create_body_round_trips_the_fixture_toml() {
-        let toml = "name = \"linux\"\npath = \"a\\b\"";
-        let body = json!({ "toml": toml }).to_string();
-        // A raw newline would break JSON; serde_json must escape it as `\n`.
-        assert!(!body.contains('\n'));
-        // Round-trips back to the original TOML.
-        let parsed: Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(parsed["toml"], Value::String(toml.to_string()));
+    use serde::Deserialize;
+
+    use super::{super::types::DEFAULT_PROBE_SCRIPT, *};
+
+    fn test_config(probe_script: PathBuf) -> AxvisorHttpProbeConfig {
+        AxvisorHttpProbeConfig {
+            guest_port: 8080,
+            connect_timeout_secs: 120,
+            request_timeout_secs: 5,
+            probe_script,
+            token: Some("t".into()),
+        }
     }
 
-    #[test]
-    fn assert_status_reports_mismatch() {
-        assert!(assert_status("x", reqwest::StatusCode::OK, 200).is_ok());
-        assert!(assert_status("x", reqwest::StatusCode::NOT_FOUND, 200).is_err());
+    /// Parse a `[host_http_probe]` section like
+    /// [`load_axvisor_http_probe_config`](super::super::qemu::load_axvisor_http_probe_config).
+    fn parse_probe_section(toml_body: &str) -> AxvisorHttpProbeConfig {
+        #[derive(Deserialize)]
+        struct ProbeSection {
+            #[serde(default)]
+            host_http_probe: Option<AxvisorHttpProbeConfig>,
+        }
+        toml::from_str::<ProbeSection>(toml_body)
+            .expect("probe section parses")
+            .host_http_probe
+            .expect("host_http_probe present")
     }
 
-    #[test]
-    fn vm_status_parses_the_detail_body() {
-        let body = Some(json!({ "id": 1, "status": "running" }));
-        assert_eq!(vm_status(&body).unwrap(), "running");
-        assert!(vm_status(&None).is_err());
-        assert!(vm_status(&Some(json!({ "id": 1 }))).is_err());
-    }
-
-    #[test]
-    fn list_has_vm_matches_by_id() {
-        let body = Some(json!([{ "id": 2 }, { "id": 1 }]));
-        assert!(list_has_vm(&body, 1));
-        assert!(!list_has_vm(&body, 3));
-        assert!(!list_has_vm(&None, 1));
-        assert!(!list_has_vm(&Some(json!({ "id": 1 })), 1)); // object, not array
-    }
-
-    #[test]
-    fn assert_action_checks_ok_and_async() {
-        let start = Some(json!({ "ok": true, "status": "running", "async": false }));
-        assert!(assert_action("start", &start, true, false).is_ok());
-        assert!(assert_action("start", &start, true, true).is_err());
-        assert!(assert_action("start", &start, false, false).is_err());
-        assert!(
-            assert_action(
-                "stop",
-                &Some(json!({ "ok": true, "async": true })),
-                true,
-                true
-            )
-            .is_ok()
+    /// Write an executable probe asset that records its environment and exits
+    /// with `code`.
+    #[cfg(unix)]
+    fn write_fixture_probe(dir: &Path, name: &str, code: i32) -> PathBuf {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let path = dir.join(name);
+        let script = format!(
+            "#!/bin/sh\nprintf '%s' \
+             \"$AXVISOR_HTTP_BASE|$AXVISOR_HTTP_TOKEN|$AXVISOR_HTTP_CASE_DIR\" > \
+             \"$AXVISOR_HTTP_CASE_DIR/env.txt\"\nexit {code}\n"
         );
-        assert!(assert_action("start", &None, true, false).is_err());
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn probe_script_defaults_to_http_probe_py() {
+        let config = parse_probe_section("[host_http_probe]\ntoken = \"t\"\n");
+        assert_eq!(config.probe_script, PathBuf::from(DEFAULT_PROBE_SCRIPT));
+    }
+
+    #[test]
+    fn probe_script_is_configurable() {
+        let config = parse_probe_section("[host_http_probe]\nprobe_script = \"custom_probe.sh\"\n");
+        assert_eq!(config.probe_script, PathBuf::from("custom_probe.sh"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_executes_the_case_probe_asset_with_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = write_fixture_probe(dir.path(), "http_probe.py", 0);
+        let config = test_config(PathBuf::from("http_probe.py"));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let result = run("127.0.0.1:12345", &config, dir.path(), stop);
+
+        assert!(result.is_ok(), "probe asset should pass: {result:?}");
+        // The generic mechanism really executed the asset and forwarded the
+        // env the asset needs to dial the guest API.
+        let recorded = std::fs::read_to_string(dir.path().join("env.txt")).unwrap();
+        assert_eq!(
+            recorded,
+            "http://127.0.0.1:12345|t|".to_string() + &dir.path().to_string_lossy()
+        );
+        assert!(probe.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_propagates_nonzero_probe_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        write_fixture_probe(dir.path(), "http_probe.py", 1);
+        let config = test_config(PathBuf::from("http_probe.py"));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let error = run("127.0.0.1:12345", &config, dir.path(), stop).unwrap_err();
+        assert!(error.to_string().contains("exited with code 1"));
+    }
+
+    #[test]
+    fn run_rejects_a_missing_probe_asset() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(PathBuf::from("http_probe.py"));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let error = run("127.0.0.1:12345", &config, dir.path(), stop).unwrap_err();
+        assert!(error.to_string().contains("does not exist"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_kills_the_probe_asset_when_stop_is_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        write_fixture_probe(dir.path(), "http_probe.py", 0);
+        let config = test_config(PathBuf::from("http_probe.py"));
+        // The case is already over before the asset even starts.
+        let stop = Arc::new(AtomicBool::new(true));
+
+        let error = run("127.0.0.1:12345", &config, dir.path(), stop).unwrap_err();
+        assert!(error.to_string().contains("was killed"));
+    }
+
+    /// The generic mechanism must execute the actual case asset: the
+    /// `http-control-plane` test-suit case carries `http_probe.py` next to its
+    /// `qemu-aarch64.toml` and `vm-memory.toml` fixtures. This pins that
+    /// contract so a missing/renamed case asset fails this test, not the CI run.
+    #[test]
+    fn http_control_plane_case_carries_a_probe_asset() {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let case_asset = workspace_root.join(
+            "test-suit/axvisor/normal/qemu-http-control-plane/http-control-plane/http_probe.py",
+        );
+        assert!(
+            case_asset.is_file(),
+            "http-control-plane case missing probe asset: {}",
+            case_asset.display()
+        );
+        // The default `[host_http_probe]` config resolves the asset by name, so
+        // the generic runner executes the real case asset unchanged.
+        let name = case_asset.file_name().and_then(|s| s.to_str()).unwrap();
+        assert_eq!(name, DEFAULT_PROBE_SCRIPT);
     }
 }
