@@ -9,11 +9,14 @@
 //! GET    /api/vms/{id}       → 200, JSON detail (with vcpu_states) | 404
 //! POST   /api/vms/create     → 200 {"id":N} | 400 | 409 | 500 (body {"toml": "..."})
 //! DELETE /api/vms/{id}       → 204 | 404 | 500
-//! POST   /api/vms/{id}/start → 200 {"ok":true,"status":...} | 404 | 409 | 503
-//! POST   /api/vms/{id}/stop  → 200 {"ok":true,"status":...} | 404 | 409 | 503
+//! POST   /api/vms/{id}/start  → 200 {"ok":true,"status":...} | 404 | 409 | 503
+//! POST   /api/vms/{id}/stop   → 200 {"ok":true,"status":...} | 404 | 409 | 503
+//! POST   /api/vms/{id}/pause  → 200 {"ok":true,"status":...} | 404 | 409 | 503
+//! POST   /api/vms/{id}/resume → 200 {"ok":true,"status":...} | 404 | 409 | 503
+//! POST   /api/vms/{id}/reset  → 200 {"ok":true,"status":...} | 404 | 409 | 503
 //! ```
 //!
-//! Mutating routes (`create`/`delete`/`start`/`stop`) require
+//! Mutating routes (`create`/`delete`/`start`/`stop`/`pause`/`resume`/`reset`) require
 //! `Authorization: Bearer <token>` with the build-time `[env] AXVM_HTTP_TOKEN`;
 //! see [`crate::http::auth`]. GET routes are open. The listener binds
 //! [`bind_addr`], loopback by default.
@@ -33,6 +36,9 @@ pub fn router() -> Router {
         .route("/api/vms/create", post(vm::vm_create))
         .route("/api/vms/{id}/start", post(vm::vm_start))
         .route("/api/vms/{id}/stop", post(vm::vm_stop))
+        .route("/api/vms/{id}/pause", post(vm::vm_pause))
+        .route("/api/vms/{id}/resume", post(vm::vm_resume))
+        .route("/api/vms/{id}/reset", post(vm::vm_reset))
 }
 
 /// Bind address for the management HTTP server.

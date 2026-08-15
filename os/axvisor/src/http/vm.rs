@@ -107,10 +107,50 @@ pub async fn vm_stop(
     vm_action(&id_str, VmAction::Stop)
 }
 
+/// `POST /api/vms/{id}/pause` — request a VM pause.
+///
+/// `pause` has the same request semantics as `stop`: the status flips to
+/// `Paused` synchronously while the running vCPUs park at their next run-loop
+/// iteration, so the response marks `async: true`.
+pub async fn vm_pause(
+    _token: ApiToken,
+    Path(id_str): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    vm_action(&id_str, VmAction::Pause)
+}
+
+/// `POST /api/vms/{id}/resume` — resume a paused VM.
+///
+/// The status flips back to `Running` synchronously and the parked vCPUs are
+/// woken, so the response marks `async: false`; the guest re-executes once the
+/// vCPU tasks re-enter the guest.
+pub async fn vm_resume(
+    _token: ApiToken,
+    Path(id_str): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    vm_action(&id_str, VmAction::Resume)
+}
+
+/// `POST /api/vms/{id}/reset` — reset and restart a VM.
+///
+/// Synchronous: the VM is stopped, its transient resources are discarded and
+/// rebuilt, and it restarts in `Running`. Unlike `start` (which rejects a
+/// restart-after-stop), `reset` is the supported restart path from any of
+/// `Ready`/`Stopped`/`Running`/`Paused`.
+pub async fn vm_reset(
+    _token: ApiToken,
+    Path(id_str): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    vm_action(&id_str, VmAction::Reset)
+}
+
 /// A lifecycle action on a VM.
 enum VmAction {
     Start,
     Stop,
+    Pause,
+    Resume,
+    Reset,
 }
 
 /// Drive one lifecycle action, mapping host errors to HTTP status codes.
@@ -135,6 +175,9 @@ fn vm_action(id_str: &str, action: VmAction) -> Result<Json<Value>, StatusCode> 
     let result = match action {
         VmAction::Start => AxvmManager::start_vm(id),
         VmAction::Stop => AxvmManager::stop_vm(id),
+        VmAction::Pause => AxvmManager::pause_vm(id),
+        VmAction::Resume => AxvmManager::resume_vm(id),
+        VmAction::Reset => AxvmManager::reset_vm(id),
     };
     match result {
         Ok(()) => Ok(Json(vm_action_json(id, action))),
@@ -155,7 +198,7 @@ fn vm_action_json(id: usize, action: VmAction) -> Value {
     json!({
         "ok": true,
         "status": status,
-        "async": matches!(action, VmAction::Stop),
+        "async": matches!(action, VmAction::Stop | VmAction::Pause),
     })
 }
 
