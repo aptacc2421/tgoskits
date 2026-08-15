@@ -15,6 +15,8 @@
 pub mod auth;
 pub mod server;
 pub mod vm;
+#[cfg(feature = "web-ui")]
+pub mod web_ui;
 
 /// Blocking entry point for the management HTTP server.
 ///

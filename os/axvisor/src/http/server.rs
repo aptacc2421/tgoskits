@@ -52,17 +52,22 @@
 use axum::{Router, routing::get, routing::post};
 
 use crate::http::vm;
+#[cfg(feature = "web-ui")]
+use crate::http::web_ui;
 
 /// Assemble the management routes.
 pub fn router() -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/api/vms", get(vm::list_vms))
         .route("/api/vms/{id}", get(vm::vm_detail).delete(vm::vm_delete))
         .route("/api/vms/create", post(vm::vm_create))
         .route("/api/vms/{id}/start", post(vm::vm_start))
         .route("/api/vms/{id}/stop", post(vm::vm_stop))
         .route("/api/vms/{id}/pause", post(vm::vm_pause))
-        .route("/api/vms/{id}/resume", post(vm::vm_resume))
+        .route("/api/vms/{id}/resume", post(vm::vm_resume));
+    #[cfg(feature = "web-ui")]
+    let router = router.merge(web_ui::ui_routes());
+    router
 }
 
 /// Bind address for the management HTTP server.
@@ -82,6 +87,11 @@ fn bind_addr() -> &'static str {
 /// the runtime is built here. Only the IO driver is enabled — the epoll
 /// reactor suffices for `axum::serve`; a time driver would need `timerfd`.
 pub fn serve() {
+    // Extract the dashboard assets to `/web/` before the async runtime exists:
+    // these are blocking filesystem writes and must not contend with the IO
+    // driver's event loop. `web-ui` implies `fs`, so the rootfs is mounted.
+    #[cfg(feature = "web-ui")]
+    web_ui::init();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()

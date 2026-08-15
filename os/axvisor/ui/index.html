@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AxVisor 管理台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>AxVisor <span class="muted">VM 管理台</span></h1>
+    <div class="token-box">
+      <input id="token-input" type="password" placeholder="Bearer token（启停/暂停需要）" autocomplete="off">
+      <button id="refresh-btn" class="btn btn-refresh" type="button">刷新</button>
+    </div>
+  </header>
+
+  <div id="error-bar" class="error-bar" hidden></div>
+
+  <main>
+    <table id="vm-table" class="vm-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>名称</th>
+          <th>状态</th>
+          <th>CPU</th>
+          <th>内存</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="vm-tbody">
+        <tr><td colspan="6" class="loading">加载中…</td></tr>
+      </tbody>
+    </table>
+  </main>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>
