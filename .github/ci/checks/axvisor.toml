@@ -50,7 +50,7 @@ fallback_environment = "base"
 timeout_minutes = 30
 command = '''
 echo "==> pull qemu-aarch64 image"
-cargo xtask image pull qemu-aarch64 --output-dir tmp/axbuild/images
+cargo xtask image pull qemu-aarch64 --extract-dir tmp/axbuild/images
 echo "==> axvisor aarch64 HTTP control-plane"
 cargo xtask axvisor test qemu --arch aarch64 --test-case http-control-plane
 '''
