@@ -78,6 +78,9 @@ pub async fn vm_delete(
         return Err(StatusCode::NOT_FOUND);
     };
     let vm = AxvmManager::vm_by_id(id).ok_or(StatusCode::NOT_FOUND)?;
+    // `destroy()`'s shared quiesce path carries the start->stop vCPU-entry
+    // guard, so a DELETE arriving right after `/start` waits for the first vCPU
+    // to enter the guest run loop instead of stranding it.
     vm.destroy()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     AxvmManager::remove_vm(id).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;

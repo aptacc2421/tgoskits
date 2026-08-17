@@ -162,7 +162,12 @@ pub fn stop_vm(vm_id: usize) -> AxVmResult {
 /// The wait is bounded (`MAX_YIELDS`, mirroring the `wait_until_stopped`
 /// pattern): a vCPU task that never runs yields an error instead of hanging
 /// the caller, leaving the VM `Running` so the stop can be retried.
-fn wait_until_vcpu_entered(
+///
+/// `pub(crate)` because the destroy/reset quiesce path
+/// (`AxVM::stop_and_join_runtime`) applies the same guard: a client may POST
+/// `/start` and then immediately DELETE the VM, so `destroy()` must hold the
+/// request-stop until the first vCPU entry just like `stop_vm`.
+pub(crate) fn wait_until_vcpu_entered(
     vcpu_entered: impl Fn() -> bool,
     vm_stopping: impl Fn() -> bool,
 ) -> AxVmResult {
