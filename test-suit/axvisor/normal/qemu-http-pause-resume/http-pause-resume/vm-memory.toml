@@ -52,4 +52,12 @@ memory_regions = [
 # Physical-device selection. Virtual platform devices are machine-owned.
 [devices]
 passthrough = []
-disabled = []
+# The QEMU virt PCI host bridge must stay with the host. `guest_type =
+# "passthrough"` with an empty `passthrough` list auto-assigns every host
+# device (the machine's default passthrough root is "/"), which would hand the
+# guest the host's own virtio-net-pci (host eth0). The guest Linux would then
+# enumerate and initialize it, destroying the host's vrings and killing the
+# management network path this test drives through. Excluding the PCI bridge
+# removes it from the guest DTB and punches its ECAM/MMIO ranges out of the
+# guest address space; the guest still boots its BusyBox initramfs without a NIC.
+disabled = [{ path = "/pcie@10000000" }]
