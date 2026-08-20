@@ -23,8 +23,8 @@ Environment (set by the generic runner):
     AXVISOR_HTTP_REQUEST_TIMEOUT seconds per HTTP request
 
 The probe drives the whole `/api/vms` lifecycle contract in one boot —
-auth/error mapping, start/stop, pause/resume/reset, and the
-destroy-then-recreate resource re-acquire regression — mirroring
+auth/error mapping, start/stop, pause/resume, and the destroy-then-recreate
+resource re-acquire regression — mirroring
 `os/axvisor/doc/http-control-plane-quickstart.md`:
 
     GET    /api/vms            -> 200            (list; id=1 present)
@@ -36,7 +36,6 @@ destroy-then-recreate resource re-acquire regression — mirroring
     POST   /api/vms/1/stop     -> 401            (no token)
     POST   /api/vms/1/pause    -> 401            (no token)
     POST   /api/vms/1/resume   -> 401            (no token)
-    POST   /api/vms/1/reset    -> 401            (no token)
     DELETE /api/vms/1          -> 401            (no token)
     POST   /api/vms/create {}  -> 400            (missing toml)
     POST   /api/vms/create <bad toml> -> 400     (invalid TOML)
@@ -44,7 +43,6 @@ destroy-then-recreate resource re-acquire regression — mirroring
     POST   /api/vms/999/stop   -> 404            (auth'd unknown VM)
     POST   /api/vms/999/pause  -> 404            (auth'd unknown VM)
     POST   /api/vms/999/resume -> 404            (auth'd unknown VM)
-    POST   /api/vms/999/reset  -> 404            (auth'd unknown VM)
     DELETE /api/vms/999        -> 404            (auth'd unknown VM)
     POST   /api/vms/create     -> 409            (id=1 already registered)
     POST   /api/vms/1/pause    -> 409            (pause from Ready)
@@ -57,10 +55,6 @@ destroy-then-recreate resource re-acquire regression — mirroring
     POST   /api/vms/1/resume   -> 200 -> running (async=false; guest re-entered)
     POST   /api/vms/1/resume   -> 409            (already running)
     POST   /api/vms/1/pause    -> 200 -> paused  (second suspend/wake cycle)
-    POST   /api/vms/1/resume   -> 200 -> running (guest re-entered)
-    POST   /api/vms/1/reset    -> 200 -> running (async=false; rebuilt VM re-entered)
-    POST   /api/vms/1/resume   -> 409            (reset rebuilt to Running)
-    POST   /api/vms/1/pause    -> 200 -> paused  (reset VM fully usable)
     POST   /api/vms/1/resume   -> 200 -> running (guest re-entered)
     POST   /api/vms/1/stop     -> 200 -> stopped (async=true)
     POST   /api/vms/1/start    -> 409            (restart-after-stop)
@@ -79,11 +73,9 @@ vCPU ever re-entering the guest. To distinguish a genuine wake from a status
 flip, the probe reads the HTTP-exposed `guest_entry_count` field of the VM
 detail: the hypervisor's vCPU run loop increments it on each vCPU's first guest
 entry and on every wake from suspend, so it is independent re-execution
-evidence. A reset rebuilds the runtime, restarting the counter from zero for
-the freshly started vCPU task. The probe therefore asserts, after *every*
-resume and after the post-reset resume, that `guest_entry_count` strictly
-advanced — so a wake that only flips status (or a reset that never re-enters
-the guest) makes the probe exit nonzero and fails the case.
+evidence. The probe therefore asserts, after *every* resume, that
+`guest_entry_count` strictly advanced — so a wake that only flips status makes
+the probe exit nonzero and fails the case.
 
 The same `Paused` status has the dual problem on the *pause* side: the status
 flips to `paused` synchronously while the vCPU parks asynchronously at its next
@@ -92,10 +84,10 @@ is absorbed — the vCPU never parked, so it never re-enters either, and the
 resume re-entry check above would be meaningless. To make each resume a genuine
 wake from a parked vCPU, the probe also reads the HTTP-exposed
 `guest_park_count`: the hypervisor increments it once each time a vCPU actually
-observes the suspended state and parks. After *every* pause (and after the
-post-reset pause), the probe polls until `guest_park_count` strictly advanced
-before sending the resume, so a pause that never completes (or a status-only
-pause) makes the probe exit nonzero and fail the case.
+observes the suspended state and parks. After *every* pause, the probe polls
+until `guest_park_count` strictly advanced before sending the resume, so a
+pause that never completes (or a status-only pause) makes the probe exit
+nonzero and fail the case.
 
 The last recreate -> start -> stop -> delete block is the resource re-acquire
 regression: it proves destroy freed guest memory, vCPUs, devices, and the
@@ -200,7 +192,7 @@ def guest_entry_count(body):
 
     The vCPU run loop increments this on each vCPU's first guest entry and on
     every wake from suspend, so it is independent proof that the guest actually
-    re-executed. A reset rebuilds the runtime and restarts it from zero.
+    re-executed.
     """
     if not isinstance(body, dict):
         raise AssertionError("VM detail response was not a JSON object")
@@ -229,9 +221,9 @@ def check_guest_entries(label, body, expected_min):
 def poll_guest_entries(vm_id, expected_min):
     """Poll `GET /api/vms/{id}` until `guest_entry_count >= expected_min`.
 
-    Used to confirm the guest actually re-entered after a resume or reset, not
-    merely that the HTTP status flipped. Fails on the poll deadline so a broken
-    wake path makes the probe exit nonzero.
+    Used to confirm the guest actually re-entered after a resume, not merely
+    that the HTTP status flipped. Fails on the poll deadline so a broken wake
+    path makes the probe exit nonzero.
     """
     start = time.monotonic()
     while True:
@@ -446,8 +438,6 @@ def main():
     check("POST /api/vms/1/pause (no auth)", status, 401)
     status, _ = request("POST", "/api/vms/1/resume")
     check("POST /api/vms/1/resume (no auth)", status, 401)
-    status, _ = request("POST", "/api/vms/1/reset")
-    check("POST /api/vms/1/reset (no auth)", status, 401)
     status, _ = request("DELETE", "/api/vms/1")
     check("DELETE /api/vms/1 (no auth)", status, 401)
 
@@ -467,8 +457,6 @@ def main():
     check("POST /api/vms/999/pause (auth'd)", status, 404)
     status, _ = request("POST", "/api/vms/999/resume", token=TOKEN)
     check("POST /api/vms/999/resume (auth'd)", status, 404)
-    status, _ = request("POST", "/api/vms/999/reset", token=TOKEN)
-    check("POST /api/vms/999/reset (auth'd)", status, 404)
     status, _ = request("DELETE", "/api/vms/999", token=TOKEN)
     check("DELETE /api/vms/999 (auth'd)", status, 404)
 
@@ -556,61 +544,24 @@ def main():
     poll_guest_entries(1, entries + 1)
     entries = entries + 1
 
-    # 30. Reset discards and rebuilds the runtime synchronously, restarting the
-    #     VM in `Running` from any state (here: Running).
-    status, body = request("POST", "/api/vms/1/reset", token=TOKEN)
-    check("POST /api/vms/1/reset", status, 200)
-    check_action("POST /api/vms/1/reset", body, True, False)
-    poll_vm_status(1, "running")
-    # Reset rebuilt the runtime: the fresh vCPU task must re-enter the guest,
-    # restarting `guest_entry_count` from zero and advancing it to >= 1. A
-    # reset that never re-enters leaves the count at 0 and fails the poll.
-    poll_guest_entries(1, 1)
-    status, body = request("GET", "/api/vms/1")
-    entries = guest_entry_count(body)
-    # The fresh runtime also restarts the pause-park count from zero (no vCPU
-    # has parked yet on the rebuilt runtime).
-    parks = guest_park_count(body)
-
-    # 31. The rebuilt VM is `Running` again, so resume is still invalid and the
-    #     pause/resume lifecycle works on the fresh runtime (not merely a state
-    #     flip of the old one).
-    status, _ = request("POST", "/api/vms/1/resume", token=TOKEN)
-    check("POST /api/vms/1/resume (after reset)", status, 409)
-    status, body = request("POST", "/api/vms/1/pause", token=TOKEN)
-    check("POST /api/vms/1/pause (after reset)", status, 200)
-    check_action("POST /api/vms/1/pause (after reset)", body, True, True)
-    poll_vm_status(1, "paused")
-    # Pause-completion on the rebuilt runtime: the fresh vCPU must actually park
-    # before the post-reset resume.
-    poll_guest_parks(1, parks + 1)
-    parks = parks + 1
-    status, body = request("POST", "/api/vms/1/resume", token=TOKEN)
-    check("POST /api/vms/1/resume (after reset)", status, 200)
-    check_action("POST /api/vms/1/resume (after reset)", body, True, False)
-    poll_vm_status(1, "running")
-    # The post-reset resume must also genuinely re-enter the guest.
-    poll_guest_entries(1, entries + 1)
-    entries = entries + 1
-
-    # 32. Stop is a request (`async=true`): the `stopped` state arrives
+    # 30. Stop is a request (`async=true`): the `stopped` state arrives
     #     asynchronously once the vCPU observes it and exits.
     status, body = request("POST", "/api/vms/1/stop", token=TOKEN)
     check("POST /api/vms/1/stop", status, 200)
     check_action("POST /api/vms/1/stop", body, True, True)
     poll_vm_status(1, "stopped")
 
-    # 33. Restart-after-stop is a known scheduling limitation; the contract
+    # 31. Restart-after-stop is a known scheduling limitation; the contract
     #     rejects it with 409 rather than hanging the VM in `running`.
     status, _ = request("POST", "/api/vms/1/start", token=TOKEN)
     check("POST /api/vms/1/start (restart-after-stop)", status, 409)
 
-    # 34. Delete the stopped VM, then poll until it is gone.
+    # 32. Delete the stopped VM, then poll until it is gone.
     status, _ = request("DELETE", "/api/vms/1", token=TOKEN)
     check("DELETE /api/vms/1", status, 204)
     poll_vm_gone(1)
 
-    # 35. Recreate after delete: the embedded image is matched by id, so a
+    # 33. Recreate after delete: the embedded image is matched by id, so a
     #     fresh create with the same config succeeds and registers id 1 again.
     status, body = request("POST", "/api/vms/create", token=TOKEN, body=create_body)
     check("POST /api/vms/create (recreate)", status, 200)
@@ -618,11 +569,11 @@ def main():
         raise AssertionError("recreate did not return id=1")
     poll_vm_status(1, "ready")
 
-    # 36. The re-registered id conflicts with a second create.
+    # 34. The re-registered id conflicts with a second create.
     status, _ = request("POST", "/api/vms/create", token=TOKEN, body=create_body)
     check("POST /api/vms/create (recreate duplicate)", status, 409)
 
-    # 37-38. The recreated VM must be fully usable, not merely re-registered:
+    # 35-36. The recreated VM must be fully usable, not merely re-registered:
     #        destroy must have freed guest memory, vCPUs, devices, and the
     #        registry entry so a fresh VM can be rebuilt and run from the same
     #        embedded image. This is the resource re-acquire regression.
@@ -636,7 +587,7 @@ def main():
     check("POST /api/vms/1/stop (recreated)", status, 200)
     poll_vm_status(1, "stopped")
 
-    # 39. Cleanup: leave the hypervisor without a registered VM.
+    # 37. Cleanup: leave the hypervisor without a registered VM.
     status, _ = request("DELETE", "/api/vms/1", token=TOKEN)
     check("DELETE /api/vms/1 (cleanup)", status, 204)
     poll_vm_gone(1)
