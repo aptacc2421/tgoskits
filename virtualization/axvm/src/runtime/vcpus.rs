@@ -481,6 +481,10 @@ fn vcpu_run() {
         vcpu.id(),
         crate::host::cpu::current_id()
     );
+    // First guest entry: record independent re-execution evidence before the
+    // run loop. Every wake from suspend below records another entry, so the
+    // control plane can prove the guest actually re-executed after resume/reset.
+    runtime.inc_guest_entry();
 
     loop {
         if vcpu_id == 0 {
@@ -554,8 +558,19 @@ fn vcpu_run() {
                 "VM[{}] VCpu[{}] is suspended, waiting for resume...",
                 vm_id, vcpu_id
             );
+            // The vCPU has observed the suspended state and is about to park:
+            // record the pause-completion evidence. The status flips to `Paused`
+            // synchronously, so a control-plane probe must wait for this counter
+            // to advance before resuming — otherwise the resume can be absorbed
+            // while the vCPU is still running the guest (it never parked, so it
+            // never re-enters either).
+            runtime.inc_guest_park();
             wait_for(&runtime, || !vm.suspending());
             info!("VM[{}] VCpu[{}] resumed from suspend", vm_id, vcpu_id);
+            // The vCPU has woken and is about to re-enter the guest: record the
+            // re-execution as independent evidence of a genuine wake (not just a
+            // status flip).
+            runtime.inc_guest_entry();
             continue;
         }
 

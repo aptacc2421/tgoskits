@@ -255,6 +255,18 @@ fn vm_json(vm: &AxVMRef, with_vcpus: bool) -> Value {
             })
             .collect();
         json["vcpu_states"] = json!(vcpus);
+        // Independent proof that the guest actually re-executed: the vCPU run
+        // loop increments this on each (re-)entry and on every wake from
+        // suspend, so a resume that only flips the status without re-entering
+        // the guest does not move it. The probe asserts this count advances
+        // after every resume and after a reset rebuilds the runtime.
+        json["guest_entry_count"] = json!(vm.guest_entry_count());
+        // Pause-completion signal: the status flips to `Paused` synchronously
+        // while the vCPU parks asynchronously. This advances only when a vCPU
+        // has actually observed the suspended state, so the probe waits for it
+        // after each pause before resuming (a resume sent earlier can be
+        // absorbed while the vCPU is still running the guest).
+        json["guest_park_count"] = json!(vm.guest_park_count());
     }
     json
 }
