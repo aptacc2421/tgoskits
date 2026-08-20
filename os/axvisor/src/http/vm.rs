@@ -131,26 +131,12 @@ pub async fn vm_resume(
     vm_action(&id_str, VmAction::Resume)
 }
 
-/// `POST /api/vms/{id}/reset` — reset and restart a VM.
-///
-/// Synchronous: the VM is stopped, its transient resources are discarded and
-/// rebuilt, and it restarts in `Running`. Unlike `start` (which rejects a
-/// restart-after-stop), `reset` is the supported restart path from any of
-/// `Ready`/`Stopped`/`Running`/`Paused`.
-pub async fn vm_reset(
-    _token: ApiToken,
-    Path(id_str): Path<String>,
-) -> Result<Json<Value>, StatusCode> {
-    vm_action(&id_str, VmAction::Reset)
-}
-
 /// A lifecycle action on a VM.
 enum VmAction {
     Start,
     Stop,
     Pause,
     Resume,
-    Reset,
 }
 
 /// Drive one lifecycle action, mapping host errors to HTTP status codes.
@@ -177,7 +163,6 @@ fn vm_action(id_str: &str, action: VmAction) -> Result<Json<Value>, StatusCode> 
         VmAction::Stop => AxvmManager::stop_vm(id),
         VmAction::Pause => AxvmManager::pause_vm(id),
         VmAction::Resume => AxvmManager::resume_vm(id),
-        VmAction::Reset => AxvmManager::reset_vm(id),
     };
     match result {
         Ok(()) => Ok(Json(vm_action_json(id, action))),
@@ -259,7 +244,7 @@ fn vm_json(vm: &AxVMRef, with_vcpus: bool) -> Value {
         // loop increments this on each (re-)entry and on every wake from
         // suspend, so a resume that only flips the status without re-entering
         // the guest does not move it. The probe asserts this count advances
-        // after every resume and after a reset rebuilds the runtime.
+        // after every resume.
         json["guest_entry_count"] = json!(vm.guest_entry_count());
         // Pause-completion signal: the status flips to `Paused` synchronously
         // while the vCPU parks asynchronously. This advances only when a vCPU

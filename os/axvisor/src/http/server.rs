@@ -13,10 +13,9 @@
 //! POST   /api/vms/{id}/stop   → 200 {"ok":true,"status":...} | 404 | 409 | 503
 //! POST   /api/vms/{id}/pause  → 200 {"ok":true,"status":...} | 404 | 409 | 503
 //! POST   /api/vms/{id}/resume → 200 {"ok":true,"status":...} | 404 | 409 | 503
-//! POST   /api/vms/{id}/reset  → 200 {"ok":true,"status":...} | 404 | 409 | 503
 //! ```
 //!
-//! Mutating routes (`create`/`delete`/`start`/`stop`/`pause`/`resume`/`reset`) require
+//! Mutating routes (`create`/`delete`/`start`/`stop`/`pause`/`resume`) require
 //! `Authorization: Bearer <token>` with the build-time `[env] AXVM_HTTP_TOKEN`;
 //! see [`crate::http::auth`]. GET routes are open. The listener binds
 //! [`bind_addr`], loopback by default.
@@ -26,11 +25,10 @@
 //!
 //! # Lifecycle semantics and known limits
 //!
-//! The pause/resume/reset routes are backed by the axvm lifecycle state
-//! machine, which accepts only `Running → Paused` (pause), `Paused → Running`
-//! (resume), and — via a forced stop first — reset from any of
-//! `Ready`/`Stopped`/`Running`/`Paused`. Callers must not assume stronger
-//! guarantees than the runtime provides:
+//! The pause/resume routes are backed by the axvm lifecycle state machine,
+//! which accepts only `Running → Paused` (pause) and `Paused → Running`
+//! (resume). Callers must not assume stronger guarantees than the runtime
+//! provides:
 //!
 //! - `pause` is fire-and-forget: the status flips to `Paused` synchronously,
 //!   but running vCPUs park only at their next run-loop iteration. There is
@@ -39,11 +37,6 @@
 //! - Pause does not save or mask guest timer state. Host time keeps flowing
 //!   while the guest is suspended, so on resume the guest observes a time
 //!   jump; long pauses drift time-sensitive guests.
-//! - `reset` is a warm reboot, not a cold reset. Guest RAM is not cleared and
-//!   the kernel image is not reloaded (images are loaded once at VM creation);
-//!   the restarted guest re-executes from the entry point over the residual
-//!   RAM contents and must clear its own BSS. A guest that overwrote its
-//!   kernel region cannot be reset into a clean boot.
 //! - Device suspension covers only devices registered with lifecycle
 //!   semantics; other devices are not quiesced while paused.
 
@@ -61,7 +54,6 @@ pub fn router() -> Router {
         .route("/api/vms/{id}/stop", post(vm::vm_stop))
         .route("/api/vms/{id}/pause", post(vm::vm_pause))
         .route("/api/vms/{id}/resume", post(vm::vm_resume))
-        .route("/api/vms/{id}/reset", post(vm::vm_reset))
 }
 
 /// Bind address for the management HTTP server.
