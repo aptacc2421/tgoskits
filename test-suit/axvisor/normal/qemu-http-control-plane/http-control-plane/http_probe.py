@@ -71,9 +71,10 @@ pinned CPU. A status flip is not enough evidence that a pause/resume actually
 worked: a broken wake path could flip the status back to `running` without the
 vCPU ever re-entering the guest. To distinguish a genuine wake from a status
 flip, the probe reads the HTTP-exposed `guest_entry_count` field of the VM
-detail: the hypervisor's vCPU run loop increments it on each vCPU's first guest
-entry and on every wake from suspend, so it is independent re-execution
-evidence. The probe therefore asserts, after *every* resume, that
+detail: the hypervisor's vCPU run loop increments it after every guest
+(re-)entry (once the guest has actually entered and exited), so it is
+independent re-execution evidence. The probe therefore asserts, after *every*
+resume, that
 `guest_entry_count` strictly advanced — so a wake that only flips status makes
 the probe exit nonzero and fails the case.
 
@@ -190,9 +191,9 @@ def check_vm_status(label, body, expected):
 def guest_entry_count(body):
     """Extract the hypervisor's monotonic guest (re-)entry count.
 
-    The vCPU run loop increments this on each vCPU's first guest entry and on
-    every wake from suspend, so it is independent proof that the guest actually
-    re-executed.
+    The vCPU run loop increments this after every guest (re-)entry (once the
+    guest has actually entered and exited), so it is independent proof that the
+    guest actually re-executed.
     """
     if not isinstance(body, dict):
         raise AssertionError("VM detail response was not a JSON object")

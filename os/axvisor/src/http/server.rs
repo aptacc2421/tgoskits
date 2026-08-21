@@ -31,9 +31,14 @@
 //! provides:
 //!
 //! - `pause` is fire-and-forget: the status flips to `Paused` synchronously,
-//!   but running vCPUs park only at their next run-loop iteration. There is
-//!   no pause-quiesce wait and no "pause completed" query; the response is
-//!   marked `async: true` for this reason.
+//!   but running vCPUs park only at their next run-loop iteration. There is no
+//!   synchronous pause-quiesce wait; the `pause` response is marked `async:
+//!   true` for this reason. To confirm a pause actually completed, poll the VM
+//!   detail: `guest_park_count` advances only when a vCPU has genuinely parked
+//!   in the suspend wait, and `guest_entry_count` advances only after the guest
+//!   has actually re-entered (on first start and on every wake from suspend).
+//!   Both are monotonic per-vCPU progress counters, not a strong "all devices
+//!   quiesced" guarantee (see the device/timer limits below).
 //! - Pause does not save or mask guest timer state. Host time keeps flowing
 //!   while the guest is suspended, so on resume the guest observes a time
 //!   jump; long pauses drift time-sensitive guests.

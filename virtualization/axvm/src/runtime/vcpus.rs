@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{format, sync::Arc};
+use std::{cell::Cell, format, sync::Arc};
 
 use crate::{
     AsVCpuTask, AxVmResult, GuestPhysAddr, StopReason, VCpuTask, VmStatus, VmVcpuState,
@@ -481,10 +481,10 @@ fn vcpu_run() {
         vcpu.id(),
         crate::host::cpu::current_id()
     );
-    // First guest entry: record independent re-execution evidence before the
-    // run loop. Every wake from suspend below records another entry, so the
+    // Independent re-execution evidence is published *after* each guest entry,
+    // at the bottom of the run loop (after `run_vcpu` returns). Every wake from
+    // suspend below also re-enters the guest and is counted there, so the
     // control plane can prove the guest actually re-executed after resume/reset.
-    runtime.inc_guest_entry();
 
     loop {
         if vcpu_id == 0 {
@@ -552,25 +552,40 @@ fn vcpu_run() {
             }
         }
 
+        // The guest has entered (and exited) for this run-loop iteration: the
+        // control plane reads this as independent re-execution evidence. It is
+        // published *after* `run_vcpu` returns, so a broken wake path that only
+        // flips the status without ever re-entering the guest cannot advance it.
+        runtime.inc_guest_entry();
+
         // Check if the VM is suspended
         if vm.suspending() {
             debug!(
                 "VM[{}] VCpu[{}] is suspended, waiting for resume...",
                 vm_id, vcpu_id
             );
-            // The vCPU has observed the suspended state and is about to park:
-            // record the pause-completion evidence. The status flips to `Paused`
-            // synchronously, so a control-plane probe must wait for this counter
-            // to advance before resuming — otherwise the resume can be absorbed
-            // while the vCPU is still running the guest (it never parked, so it
-            // never re-enters either).
-            runtime.inc_guest_park();
-            wait_for(&runtime, || !vm.suspending());
+            // Park the vCPU until it is resumed. The wait condition closure is
+            // evaluated by the wait queue while holding its lock, immediately
+            // before the task is enqueued, so publishing the pause-completion
+            // evidence inside it makes the signal visible only once the vCPU is
+            // genuinely committed to blocking. A resume that races in before the
+            // vCPU reaches the wait keeps the suspend flag clear and makes the
+            // condition already true, so the vCPU never publishes a park and
+            // never blocks; the control-plane probe then times out waiting for
+            // `guest_park_count`, correctly reporting that the pause did not
+            // genuinely complete instead of passing on a fake.
+            let parked = Cell::new(false);
+            wait_for(&runtime, || {
+                if !vm.suspending() {
+                    return true;
+                }
+                if !parked.get() {
+                    runtime.inc_guest_park();
+                    parked.set(true);
+                }
+                false
+            });
             info!("VM[{}] VCpu[{}] resumed from suspend", vm_id, vcpu_id);
-            // The vCPU has woken and is about to re-enter the guest: record the
-            // re-execution as independent evidence of a genuine wake (not just a
-            // status flip).
-            runtime.inc_guest_entry();
             continue;
         }
 
