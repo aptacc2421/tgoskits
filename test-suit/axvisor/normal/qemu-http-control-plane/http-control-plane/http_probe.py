@@ -205,20 +205,6 @@ def guest_entry_count(body):
     return count
 
 
-def check_guest_entries(label, body, expected_min):
-    """Assert the guest re-executed at least `expected_min` times so far."""
-    count = guest_entry_count(body)
-    print(
-        "  http probe: %s -> guest_entry_count %d (expect >= %d)"
-        % (label, count, expected_min)
-    )
-    if count < expected_min:
-        raise AssertionError(
-            "%s reported guest_entry_count %d, expected >= %d"
-            % (label, count, expected_min)
-        )
-
-
 def poll_guest_entries(vm_id, expected_min):
     """Poll `GET /api/vms/{id}` until `guest_entry_count >= expected_min`.
 
@@ -482,8 +468,10 @@ def main():
     # `guest_entry_count` on its first guest entry, independent of the status.
     poll_guest_entries(1, 1)
     status, body = request("GET", "/api/vms/1")
-    entries = guest_entry_count(body)
-    # No pause has been issued yet, so the pause-park count is still 0.
+    # `guest_entry_count` advances on every guest exit while the VM runs, so the
+    # re-entry baseline is read after the vCPU parks (in the pause blocks
+    # below): only a resume that re-enters the guest moves the counter past the
+    # frozen value, so a status-only resume fails the assertion.
     parks = guest_park_count(body)
 
     # 22. Re-starting an already-running VM conflicts.
@@ -506,6 +494,11 @@ def main():
     # resume absorbed while the vCPU is still running the guest.
     poll_guest_parks(1, parks + 1)
     parks = parks + 1
+    # Sample the re-entry counter now that the vCPU has parked and the value is
+    # frozen. The resume assertion requires the counter to advance past this
+    # baseline, so a status-only resume (no re-entry) makes the poll time out.
+    status, body = request("GET", "/api/vms/1")
+    entries = guest_entry_count(body)
 
     # 25. Pausing an already-paused VM conflicts.
     status, _ = request("POST", "/api/vms/1/pause", token=TOKEN)
@@ -537,6 +530,9 @@ def main():
     # park before resuming.
     poll_guest_parks(1, parks + 1)
     parks = parks + 1
+    # Re-sample the frozen re-entry baseline for the second cycle.
+    status, body = request("GET", "/api/vms/1")
+    entries = guest_entry_count(body)
     status, body = request("POST", "/api/vms/1/resume", token=TOKEN)
     check("POST /api/vms/1/resume (cycle 2)", status, 200)
     check_action("POST /api/vms/1/resume (cycle 2)", body, True, False)
