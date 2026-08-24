@@ -152,6 +152,11 @@ fn cow_file_max_read_len_boundary_rules_hold() -> bool {
 }
 
 #[cfg(axtest)]
+pub fn cow_clone_failure_rollback_rules_hold() -> bool {
+    super::mm::cow_clone_failure_rollback_rules_hold_for_test()
+}
+
+#[cfg(axtest)]
 pub fn concurrent_epoll_reverse_add_is_serialized() -> bool {
     super::file::concurrent_reverse_add_is_serialized_for_test()
 }
@@ -563,6 +568,11 @@ pub fn futex_nofault_failure_is_transactional() -> bool {
 pub fn page_fault_completion_updates_only_success() -> bool {
     super::mm::page_fault_completion_updates_only_success_for_test()
         && ax_runtime::hal::cache::update_mmu_cache_alignment_for_test()
+}
+
+#[cfg(axtest)]
+pub fn thread_page_table_lease_follows_task_lifetime() -> bool {
+    super::task::thread_page_table_lease_follows_task_lifetime_for_test()
 }
 
 #[cfg(test)]

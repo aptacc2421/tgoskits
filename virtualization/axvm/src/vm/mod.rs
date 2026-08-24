@@ -36,8 +36,8 @@ use axdevice_base::*;
 use axvm_types::*;
 
 use crate::{
-    arch::*, boot::*, config::*, host::paging::*, irq::model::*, layout::*, lifecycle::*,
-    runtime::*, sync::MutexExt, vcpu::*, *,
+    arch::current::ArchNestedPageTable, architecture::ArchOps, boot::*, config::*, host::paging::*,
+    irq::model::*, layout::*, lifecycle::*, runtime::*, sync::MutexExt, vcpu::*, *,
 };
 
 pub(crate) mod boot;
@@ -49,9 +49,9 @@ const VM_ASPACE_BASE: usize = 0x0;
 const VM_ASPACE_SIZE: usize = 0x7fff_ffff_f000;
 
 /// A vCPU with architecture-independent interface.
-type VCpu = AxVCpu<crate::arch::ArchVCpu>;
+type VCpu = AxVCpu<crate::arch::current::ArchVCpu>;
 /// A reference to a vCPU.
-pub(crate) type AxVCpuRef<A = crate::arch::ArchVCpu> = Arc<AxVCpu<A>>;
+pub(crate) type AxVCpuRef<A = crate::arch::current::ArchVCpu> = Arc<AxVCpu<A>>;
 /// A reference to a VM.
 pub type AxVMRef = Arc<AxVM>;
 
@@ -125,7 +125,7 @@ fn write_guest_bytes_to_chunks(chunks: &mut [&mut [u8]], data: &[u8]) -> AxVmRes
             continue;
         }
         chunk[..len].copy_from_slice(&data[copied..copied + len]);
-        crate::clean_dcache_range((chunk.as_ptr() as usize).into(), len);
+        crate::arch::current::make_guest_memory_visible((chunk.as_ptr() as usize).into(), len);
         copied += len;
         if copied == data.len() {
             return Ok(());
@@ -150,7 +150,7 @@ pub(crate) struct AxVMResources {
     interrupt_controller: Option<Arc<dyn axdevice_base::VirtualInterruptController>>,
     address_layout: Option<VmAddressLayout>,
     boot_description: GuestBootDescription,
-    device_plan: crate::arch::ArchVmPlan,
+    device_plan: crate::arch::current::ArchVmPlan,
 }
 
 unsafe impl Send for AxVMResources {}
@@ -207,12 +207,10 @@ pub(crate) struct VmRuntimeHandle {
     guest_park_count: AtomicU64,
 }
 
-#[cfg(any(target_arch = "aarch64", test))]
 pub(crate) struct VcpuEventWaitSnapshot {
     notification_generation: usize,
 }
 
-#[cfg(any(target_arch = "aarch64", test))]
 pub(crate) fn wait_for_vcpu_event_if_idle(
     runtime: &VmRuntimeHandle,
     wait_snapshot: &VcpuEventWaitSnapshot,
@@ -454,20 +452,14 @@ impl VmRuntimeHandle {
             .unwrap_or_default()
     }
 
-    pub(crate) fn wait(&self) {
-        self.wait_queue.wait();
-    }
-
     pub(crate) fn wait_until(&self, condition: impl Fn() -> bool) {
         self.wait_queue.wait_until(condition);
     }
 
-    #[cfg(any(target_arch = "aarch64", test))]
     pub(crate) fn notification_generation(&self) -> usize {
         self.notification_generation.load(Ordering::Acquire)
     }
 
-    #[cfg(any(target_arch = "aarch64", test))]
     pub(crate) fn vcpu_event_wait_snapshot(&self) -> VcpuEventWaitSnapshot {
         VcpuEventWaitSnapshot {
             notification_generation: self.notification_generation(),
@@ -490,7 +482,6 @@ impl VmRuntimeHandle {
         self.notify_one();
     }
 
-    #[cfg(any(target_arch = "aarch64", test))]
     pub(crate) fn device_poll_requested(&self) -> bool {
         self.device_poll_requested.load(Ordering::Acquire)
     }
@@ -596,7 +587,6 @@ impl VmRuntimeHandle {
     }
 }
 
-#[cfg(any(target_arch = "aarch64", test))]
 impl VcpuEventWaitSnapshot {
     pub(crate) fn has_pending_event(&self, runtime: &VmRuntimeHandle) -> bool {
         runtime.device_poll_requested()
@@ -692,7 +682,7 @@ impl AxVMResources {
     pub(crate) fn from_page_table(
         vm_id: VMId,
         page_table: ArchNestedPageTable,
-        device_plan: crate::arch::ArchVmPlan,
+        device_plan: crate::arch::current::ArchVmPlan,
         build_nested_paging: impl FnOnce(HostPhysAddr) -> AxVmResult<NestedPagingConfig>,
     ) -> AxVmResult<Self> {
         let address_space = AddrSpace::new_empty(
@@ -723,8 +713,7 @@ impl AxVMResources {
         self.device_plan.devices()
     }
 
-    #[cfg(target_arch = "aarch64")]
-    pub(crate) const fn architecture_plan(&self) -> &crate::arch::ArchVmPlan {
+    pub(crate) const fn architecture_plan(&self) -> &crate::arch::current::ArchVmPlan {
         &self.device_plan
     }
 
@@ -1129,8 +1118,10 @@ impl AxVM {
         let id = config.id();
         let name = config.name();
         let fw_cfg_payload = Arc::new(FwCfgPayloadSlot::new());
-        let resources =
-            crate::arch::CurrentArch::create_vm_resources(&mut config, fw_cfg_payload.clone())?;
+        let resources = crate::arch::current::CurrentArch::create_vm_resources(
+            &mut config,
+            fw_cfg_payload.clone(),
+        )?;
         let result = Arc::new(Self {
             id,
             name,
@@ -1209,15 +1200,22 @@ impl AxVM {
         }
     }
 
+    /// Runs a callback with a snapshot of the current runtime.
+    ///
+    /// The runtime is pinned by its `Arc`, but the lifecycle may advance after
+    /// the snapshot. The callback runs without the machine lock so runtime
+    /// wait-queue operations cannot invert the machine/wait-queue lock order.
     pub(crate) fn with_runtime<F, R>(&self, f: F) -> AxVmResult<R>
     where
         F: FnOnce(&Arc<VmRuntimeHandle>) -> AxVmResult<R>,
     {
-        let machine = self.machine.lock();
-        let runtime = machine
+        let runtime = self
+            .machine
+            .lock()
             .runtime()
+            .cloned()
             .ok_or_else(|| ax_err_type!(BadState, "VM runtime is not available"))?;
-        f(runtime)
+        f(&runtime)
     }
 
     #[cfg_attr(
@@ -1342,10 +1340,9 @@ impl AxVM {
         f(&mut config)
     }
 
-    #[cfg(target_arch = "aarch64")]
     pub(crate) fn with_architecture_plan<F, R>(&self, f: F) -> AxVmResult<R>
     where
-        F: FnOnce(&crate::arch::ArchVmPlan) -> AxVmResult<R>,
+        F: FnOnce(&crate::arch::current::ArchVmPlan) -> AxVmResult<R>,
     {
         self.with_resources(|resources| f(resources.architecture_plan()))
     }
@@ -1355,7 +1352,9 @@ impl AxVM {
     where
         F: FnOnce(&axdevice::ResolvedDeviceGraph) -> AxVmResult<R>,
     {
-        self.with_resources(|resources| f(resources.planned_devices().graph()))
+        use crate::vm::prepare::device_plan::ArchitectureVmPlan;
+
+        self.with_architecture_plan(|plan| f(plan.devices().graph()))
     }
 
     /// Stores a guest DTB as VM-owned boot-description state.
@@ -1409,7 +1408,7 @@ impl AxVM {
             if let Some(runtime) = self.take_stopped_runtime() {
                 runtime.join_all_vcpu_tasks(self.id())?;
             }
-            crate::arch::CurrentArch::deactivate_devices(self)?;
+            crate::arch::current::CurrentArch::exit_runtime(self)?;
             self.prepare()?;
         }
         info!("Starting VM[{}]", self.id());
@@ -1432,13 +1431,13 @@ impl AxVM {
             Ok(())
         })?;
 
-        crate::arch::CurrentArch::activate_devices(self)?;
+        crate::arch::current::CurrentArch::enter_runtime(self)?;
         let start_result = self
             .machine
             .lock()
             .start_with(|_resources| Ok(runtime.clone()));
         if let Err(error) = start_result {
-            return match crate::arch::CurrentArch::deactivate_devices(self) {
+            return match crate::arch::current::CurrentArch::exit_runtime(self) {
                 Ok(()) => Err(error),
                 Err(rollback) => Err(AxVmError::lifecycle_rollback("start VM", error, rollback)),
             };
@@ -1581,7 +1580,7 @@ impl AxVM {
         if let Some(runtime) = self.take_stopped_runtime() {
             runtime.join_all_vcpu_tasks(self.id())?;
         }
-        crate::arch::CurrentArch::deactivate_devices(self)
+        crate::arch::current::CurrentArch::exit_runtime(self)
     }
 
     /// Resets the VM by discarding runtime-only state, rebuilding vCPUs/devices,
@@ -2089,7 +2088,7 @@ impl AxVM {
                     runtime.join_all_vcpu_tasks(vm_id)?;
                 }
                 if self.status() == VmStatus::Stopped {
-                    crate::arch::CurrentArch::deactivate_devices(self)?;
+                    crate::arch::current::CurrentArch::exit_runtime(self)?;
                 }
             }
             VmStatus::Destroyed | VmStatus::Destroying => {}
@@ -2530,6 +2529,18 @@ mod tests {
             self.lock.held.store(false, Ordering::Release);
         }
     }
+}
+
+#[cfg(all(test, feature = "host-test"))]
+pub(crate) fn destroyed_vm_for_test(id: VMId) -> AxVMRef {
+    let config = AxVMConfig::default_for_test(id, "destroyed-test-vm");
+    Arc::new(AxVM {
+        id,
+        name: config.name(),
+        config: SleepMutex::new(config),
+        machine: IrqSafeMutex::new(Machine::Destroyed),
+        fw_cfg_payload: Arc::new(FwCfgPayloadSlot::new()),
+    })
 }
 
 #[cfg(all(test, feature = "host-test"))]

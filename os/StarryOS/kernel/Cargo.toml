@@ -1,6 +1,6 @@
 [package]
 name = "starry-kernel"
-version = "0.7.7"
+version = "0.8.0"
 edition.workspace = true
 description = "A Linux-compatible OS kernel built on ArceOS unikernel"
 authors = [
@@ -36,6 +36,7 @@ features = [
     "ax-runtime/rtc",
     "smp",
     "starry-kernel/input",
+    "starry-kernel/user-access-fastpath",
     "starry-kernel/vsock",
 ]
 

@@ -13,16 +13,41 @@ sidebar_label: "自动 CI 测试"
 - `scripts/test/ci_plan.py` 展开配置并生成矩阵；
 - `.github/workflows/reusable-check-matrix.yml` 执行展开后的矩阵行。
 
-容器发布由 `.github/workflows/container-publish.yml` 独立处理。非主线分支 push
-由主 CI 的准备阶段检查 open PR，已有 PR 时不再运行后续矩阵。
+容器发布由 `.github/workflows/container-publish.yml` 独立处理。`main` 和 `dev`
+各自使用按 ref 隔离的 FIFO concurrency group，同一分支的每个非 PR run 都会保留并
+轮流执行，两条分支之间不会互相排队。pull request、普通分支和其他事件使用按 run ID
+隔离的 group，不进入 `main` 或 `dev` 的 workflow 队列；不同 PR 也不会在 workflow
+层面互相排队。该隔离不划分 runner 容量，所有 run 仍共享现有 self-hosted runner，
+匹配标签的 runner 繁忙时 job 会继续保持 queued。
+
+同仓分支 push 是
+对应 head commit 的首选验证；pull request 准备阶段会短暂重试尚未可见的同 SHA push
+run。匹配的 push 仍在 queued 或 in_progress 时，它已经拥有该 commit 的验证，pull
+request 将自己的后续矩阵标记为 skipped；push 已 completed 时，仍必须存在非 Plan、
+非 skipped/cancelled 的真实矩阵 job 才能复用。这样既避免 push 与 pull request 同时
+执行，也不会把历史上的 Plan-only push 当成完整验证。查询失败、fork PR、completed
+Plan-only push 或已取消的 push 都会 fail-open，由 pull request 正常规划并执行。
+
+pull request 不会取消当前 SHA 的 push，因此 GitHub 不会把正常去重显示为
+failing/cancelled checks。pull request run 仍只取消同一 PR 的旧 pull request run；
+同仓 PR 可由主 CI 直接清理，fork PR 则由不 checkout 代码的 `CI PR Cleanup`
+`pull_request_target` workflow 使用 Actions write token 清理。该 workflow 会先重新
+读取 PR 当前 head，忽略延迟到达的旧 synchronize 事件。GitHub API 未给 fork run
+返回 PR 关联时，清理逻辑使用稳定的 head repository ID 和 head branch 精确匹配。
+即使本次矩阵复用 push 而 skipped，也会清理旧 commit 尚未完成的 pull request run；
+新 commit 的 push 同样会取消同一分支的旧 push run。`main` 和 `dev` 是例外：每个
+commit 的 CI 都完整保留，并在各自分支队列中轮流执行；后续提交不会取消仍在运行或
+排队的旧 CI。旧 run 先收到普通 cancel；短暂复查仍未完成时再 force-cancel，避免分组
+job 的 `always()` 条件阻止清理。
 
 ## 触发条件
 
 | 事件 | 行为 |
 |------|------|
-| push 到 `main` / `dev` | 非文档变更运行完整矩阵 |
-| 其他分支 push | 没有 open PR 时运行完整矩阵 |
-| pull request | planner 根据三点 diff 生成增量矩阵 |
+| push 到 `main` / `dev` | 非文档变更运行完整矩阵；两条分支分别 FIFO，并保留每个 commit 的完整 CI |
+| 其他分支 push | 非文档变更运行完整矩阵，作为同仓 PR 的首选验证 |
+| 首次创建 pull request | 同 SHA push 已拥有验证时跳过，否则按三点 diff 规划 |
+| 更新或重开 pull request | 取消旧 commit 的同事件 run；同 SHA push 已拥有验证时跳过，否则按三点 diff 规划 |
 | workflow dispatch | 使用指定的 `since_sha`，但仍运行完整矩阵 |
 
 纯 Markdown 变更不触发主 CI。`push` 和 `workflow_dispatch` 不缩小测试矩阵。
@@ -31,22 +56,29 @@ sidebar_label: "自动 CI 测试"
 
 ```text
 Plan CI
-  -> Preflight / <purpose>
-     -> Verification / <OS> / <platform> <arch-or-board> · <purpose>
+Preflight / <purpose>
+Workspace / <purpose>
+ArceOS / <platform> <arch-or-board> · <purpose>
+Starry / <platform> <arch-or-board> · <purpose>
+AxVisor / <platform> <arch-or-board> · <purpose>
 ```
 
-固定阶段名称为 `Preflight` 和 `Verification`。平台写在架构之前，例如：
+`Workspace`、`ArceOS`、`Starry` 和 `AxVisor` 都在 `Preflight` 成功或按计划跳过
+后启动；这个门禁不会在四个后续分组之间建立先后顺序。每个名称都是一个可展开的
+reusable workflow 分组，平台写在架构之前，例如：
 
 ```text
 Preflight / Formatting + publish dry-run
-Verification / ArceOS / QEMU aarch64 · GICv2 SMP4 boot + suites + axtest
-Verification / AxVisor / VMX x86_64 · Smoke
-Verification / Starry / Board VisionFive 2 · Suites
+Workspace / Incremental Clippy
+ArceOS / QEMU aarch64 · GICv2 SMP4 boot + suites + axtest
+Starry / Board VisionFive 2 · Suites
+AxVisor / VMX x86_64 · Smoke
 ```
 
-`Preflight` 包含 formatting/publish dry-run、incremental sync-lint 和 locking
-policy。`Verification` 包含 Workspace、ArceOS、AxVisor 和 Starry 检查。全量运行
-展开为 3 个 Preflight 行和 32 个 Verification 行。
+`Preflight` 包含 formatting/publish dry-run 和 incremental sync-lint。`Workspace`
+包含跨 workspace 的 clippy 和 std tests，其余三个分组包含各自
+注册的 QEMU、KVM 和真机检查。实际行数由 manifests 动态生成，不在文档中维护易过期
+的固定总数。
 
 ## PR 影响路由
 
@@ -84,16 +116,16 @@ changed paths、affected OS、精确输入、test-suit 选择、selected/skipped
 动态名称遵循：
 
 ```text
-Verification / <OS> / <platform> <arch-or-board> · <case>
+<OS> / <platform> <arch-or-board> · <case>
 ```
 
 例如：
 
 ```text
-Verification / ArceOS / QEMU riscv64 · rust/task-ipi
-Verification / Starry / QEMU aarch64 · qemu/system
-Verification / AxVisor / VMX x86_64 · direct-acpi-vmx
-Verification / Starry / Board OrangePi 5 Plus · native-hardware-smoke
+ArceOS / QEMU riscv64 · rust/task-ipi
+Starry / QEMU aarch64 · qemu/system
+AxVisor / VMX x86_64 · direct-acpi-vmx
+Starry / Board OrangePi 5 Plus · native-hardware-smoke
 ```
 
 Starry `qemu/system/<subcase>` 源码变更使用 `qemu/<subcase>` selector，并为拥有
@@ -117,19 +149,29 @@ check 中禁止直接声明 `runs_on`、`environment`、owner 或 `require_kvm`�
 | `ubuntu-base` | `ubuntu-latest` + base container | 全局默认 |
 | `ubuntu-host` | `ubuntu-latest` host | 不使用 container |
 | `ubuntu-axvisor-lvz` | `ubuntu-latest` + LVZ container | LoongArch AxVisor |
-| `qcs` | `self-hosted, linux, qcs` | fork 回退到 base container |
+| `qcs` | `self-hosted, linux, qcs` | workflow 在 fork 仓库运行时回退到 base container |
 | `board` | `self-hosted, linux, board` | 仅 `rcore-os` owner |
 | `kvm-intel` | `self-hosted, linux, intel, kvm` | 仅 `rcore-os`，要求 KVM |
 | `kvm-amd` | `self-hosted, linux, amd, kvm` | 仅 `rcore-os`，要求 KVM |
+
+Runner 路由以 workflow 执行仓库的 `github.repository_owner` 为准。fork
+仓库自行执行 CI 时使用 GitHub-hosted fallback；在 `rcore-os/tgoskits`
+中执行的 pull request workflow 使用完整的组织 Runner 矩阵。外部 PR 在使用
+self-hosted Runner 前应先经过 workflow 审批；应在仓库设置中为外部贡献者启用
+该审批，不能用 PR 源仓库 owner 改写 Runner 路由。
 
 self-hosted 检查的 `cache_key` 必须为空；省略时默认就是空字符串。GitHub-hosted
 检查只有显式非空 `cache_key` 才启用 `Swatinem/rust-cache`。
 
 ## 可复用矩阵
 
-`reusable-check-matrix.yml` 只包含一个 matrix job。planner 始终输出完全展开的
-runner labels、container image、preflight、cache、checkout depth、timeout、artifact
-和命令字段。
+`reusable-check-matrix.yml` 只包含一个 matrix job。planner 分别输出
+`workspace_matrix`、`arceos_matrix`、`starry_matrix` 和 `axvisor_matrix`，顶层同名
+caller 分别调用该执行器，从而在 Actions 左栏形成可展开分组。每个分组内部保留
+fail-fast，并显式允许最多 256 个矩阵项并行；因此 Preflight 门禁通过后，同一分组内
+所有匹配 self-hosted runner 的行都会同时参与调度，一个分组失败不会取消其他分组。
+实际开始时间仍取决于匹配标签的 runner 容量。矩阵行仍包含完全展开的 runner labels、
+container image、preflight、cache、checkout depth、timeout、artifact 和命令字段。
 
 普通完整/增量运行中，sync-lint 生成 `tg-xtask-bin` artifact，使用容器的测试行可
 下载复用。exclusive test-suit 不运行 Preflight，因此动态行直接使用 `cargo xtask`
@@ -138,7 +180,10 @@ runner labels、container image、preflight、cache、checkout depth、timeout�
 ## 本地检查
 
 ```bash
-python3 -m unittest scripts/test/test_ci_impact.py scripts/test/test_ci_plan.py
+python3 -m unittest \
+  scripts/test/test_ci_impact.py \
+  scripts/test/test_ci_plan.py \
+  scripts/test/test_ci_routing.py
 python3 scripts/test/check_ci_routing.py
 actionlint
 ```
