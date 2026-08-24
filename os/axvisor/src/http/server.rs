@@ -32,13 +32,17 @@
 //!
 //! - `pause` is fire-and-forget: the status flips to `Paused` synchronously,
 //!   but running vCPUs park only at their next run-loop iteration. There is no
-//!   synchronous pause-quiesce wait; the `pause` response is marked `async:
-//!   true` for this reason. To confirm a pause actually completed, poll the VM
-//!   detail: `guest_park_count` advances only when a vCPU has genuinely parked
-//!   in the suspend wait, and `guest_entry_count` advances only after the guest
-//!   has actually re-entered (on first start and on every wake from suspend).
-//!   Both are monotonic per-vCPU progress counters, not a strong "all devices
-//!   quiesced" guarantee (see the device/timer limits below).
+//!   synchronous pause-quiesce wait and **no completion-confirmation API** — a
+//!   `Paused` status only means the pause request was accepted, not that the
+//!   execution surface has gone quiet (see `virtualization/axvm/docs/
+//!   lifecycle.md`). To *observe* a vCPU actually parking (not a full
+//!   quiescence guarantee), poll the VM detail: `guest_park_count` advances
+//!   only when a vCPU has genuinely parked in the suspend wait, and
+//!   `guest_entry_count` advances only after the guest has actually re-entered
+//!   (on first start and on every wake from suspend). Both are **VM-level
+//!   monotonic aggregate** counters shared by every vCPU task of the VM — they
+//!   prove that *at least one* vCPU made progress, not that every vCPU, device,
+//!   or timer has quiesced (see the device/timer limits below).
 //! - Pause does not save or mask guest timer state. Host time keeps flowing
 //!   while the guest is suspended, so on resume the guest observes a time
 //!   jump; long pauses drift time-sensitive guests.

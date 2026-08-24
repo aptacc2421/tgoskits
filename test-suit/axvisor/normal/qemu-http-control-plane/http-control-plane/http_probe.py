@@ -85,10 +85,15 @@ is absorbed — the vCPU never parked, so it never re-enters either, and the
 resume re-entry check above would be meaningless. To make each resume a genuine
 wake from a parked vCPU, the probe also reads the HTTP-exposed
 `guest_park_count`: the hypervisor increments it once each time a vCPU actually
-observes the suspended state and parks. After *every* pause, the probe polls
-until `guest_park_count` strictly advanced before sending the resume, so a
-pause that never completes (or a status-only pause) makes the probe exit
-nonzero and fail the case.
+observes the suspended state and parks. (This *observes* a vCPU park — it is a
+VM-level aggregate, not a per-vCPU value, and is **not** a pause-completion API:
+it does not prove every vCPU/device/timer has quiesced.) After *every* pause,
+the probe polls until `guest_park_count` strictly advanced before sending the
+resume, so a pause that never completes (or a status-only pause) makes the probe
+exit nonzero and fail the case. Because `guest_entry_count` is published only
+after a *successful* guest (re-)entry, a broken wake path or a faulting resume
+that never re-enters the guest cannot advance it — making this probe the
+deterministic regression for the failed-entry path as well.
 
 The last recreate -> start -> stop -> delete block is the resource re-acquire
 regression: it proves destroy freed guest memory, vCPUs, devices, and the
@@ -189,11 +194,14 @@ def check_vm_status(label, body, expected):
 
 
 def guest_entry_count(body):
-    """Extract the hypervisor's monotonic guest (re-)entry count.
+    """Extract the hypervisor's VM-level monotonic guest (re-)entry count.
 
-    The vCPU run loop increments this after every guest (re-)entry (once the
-    guest has actually entered and exited), so it is independent proof that the
-    guest actually re-executed.
+    The vCPU run loop increments this *only* after a successful guest
+    (re-)entry (once the guest has actually entered and exited); a failed entry
+    that returns `Err` before the guest runs does not advance it. It is a VM-level
+    aggregate (shared by every vCPU task, not per-vCPU), so it proves at least
+    one vCPU re-executed — independent proof that the guest actually
+    re-executed.
     """
     if not isinstance(body, dict):
         raise AssertionError("VM detail response was not a JSON object")
@@ -233,14 +241,16 @@ def poll_guest_entries(vm_id, expected_min):
 
 
 def guest_park_count(body):
-    """Extract the hypervisor's count of vCPUs that observed a pause and parked.
+    """Extract the hypervisor's VM-level count of vCPU park events.
 
     The status flips to `Paused` synchronously while each vCPU parks
     asynchronously at its next run-loop iteration, so the probe must wait for
     this counter to advance after a pause before resuming: a resume sent while
     the vCPU is still running the guest is absorbed (the vCPU never parked, so
     it never re-enters either) and would make the resume re-entry evidence
-    ambiguous. This counter is the pause-completion signal.
+    ambiguous. This counter *observes* a vCPU park — it is a VM-level aggregate
+    (not per-vCPU) and is not a pause-completion API: it does not prove every
+    vCPU/device/timer has quiesced.
     """
     if not isinstance(body, dict):
         raise AssertionError("VM detail response was not a JSON object")
