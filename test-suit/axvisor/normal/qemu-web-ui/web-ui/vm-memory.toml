@@ -11,9 +11,10 @@
 # a pinned non-primary CPU) is exercised exactly as in the pause/resume case.
 #
 # The hypervisor also mounts its NVMe rootfs (`root=/dev/nvme0n1`) so
-# `web_ui::init()` can write the dashboard assets to `/web/` and the axum routes
-# can serve them; the guest Linux boots its own embedded initramfs
-# (`rdinit=/init`) independently of that host rootfs.
+# `web_ui::init()` can extract the embedded UI bundle to
+# `/web/axvisor-ui/current/` and the axum routes serve it with `ServeDir`; the
+# guest Linux boots its own embedded initramfs (`rdinit=/init`) independently of
+# that host rootfs.
 [base]
 id = 1
 name = "linux-http-web-ui"

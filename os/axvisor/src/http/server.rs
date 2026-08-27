@@ -51,12 +51,16 @@
 
 use axum::{Router, routing::get, routing::post};
 
+use crate::http::WebUiStatus;
 use crate::http::vm;
 #[cfg(feature = "web-ui")]
 use crate::http::web_ui;
 
 /// Assemble the management routes.
-pub fn router() -> Router {
+///
+/// `ui_status` is the readiness reported by [`web_ui::init`]: when the web UI
+/// is unavailable the UI routes return `503` while `/api/*` keeps serving.
+pub fn router(ui_status: WebUiStatus) -> Router {
     let router = Router::new()
         .route("/api/vms", get(vm::list_vms))
         .route("/api/vms/{id}", get(vm::vm_detail).delete(vm::vm_delete))
@@ -66,7 +70,9 @@ pub fn router() -> Router {
         .route("/api/vms/{id}/pause", post(vm::vm_pause))
         .route("/api/vms/{id}/resume", post(vm::vm_resume));
     #[cfg(feature = "web-ui")]
-    let router = router.merge(web_ui::ui_routes());
+    let router = router.merge(web_ui::ui_routes(ui_status));
+    #[cfg(not(feature = "web-ui"))]
+    let _ = ui_status;
     router
 }
 
@@ -87,11 +93,15 @@ fn bind_addr() -> &'static str {
 /// the runtime is built here. Only the IO driver is enabled — the epoll
 /// reactor suffices for `axum::serve`; a time driver would need `timerfd`.
 pub fn serve() {
-    // Extract the dashboard assets to `/web/` before the async runtime exists:
-    // these are blocking filesystem writes and must not contend with the IO
-    // driver's event loop. `web-ui` implies `fs`, so the rootfs is mounted.
+    // Extract the dashboard assets to `/web/axvisor-ui/current` before the async
+    // runtime exists: these are blocking filesystem writes and must not contend
+    // with the IO driver's event loop. `web-ui` implies `fs`, so the rootfs is
+    // mounted. The returned status is passed into the router so the UI can be
+    // served (Ready) or return 503 (Unavailable) while `/api/*` stays up.
     #[cfg(feature = "web-ui")]
-    web_ui::init();
+    let ui_status = web_ui::init();
+    #[cfg(not(feature = "web-ui"))]
+    let ui_status = WebUiStatus::Ready;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()
@@ -102,6 +112,8 @@ pub fn serve() {
             .await
             .expect("failed to bind management HTTP server");
         info!("management HTTP server (axum) listening on {bind}");
-        axum::serve(listener, router()).await.expect("server error");
+        axum::serve(listener, router(ui_status))
+            .await
+            .expect("server error");
     });
 }

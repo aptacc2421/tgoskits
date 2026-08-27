@@ -23,14 +23,17 @@ Environment (set by the generic runner):
     AXVISOR_HTTP_REQUEST_TIMEOUT seconds per HTTP request
 
 The probe first asserts the web dashboard assets are served with the right MIME
-types (proving `web-ui` extracted them to `/web/` on the mounted NVMe rootfs and
-the axum routes serve them back), then drives the lifecycle contract the
+types and security headers (proving `web-ui` extracted the React bundle to
+`/web/axvisor-ui/current/` on the mounted NVMe rootfs and `tower-http::ServeDir`
+serves it back under a strict CSP), then drives the lifecycle contract the
 dashboard buttons call, covering auth, error mapping, the `async` markers, and
 repeated suspend/wake cycles:
 
-    GET    /                    -> 200 text/html        (index)
-    GET    /style.css           -> 200 text/css         (style)
-    GET    /dashboard.js        -> 200 text/javascript  (dashboard logic)
+    GET    /                    -> 200 text/html + CSP/nosniff/referrer (index)
+    GET    /assets/<hash>.js    -> 200 text/javascript + CSP/nosniff (bundle JS)
+    GET    /assets/<hash>.css   -> 200 text/css + CSP/nosniff       (bundle CSS)
+    GET    /style.css           -> 404                              (legacy gone)
+    GET    /dashboard.js        -> 404                              (legacy gone)
     GET    /api/vms             -> 200                  (list; id=1 present)
     GET    /api/vms/1           -> 200 ready            (detail; name)
     POST   /api/vms/1/pause     -> 401                  (no token)
@@ -111,12 +114,18 @@ def request(method, path, token=None, body=None):
 
 def raw_request(method, path):
     """One HTTP request for a non-JSON (asset) body; returns (status, content-type, bytes)."""
+    status, headers, body = raw_request_full(method, path)
+    return status, headers.get("content-type", ""), body
+
+
+def raw_request_full(method, path):
+    """One HTTP request returning (status, headers dict, body bytes)."""
     req = urllib.request.Request(BASE + path, method=method)
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-            return resp.status, resp.headers.get("content-type", ""), resp.read()
+            return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as err:
-        return err.code, err.headers.get("content-type", ""), err.read()
+        return err.code, dict(err.headers), err.read()
     except urllib.error.URLError as err:
         raise RuntimeError("request %s %s failed: %s" % (method, path, err.reason))
     except OSError as err:
@@ -145,6 +154,23 @@ def check_mime(label, ctype, expected):
         raise AssertionError(
             "%s served content-type %r, expected %s" % (label, ctype, expected)
         )
+
+
+def check_header(label, headers, name, expected):
+    """Assert a response header equals the expected value (case-insensitive)."""
+    actual = headers.get(name)
+    if actual is None:
+        raise AssertionError("%s missing required header %r" % (label, name))
+    if actual.lower() != expected.lower():
+        raise AssertionError(
+            "%s header %r was %r, expected %r" % (label, name, actual, expected)
+        )
+    print("  http probe: %s header %r -> %s" % (label, name, actual))
+
+
+def check_status(label, actual, expected):
+    """Assert a status equals the expected value (re-export for asset paths)."""
+    check(label, actual, expected)
 
 
 def vm_status(body):
@@ -255,17 +281,43 @@ def main():
     poll_ready()
     print("  http probe: guest management server reachable")
 
-    # 2-4. Dashboard assets: `web-ui` extracted them to `/web/` on the mounted
-    #      NVMe rootfs and the axum routes serve them with the right MIME types.
-    status, ctype, body = raw_request("GET", "/")
-    check_asset("GET /", status, ctype, body)
-    check_mime("GET /", ctype, "text/html")
-    status, ctype, body = raw_request("GET", "/style.css")
-    check_asset("GET /style.css", status, ctype, body)
-    check_mime("GET /style.css", ctype, "text/css")
-    status, ctype, body = raw_request("GET", "/dashboard.js")
-    check_asset("GET /dashboard.js", status, ctype, body)
-    check_mime("GET /dashboard.js", ctype, "text/javascript")
+    # 2-4. Dashboard assets: `web-ui` extracted the React bundle to
+    #      `/web/axvisor-ui/current/` and `tower-http::ServeDir` serves it under
+    #      a strict CSP. The legacy hand-written assets (`/style.css`,
+    #      `/dashboard.js`) must now 404 — they prove the old embedding path is
+    #      gone, not silently served.
+    status, headers, body = raw_request_full("GET", "/")
+    check_asset("GET /", status, headers.get("content-type", ""), body)
+    check_mime("GET /", headers.get("content-type", ""), "text/html")
+    check_header("GET /", headers, "Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+    check_header("GET /", headers, "X-Content-Type-Options", "nosniff")
+    check_header("GET /", headers, "Referrer-Policy", "no-referrer")
+
+    # Old hand-written assets are intentionally gone.
+    status, _, _ = raw_request_full("GET", "/style.css")
+    check_status("GET /style.css", status, 404)
+    status, _, _ = raw_request_full("GET", "/dashboard.js")
+    check_status("GET /dashboard.js", status, 404)
+
+    # Discover the hashed bundle assets from the served index.html and verify
+    # each is served with the right MIME type and the same security headers.
+    import re
+    html = body.decode("utf-8", "replace")
+    asset_paths = re.findall(r'(?:src|href)="(/assets/[^"]+)"', html)
+    if not asset_paths:
+        raise AssertionError("GET / referenced no /assets/* bundle files")
+    for asset in asset_paths:
+        status, headers, body = raw_request_full("GET", asset)
+        check_asset("GET %s" % asset, status, headers.get("content-type", ""), body)
+        if asset.endswith(".js"):
+            check_mime("GET %s" % asset, headers.get("content-type", ""), "text/javascript")
+        elif asset.endswith(".css"):
+            check_mime("GET %s" % asset, headers.get("content-type", ""), "text/css")
+        else:
+            check_mime("GET %s" % asset, headers.get("content-type", ""), "application/octet-stream")
+        check_header("GET %s" % asset, headers, "X-Content-Type-Options", "nosniff")
+        check_header("GET %s" % asset, headers, "Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+    print("  http probe: served %d hashed bundle asset(s)" % len(asset_paths))
 
     # 5. List: the default VM (id 1) is registered and `Ready`.
     status, body = request("GET", "/api/vms")
