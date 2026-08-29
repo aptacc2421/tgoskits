@@ -92,7 +92,6 @@ impl FileLike for EventFd {
         }
         loop {
             let mut inner = self.inner.lock();
-            let old_readable = inner.counter > 0;
             // The counter saturates at UINT64_MAX - 1; a write whose addition
             // would reach or exceed UINT64_MAX blocks, or fails with EAGAIN
             // if nonblocking. `u64::MAX - value` never underflows because
@@ -107,10 +106,16 @@ impl FileLike for EventFd {
                 continue;
             }
             inner.counter += value;
-            let new_readable = inner.counter > 0;
-            if old_readable != new_readable {
-                inner.readiness_version = inner.readiness_version.wrapping_add(1);
-            }
+            // Every accepted write is a wakeup event, not only the one that
+            // flips the counter from zero to non-zero: Linux `eventfd_write`
+            // calls `wake_up_locked_poll(&ctx->wqh, EPOLLIN)` on every write
+            // (fs/eventfd.c), unconditionally, so a waiter must observe one
+            // edge per write. Bumping only when readability flips drops every
+            // wake after the first while the counter stays non-zero -- which is
+            // exactly how an async runtime uses its `mio::Waker` eventfd (it
+            // never drains it), hanging the second and later `spawn_blocking`
+            // calls behind an `epoll_wait` that never returns.
+            inner.readiness_version = inner.readiness_version.wrapping_add(1);
             return Ok(8);
         }
     }
