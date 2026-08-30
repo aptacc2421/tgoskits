@@ -8,6 +8,9 @@
 //!   by one for `EFD_SEMAPHORE`);
 //! - a write adds an 8-byte value to the counter, rejecting `UINT64_MAX` with
 //!   `EINVAL` and overflowing writes with `EAGAIN` (nonblocking);
+//! - every accepted write is a readiness edge for an edge-triggered `epoll`
+//!   watch, not only the write that first makes the counter non-zero (see
+//!   `test_every_write_is_a_readiness_edge`);
 //! - reads/writes with a buffer smaller than 8 bytes fail with `EINVAL`;
 //! - unknown creation flags fail with `EINVAL`.
 //!
@@ -17,7 +20,7 @@
 use core::ffi::c_int;
 use std::println;
 
-use super::syscalls::{self, assert_errno};
+use super::syscalls::{self, EpollEvent, assert_errno};
 
 /// `EFD_SEMAPHORE` = 1.
 const EFD_SEMAPHORE: c_int = 1;
@@ -28,6 +31,15 @@ const EFD_NONBLOCK: c_int = 0o4000;
 
 const EINVAL: c_int = 22;
 const EAGAIN: c_int = 11;
+
+/// `EPOLLIN` = 0x001.
+const EPOLLIN: u32 = 0x001;
+/// `EPOLLOUT` = 0x004.
+const EPOLLOUT: u32 = 0x004;
+/// `EPOLLET` = `1 << 31`, requesting edge-triggered delivery.
+const EPOLLET: u32 = 1 << 31;
+/// `EPOLL_CTL_ADD` = 1.
+const EPOLL_CTL_ADD: c_int = 1;
 
 fn test_create_and_flag_validation() {
     let fd = syscalls::eventfd(0, 0).expect("eventfd(0, 0) failed");
@@ -174,6 +186,161 @@ fn test_counter_overflow_eagain() {
     );
 }
 
+/// Every accepted write is a readiness edge, not only the one that makes the
+/// counter non-zero.
+///
+/// Linux `eventfd_write` calls `wake_up_locked_poll(&ctx->wqh, EPOLLIN)` on
+/// every write (`fs/eventfd.c`), so a poller must observe one readiness edge
+/// per write. This is how an async runtime uses its `mio::Waker` eventfd: the
+/// runtime never drains the counter, so an implementation that bumps readiness
+/// only when readability flips delivers the first wake and drops every later
+/// one, hanging the second and all subsequent `spawn_blocking` calls behind an
+/// `epoll_wait` that never returns.
+///
+/// `epoll_wait` is called with `timeout = 0`, so a lost edge shows up as a
+/// deterministic "zero events" result instead of blocking the cooperative
+/// scheduler.
+fn test_every_write_is_a_readiness_edge() {
+    let epfd = syscalls::epoll_create1(0).expect("epoll_create1(0) failed");
+    let fd = syscalls::eventfd(0, EFD_NONBLOCK).expect("create nonblocking eventfd failed");
+
+    let mut interest = EpollEvent {
+        events: EPOLLIN | EPOLLET,
+        data: 0,
+    };
+    syscalls::epoll_ctl(epfd, EPOLL_CTL_ADD, fd, Some(&mut interest))
+        .expect("epoll_ctl ADD failed");
+
+    let mut ready = [EpollEvent::default(); 4];
+
+    // First write: the counter goes 0 -> 1, so the fd becomes readable. This
+    // edge is reported whether or not readiness tracks the readability flip.
+    assert_eq!(
+        syscalls::write_u64(fd, 1).unwrap(),
+        8,
+        "write must return 8"
+    );
+    assert_eq!(
+        syscalls::epoll_wait(epfd, &mut ready, 0).unwrap(),
+        1,
+        "the first write must surface EPOLLIN"
+    );
+    assert_eq!(
+        ready[0].events & EPOLLIN,
+        EPOLLIN,
+        "the first event must carry EPOLLIN"
+    );
+
+    // Second write with the counter left undrained: it merely grows 1 -> 2, so
+    // readability never flips. Linux still wakes the poller, so the event has
+    // to be reported again.
+    assert_eq!(
+        syscalls::write_u64(fd, 1).unwrap(),
+        8,
+        "write must return 8"
+    );
+    assert_eq!(
+        syscalls::epoll_wait(epfd, &mut ready, 0).unwrap(),
+        1,
+        "every write must be a readiness edge, not only the one that flips readability"
+    );
+    assert_eq!(
+        ready[0].events & EPOLLIN,
+        EPOLLIN,
+        "the second event must carry EPOLLIN"
+    );
+}
+
+/// Draining a saturated counter is a writability edge for an edge-triggered
+/// `EPOLLOUT` watch.
+///
+/// `poll()` reports `writable = counter < u64::MAX - 1`, so the only read that
+/// changes writability is one that drains a counter saturated at `u64::MAX - 1`
+/// (the ceiling Linux leaves below the `count == ULLONG_MAX` `EPOLLERR` state).
+/// Reaching saturation requires an accepted write, which always bumps the
+/// readiness version, so the drain's `EPOLLOUT` edge is reported either through
+/// the version change or, when a wait already consumed it, through the
+/// `ready & !last_ready` fallback of the edge-triggered delivery path.
+fn test_saturated_read_is_a_writable_edge() {
+    let epfd = syscalls::epoll_create1(0).expect("epoll_create1(0) failed");
+    let fd = syscalls::eventfd(0, EFD_SEMAPHORE | EFD_NONBLOCK)
+        .expect("create semaphore eventfd failed");
+
+    let mut interest = EpollEvent {
+        events: EPOLLOUT | EPOLLET,
+        data: 0,
+    };
+    syscalls::epoll_ctl(epfd, EPOLL_CTL_ADD, fd, Some(&mut interest))
+        .expect("epoll_ctl ADD failed");
+
+    // Saturate the counter at u64::MAX - 1: writability flips false, and the
+    // accepted write itself is a readiness edge consumed by the first wait.
+    assert_eq!(
+        syscalls::write_u64(fd, u64::MAX - 1).unwrap(),
+        8,
+        "write must return 8"
+    );
+    let mut ready = [EpollEvent::default(); 4];
+    assert_eq!(
+        syscalls::epoll_wait(epfd, &mut ready, 0).unwrap(),
+        0,
+        "a saturated counter is not writable"
+    );
+
+    // A semaphore read drains one unit: u64::MAX - 1 -> u64::MAX - 2, which
+    // flips writability back to true. The EPOLLOUT edge must be reported even
+    // though no write bumps the version in between.
+    assert_eq!(
+        syscalls::read_u64(fd).unwrap(),
+        1,
+        "semaphore read must return 1"
+    );
+    assert_eq!(
+        syscalls::epoll_wait(epfd, &mut ready, 0).unwrap(),
+        1,
+        "draining a saturated counter must surface EPOLLOUT"
+    );
+    assert_eq!(
+        ready[0].events & EPOLLOUT,
+        EPOLLOUT,
+        "the event must carry EPOLLOUT"
+    );
+}
+
+/// A stream of wakes: every write in a long sequence must surface an edge.
+///
+/// `mio::Waker` usage is not two writes but the whole lifetime of a runtime:
+/// every `wake()` is a write and every one must be observed by `epoll_wait`.
+/// A single-shot test can only catch "the first wake is lost"; this loop also
+/// catches any delivery that drops, batches, or skips alternating wakes.
+fn test_write_stream_delivers_every_wake() {
+    const WAKES: usize = 256;
+    let epfd = syscalls::epoll_create1(0).expect("epoll_create1(0) failed");
+    let fd = syscalls::eventfd(0, EFD_NONBLOCK).expect("create nonblocking eventfd failed");
+
+    let mut interest = EpollEvent {
+        events: EPOLLIN | EPOLLET,
+        data: 0,
+    };
+    syscalls::epoll_ctl(epfd, EPOLL_CTL_ADD, fd, Some(&mut interest))
+        .expect("epoll_ctl ADD failed");
+
+    let mut ready = [EpollEvent::default(); 4];
+    for i in 0..WAKES {
+        assert_eq!(
+            syscalls::write_u64(fd, 1).unwrap(),
+            8,
+            "write {i} must return 8"
+        );
+        assert_eq!(
+            syscalls::epoll_wait(epfd, &mut ready, 0).unwrap(),
+            1,
+            "write {i} must surface an edge"
+        );
+        assert_ne!(ready[0].events & EPOLLIN, 0, "write {i} must carry EPOLLIN");
+    }
+}
+
 pub fn run() -> crate::TestResult {
     test_create_and_flag_validation();
     test_read_empty_nonblocking_eagain();
@@ -183,6 +350,9 @@ pub fn run() -> crate::TestResult {
     test_semaphore_decrements_one_at_a_time();
     test_write_u64_max_einval();
     test_counter_overflow_eagain();
+    test_every_write_is_a_readiness_edge();
+    test_saturated_read_is_a_writable_edge();
+    test_write_stream_delivers_every_wake();
     println!("io_mpx: eventfd unit tests OK");
     Ok(())
 }
