@@ -30,7 +30,8 @@ pub struct EpollInstance {
 struct WatchedEvent {
     file: Weak<dyn FileLike>,
     event: ctypes::epoll_event,
-    last_ready: u32,
+    last_readable: bool,
+    last_writable: bool,
     last_readiness_version: u64,
     disabled: bool,
 }
@@ -43,7 +44,8 @@ impl WatchedEvent {
         Self {
             file: Arc::downgrade(&file),
             event,
-            last_ready: 0,
+            last_readable: false,
+            last_writable: false,
             last_readiness_version: 0,
             disabled: false,
         }
@@ -52,7 +54,8 @@ impl WatchedEvent {
     fn update(&mut self, file: Arc<dyn FileLike>, event: ctypes::epoll_event) {
         self.file = Arc::downgrade(&file);
         self.event = event;
-        self.last_ready = 0;
+        self.last_readable = false;
+        self.last_writable = false;
         self.last_readiness_version = 0;
         self.disabled = false;
     }
@@ -69,9 +72,9 @@ impl WatchedEvent {
         self.event.events & ctypes::EPOLLONESHOT != 0
     }
 
-    fn current_ready(&self) -> (u32, u64) {
+    fn current_ready(&self) -> (u32, u64, bool, bool) {
         let Some(file) = self.file.upgrade() else {
-            return (0, 0);
+            return (0, 0, false, false);
         };
         match file.poll() {
             Ok(state) => {
@@ -83,22 +86,53 @@ impl WatchedEvent {
                 if state.writable {
                     ready |= interest & EPOLL_WRITE_EVENTS;
                 }
-                (ready, state.readiness_version)
+                (
+                    ready,
+                    state.readiness_version,
+                    state.readable,
+                    state.writable,
+                )
             }
-            Err(_) => (ctypes::EPOLLERR, 0),
+            Err(_) => (ctypes::EPOLLERR, 0, false, false),
         }
     }
 
-    fn deliverable_events(&self, ready: u32, readiness_version: u64) -> u32 {
+    fn deliverable_events(
+        &self,
+        ready: u32,
+        readiness_version: u64,
+        readable: bool,
+        writable: bool,
+    ) -> u32 {
         if self.disabled {
             return 0;
         }
+        // Edge-triggered delivery tracks each event class independently.
+        //
+        // EPOLLIN is a read-readiness wake: driven by the file's read-readiness
+        // version (bumped on every read wake, e.g. each `eventfd` write, which
+        // the async waker path relies on) OR by a fresh false->true readability
+        // transition.
+        //
+        // EPOLLOUT is a writability transition only (false->true), independent
+        // of the read-readiness version. A `eventfd` write never makes the
+        // counter newly writable, so it must not spoof a writable edge -- a
+        // single shared version that gates both classes would re-fire EPOLLOUT
+        // on every write (see the review on the eventfd readiness PR).
+        //
+        // EPOLLERR / EPOLLHUP are always reported.
         let events = if self.is_edge_triggered() {
-            if readiness_version == self.last_readiness_version {
-                ready & !self.last_ready
-            } else {
-                ready
+            let epollin_edge = readable
+                && (!self.last_readable || readiness_version != self.last_readiness_version);
+            let epollout_edge = writable && !self.last_writable;
+            let mut e = ready & EPOLL_ERROR_EVENTS;
+            if epollin_edge {
+                e |= ready & EPOLL_READ_EVENTS;
             }
+            if epollout_edge {
+                e |= ready & EPOLL_WRITE_EVENTS;
+            }
+            e
         } else {
             ready
         };
@@ -183,10 +217,12 @@ impl EpollInstance {
                 break;
             }
 
-            let (ready, readiness_version) = watch.current_ready();
-            let deliverable = watch.deliverable_events(ready, readiness_version);
-            watch.last_ready = ready;
+            let (ready, readiness_version, readable, writable) = watch.current_ready();
+            let deliverable =
+                watch.deliverable_events(ready, readiness_version, readable, writable);
             watch.last_readiness_version = readiness_version;
+            watch.last_readable = readable;
+            watch.last_writable = writable;
             if deliverable == 0 {
                 continue;
             }
@@ -206,8 +242,8 @@ impl EpollInstance {
         let mut ready_list = self.events.lock();
         ready_list.retain(|_, watch| !watch.is_closed());
         ready_list.values().any(|watch| {
-            let (ready, readiness_version) = watch.current_ready();
-            watch.deliverable_events(ready, readiness_version) != 0
+            let (ready, readiness_version, readable, writable) = watch.current_ready();
+            watch.deliverable_events(ready, readiness_version, readable, writable) != 0
         })
     }
 }

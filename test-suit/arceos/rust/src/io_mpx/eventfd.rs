@@ -307,6 +307,56 @@ fn test_saturated_read_is_a_writable_edge() {
     );
 }
 
+/// A write must not spoof a writable edge for an `EPOLLOUT` edge-triggered watch.
+///
+/// `EventFd::write` bumps the shared readiness version on every accepted write
+/// so an edge-triggered `EPOLLIN` watcher observes one edge per write (the
+/// async waker path needs this). But the version is a read-readiness signal: a
+/// write does not make the counter newly writable, so an `EPOLLOUT` watcher must
+/// not see a spurious edge. Linux only reports a writable edge when writability
+/// flips false -> true (a drain from the saturation ceiling), never on a plain
+/// write. This guards the regression where a single version gated both classes
+/// and re-fired EPOLLOUT on every write.
+fn test_write_does_not_spoof_writable_edge() {
+    let epfd = syscalls::epoll_create1(0).expect("epoll_create1(0) failed");
+    let fd = syscalls::eventfd(0, EFD_NONBLOCK).expect("create nonblocking eventfd failed");
+
+    let mut interest = EpollEvent {
+        events: EPOLLOUT | EPOLLET,
+        data: 0,
+    };
+    syscalls::epoll_ctl(epfd, EPOLL_CTL_ADD, fd, Some(&mut interest))
+        .expect("epoll_ctl ADD failed");
+
+    // The freshly created counter is writable (0 < u64::MAX - 1), so the
+    // initial writable edge is reported and consumed.
+    let mut ready = [EpollEvent::default(); 4];
+    assert_eq!(
+        syscalls::epoll_wait(epfd, &mut ready, 0).unwrap(),
+        1,
+        "the initial writable edge must be reported"
+    );
+    assert_eq!(
+        ready[0].events & EPOLLOUT,
+        EPOLLOUT,
+        "the initial edge must carry EPOLLOUT"
+    );
+
+    // A write grows the counter 0 -> 1. Writability is unchanged (still true),
+    // so no new EPOLLOUT edge. A version-only design would wrongly re-deliver
+    // EPOLLOUT here because the write bumps the shared readiness version.
+    assert_eq!(
+        syscalls::write_u64(fd, 1).unwrap(),
+        8,
+        "write must return 8"
+    );
+    assert_eq!(
+        syscalls::epoll_wait(epfd, &mut ready, 0).unwrap(),
+        0,
+        "a write must not spoof a writable edge for an EPOLLOUT watch"
+    );
+}
+
 /// A stream of wakes: every write in a long sequence must surface an edge.
 ///
 /// `mio::Waker` usage is not two writes but the whole lifetime of a runtime:
@@ -352,6 +402,7 @@ pub fn run() -> crate::TestResult {
     test_counter_overflow_eagain();
     test_every_write_is_a_readiness_edge();
     test_saturated_read_is_a_writable_edge();
+    test_write_does_not_spoof_writable_edge();
     test_write_stream_delivers_every_wake();
     println!("io_mpx: eventfd unit tests OK");
     Ok(())
