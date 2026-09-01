@@ -357,6 +357,70 @@ fn test_write_does_not_spoof_writable_edge() {
     );
 }
 
+/// A writability edge that appears between two waits must still be delivered.
+///
+/// `test_saturated_read_is_a_writable_edge` drains the counter while the watch
+/// still remembers an unwritable sample, so a plain `writable && !last_writable`
+/// rule reports it. Here the initial writable edge is consumed first, then the
+/// counter is saturated and drained again without any wait in between: both
+/// samples are `true`, so only a writable readiness generation that advances on
+/// the Full -> Normal transition can report the edge. The same shape is what a
+/// pipe write end sees when a reader frees space between two `epoll_wait`
+/// calls.
+fn test_writable_edge_between_waits_is_reported() {
+    let epfd = syscalls::epoll_create1(0).expect("epoll_create1(0) failed");
+    let fd = syscalls::eventfd(0, EFD_SEMAPHORE | EFD_NONBLOCK)
+        .expect("create semaphore eventfd failed");
+
+    let mut interest = EpollEvent {
+        events: EPOLLOUT | EPOLLET,
+        data: 0,
+    };
+    syscalls::epoll_ctl(epfd, EPOLL_CTL_ADD, fd, Some(&mut interest))
+        .expect("epoll_ctl ADD failed");
+
+    // The counter starts writable, so the initial edge is reported and consumed.
+    let mut ready = [EpollEvent::default(); 4];
+    assert_eq!(
+        syscalls::epoll_wait(epfd, &mut ready, 0).unwrap(),
+        1,
+        "the initial writable edge must be reported"
+    );
+    assert_eq!(
+        syscalls::epoll_wait(epfd, &mut ready, 0).unwrap(),
+        0,
+        "the initial writable edge must be reported once"
+    );
+
+    // Saturate the counter, then drain one unit: writability goes
+    // true -> false -> true with no wait observing the false sample.
+    assert_eq!(
+        syscalls::write_u64(fd, u64::MAX - 1).unwrap(),
+        8,
+        "write must return 8"
+    );
+    assert_eq!(
+        syscalls::read_u64(fd).unwrap(),
+        1,
+        "semaphore read must return 1"
+    );
+    assert_eq!(
+        syscalls::epoll_wait(epfd, &mut ready, 0).unwrap(),
+        1,
+        "a writable edge between two waits must not be dropped"
+    );
+    assert_eq!(
+        ready[0].events & EPOLLOUT,
+        EPOLLOUT,
+        "the event must carry EPOLLOUT"
+    );
+    assert_eq!(
+        syscalls::epoll_wait(epfd, &mut ready, 0).unwrap(),
+        0,
+        "the writable edge must be reported once"
+    );
+}
+
 /// A stream of wakes: every write in a long sequence must surface an edge.
 ///
 /// `mio::Waker` usage is not two writes but the whole lifetime of a runtime:
@@ -402,6 +466,7 @@ pub fn run() -> crate::TestResult {
     test_counter_overflow_eagain();
     test_every_write_is_a_readiness_edge();
     test_saturated_read_is_a_writable_edge();
+    test_writable_edge_between_waits_is_reported();
     test_write_does_not_spoof_writable_edge();
     test_write_stream_delivers_every_wake();
     println!("io_mpx: eventfd unit tests OK");
