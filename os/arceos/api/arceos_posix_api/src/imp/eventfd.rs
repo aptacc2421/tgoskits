@@ -24,7 +24,8 @@ struct EventFdInner {
     counter: u64,
     semaphore: bool,
     nonblocking: bool,
-    readiness_version: u64,
+    read_readiness_version: u64,
+    write_readiness_version: u64,
 }
 
 impl EventFd {
@@ -34,7 +35,8 @@ impl EventFd {
                 counter: initval as u64,
                 semaphore,
                 nonblocking,
-                readiness_version: 0,
+                read_readiness_version: 0,
+                write_readiness_version: 0,
             }),
         }
     }
@@ -61,7 +63,12 @@ impl FileLike for EventFd {
             }
             // The counter was `> 0` on entry (guarded above), so the drain makes
             // it readable→unreadable exactly when it hits zero. Only that
-            // transition must bump the readiness version.
+            // transition must bump the read version.
+            if inner.counter == u64::MAX - 1 {
+                // The pre-read counter sat at the saturation ceiling, so this
+                // drain is the one read that flips writability false -> true.
+                inner.write_readiness_version = inner.write_readiness_version.wrapping_add(1);
+            }
             let value = if inner.semaphore {
                 inner.counter -= 1;
                 1
@@ -71,7 +78,7 @@ impl FileLike for EventFd {
                 v
             };
             if inner.counter == 0 {
-                inner.readiness_version = inner.readiness_version.wrapping_add(1);
+                inner.read_readiness_version = inner.read_readiness_version.wrapping_add(1);
             }
             buf[..8].copy_from_slice(&value.to_ne_bytes());
             return Ok(8);
@@ -106,16 +113,23 @@ impl FileLike for EventFd {
                 continue;
             }
             inner.counter += value;
-            // Every accepted write is a wakeup event, not only the one that
-            // flips the counter from zero to non-zero: Linux `eventfd_write`
-            // calls `wake_up_locked_poll(&ctx->wqh, EPOLLIN)` on every write
-            // (fs/eventfd.c), unconditionally, so a waiter must observe one
-            // edge per write. Bumping only when readability flips drops every
-            // wake after the first while the counter stays non-zero -- which is
-            // exactly how an async runtime uses its `mio::Waker` eventfd (it
-            // never drains it), hanging the second and later `spawn_blocking`
-            // calls behind an `epoll_wait` that never returns.
-            inner.readiness_version = inner.readiness_version.wrapping_add(1);
+            // Every accepted write is a read-readiness wakeup event, not only
+            // the one that flips the counter from zero to non-zero: Linux
+            // `eventfd_write` calls `wake_up_locked_poll(&ctx->wqh, EPOLLIN)`
+            // on every write (fs/eventfd.c), unconditionally, so a waiter must
+            // observe one edge per write. Bumping only when readability flips
+            // drops every wake after the first while the counter stays
+            // non-zero -- which is exactly how an async runtime uses its
+            // `mio::Waker` eventfd (it never drains it), hanging the second and
+            // later `spawn_blocking` calls behind an `epoll_wait` that never
+            // returns.
+            inner.read_readiness_version = inner.read_readiness_version.wrapping_add(1);
+            if inner.counter == u64::MAX - 1 {
+                // Reaching the saturation ceiling is the only write that flips
+                // writability (true -> false); a plain write must not spoof a
+                // writable edge for an `EPOLLOUT` watcher.
+                inner.write_readiness_version = inner.write_readiness_version.wrapping_add(1);
+            }
             return Ok(8);
         }
     }
@@ -144,7 +158,8 @@ impl FileLike for EventFd {
         Ok(PollState {
             readable: inner.counter > 0,
             writable: inner.counter < u64::MAX - 1,
-            readiness_version: inner.readiness_version,
+            read_readiness_version: inner.read_readiness_version,
+            write_readiness_version: inner.write_readiness_version,
         })
     }
 

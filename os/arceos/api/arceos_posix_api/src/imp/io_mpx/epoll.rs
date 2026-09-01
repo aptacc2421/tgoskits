@@ -32,7 +32,8 @@ struct WatchedEvent {
     event: ctypes::epoll_event,
     last_readable: bool,
     last_writable: bool,
-    last_readiness_version: u64,
+    last_read_version: u64,
+    last_write_version: u64,
     disabled: bool,
 }
 
@@ -46,7 +47,8 @@ impl WatchedEvent {
             event,
             last_readable: false,
             last_writable: false,
-            last_readiness_version: 0,
+            last_read_version: 0,
+            last_write_version: 0,
             disabled: false,
         }
     }
@@ -56,7 +58,8 @@ impl WatchedEvent {
         self.event = event;
         self.last_readable = false;
         self.last_writable = false;
-        self.last_readiness_version = 0;
+        self.last_read_version = 0;
+        self.last_write_version = 0;
         self.disabled = false;
     }
 
@@ -72,9 +75,9 @@ impl WatchedEvent {
         self.event.events & ctypes::EPOLLONESHOT != 0
     }
 
-    fn current_ready(&self) -> (u32, u64, bool, bool) {
+    fn current_ready(&self) -> (u32, ax_io::PollState) {
         let Some(file) = self.file.upgrade() else {
-            return (0, 0, false, false);
+            return (0, ax_io::PollState::default());
         };
         match file.poll() {
             Ok(state) => {
@@ -86,24 +89,20 @@ impl WatchedEvent {
                 if state.writable {
                     ready |= interest & EPOLL_WRITE_EVENTS;
                 }
-                (
-                    ready,
-                    state.readiness_version,
-                    state.readable,
-                    state.writable,
-                )
+                (ready, state)
             }
-            Err(_) => (ctypes::EPOLLERR, 0, false, false),
+            Err(_) => (
+                ctypes::EPOLLERR,
+                ax_io::PollState {
+                    readable: false,
+                    writable: false,
+                    ..Default::default()
+                },
+            ),
         }
     }
 
-    fn deliverable_events(
-        &self,
-        ready: u32,
-        readiness_version: u64,
-        readable: bool,
-        writable: bool,
-    ) -> u32 {
+    fn deliverable_events(&self, ready: u32, state: ax_io::PollState) -> u32 {
         if self.disabled {
             return 0;
         }
@@ -114,17 +113,21 @@ impl WatchedEvent {
         // the async waker path relies on) OR by a fresh false->true readability
         // transition.
         //
-        // EPOLLOUT is a writability transition only (false->true), independent
-        // of the read-readiness version. A `eventfd` write never makes the
-        // counter newly writable, so it must not spoof a writable edge -- a
-        // single shared version that gates both classes would re-fire EPOLLOUT
-        // on every write (see the review on the eventfd readiness PR).
+        // EPOLLOUT mirrors it with the file's write-readiness version (bumped
+        // when writability changes, e.g. a pipe ring buffer going Full ->
+        // Normal) OR by a fresh false->true writability transition. The
+        // directions are independent: an `eventfd` write bumps only the read
+        // version, so it never spoofs a writable edge, and a single shared
+        // version gating both classes would re-fire EPOLLOUT on every write
+        // (see the review on the eventfd readiness PR).
         //
         // EPOLLERR / EPOLLHUP are always reported.
         let events = if self.is_edge_triggered() {
-            let epollin_edge = readable
-                && (!self.last_readable || readiness_version != self.last_readiness_version);
-            let epollout_edge = writable && !self.last_writable;
+            let epollin_edge = state.readable
+                && (!self.last_readable || state.read_readiness_version != self.last_read_version);
+            let epollout_edge = state.writable
+                && (!self.last_writable
+                    || state.write_readiness_version != self.last_write_version);
             let mut e = ready & EPOLL_ERROR_EVENTS;
             if epollin_edge {
                 e |= ready & EPOLL_READ_EVENTS;
@@ -217,12 +220,12 @@ impl EpollInstance {
                 break;
             }
 
-            let (ready, readiness_version, readable, writable) = watch.current_ready();
-            let deliverable =
-                watch.deliverable_events(ready, readiness_version, readable, writable);
-            watch.last_readiness_version = readiness_version;
-            watch.last_readable = readable;
-            watch.last_writable = writable;
+            let (ready, state) = watch.current_ready();
+            let deliverable = watch.deliverable_events(ready, state);
+            watch.last_read_version = state.read_readiness_version;
+            watch.last_write_version = state.write_readiness_version;
+            watch.last_readable = state.readable;
+            watch.last_writable = state.writable;
             if deliverable == 0 {
                 continue;
             }
@@ -242,8 +245,8 @@ impl EpollInstance {
         let mut ready_list = self.events.lock();
         ready_list.retain(|_, watch| !watch.is_closed());
         ready_list.values().any(|watch| {
-            let (ready, readiness_version, readable, writable) = watch.current_ready();
-            watch.deliverable_events(ready, readiness_version, readable, writable) != 0
+            let (ready, state) = watch.current_ready();
+            watch.deliverable_events(ready, state) != 0
         })
     }
 }
@@ -275,7 +278,8 @@ impl FileLike for EpollInstance {
         Ok(ax_io::PollState {
             readable: self.has_ready_events(),
             writable: false,
-            readiness_version: 0,
+            read_readiness_version: 0,
+            write_readiness_version: 0,
         })
     }
 
