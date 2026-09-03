@@ -31,7 +31,8 @@ const EPOLL_CTL_DEL: c_int = 2;
 const PIPE_FILL_LIMIT: usize = 4096;
 
 fn test_write_end_is_writable_until_full() {
-    let (read_fd, write_fd) = syscalls::pipe().expect("pipe() failed");
+    // This test only exercises the write end; the read end is never drained.
+    let (_, write_fd) = syscalls::pipe().expect("pipe() failed");
 
     let epfd = syscalls::epoll_create1(0).expect("epoll_create1(0) failed");
     let mut interest = EpollEvent {
