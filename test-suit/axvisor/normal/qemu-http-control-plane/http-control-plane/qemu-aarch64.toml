@@ -36,4 +36,3 @@ to_bin = true
 uefi = false
 
 [host_http_probe]
-token = "axvisor-http-test-token"

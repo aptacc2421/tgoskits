@@ -1,0 +1,4 @@
+# A file in the pool directory that is not a guest config. The control plane has
+# to report it as an issue instead of silently ignoring it, so a client can see
+# why this file starts nothing.
+base = { id = 4,

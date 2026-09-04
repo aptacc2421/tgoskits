@@ -3,12 +3,14 @@
 //! JSON is built with `serde_json::json!()` (no hand-written escaping). These
 //! handlers are dispatched by the TCP serving path in [`super::server`].
 
+#[cfg(feature = "fs")]
+use alloc::string::ToString;
+
 use axum::{Json, extract::Path, http::StatusCode};
 use axvm::{AxVMRef, AxVmError, VmStatus, VmVcpuState};
 use axvmconfig::GuestConfig;
 use serde_json::{Value, json};
 
-use crate::http::auth::ApiToken;
 use crate::manager::AxvmManager;
 
 /// `GET /api/vms` — list all known VMs (summary form).
@@ -35,11 +37,10 @@ pub async fn vm_detail(Path(id_str): Path<String>) -> Result<Json<Value>, Status
 /// `base.id`, and that id must not currently be registered. Because embedded
 /// images are matched by id (`memory_images_for_vm`), a config whose id has no
 /// embedded image fails with 500 — the runtime can only realize guest images
-/// that were baked into the hypervisor at build time.
-pub async fn vm_create(
-    _token: ApiToken,
-    Json(payload): Json<Value>,
-) -> Result<Json<Value>, StatusCode> {
+/// that were baked into the hypervisor at build time. An exhausted host resource
+/// (memory, or the browser console lane table of a `browser-console` build) is a
+/// 503, so a caller can tell "try later" from "this config is wrong".
+pub async fn vm_create(Json(payload): Json<Value>) -> Result<Json<Value>, StatusCode> {
     let toml = payload
         .get("toml")
         .and_then(Value::as_str)
@@ -59,7 +60,10 @@ pub async fn vm_create(
         }
         Err(error) => {
             error!("HTTP: create VM[{id}] failed: {error:#}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            // Shared mapping so an exhausted host resource (memory, and the
+            // browser console lane table when `browser-console` is on) is a
+            // distinguishable 503 here exactly as it is on a start request.
+            Err(map_axvm_error(error))
         }
     }
 }
@@ -70,10 +74,7 @@ pub async fn vm_create(
 /// (its result is checked), and the registry is only touched on success. This
 /// avoids relying on `Drop`-time destroy, which merely warns on failure after
 /// the VM is already unregistered, leaving no handle to retry with.
-pub async fn vm_delete(
-    _token: ApiToken,
-    Path(id_str): Path<String>,
-) -> Result<StatusCode, StatusCode> {
+pub async fn vm_delete(Path(id_str): Path<String>) -> Result<StatusCode, StatusCode> {
     let Ok(id) = id_str.parse::<usize>() else {
         return Err(StatusCode::NOT_FOUND);
     };
@@ -92,11 +93,56 @@ pub async fn vm_delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `GET /api/vms/pool` — the configs a start request can create on demand.
+///
+/// The pool is the guest config directory named by the build config
+/// (`AXVISOR_VM_POOL`, see [`crate::vm_pool`]). It is not the VM registry: a
+/// pool entry is only a candidate and is created when a start request names its
+/// id. `entries` carries the raw TOML so a client can show or prefill a config,
+/// and `issues` reports every file in the directory that cannot become an entry
+/// (unreadable, empty, not a guest config, id claimed twice) instead of hiding
+/// it. `directory` is echoed so the client can tell "nothing provisioned" from
+/// "wrong directory".
+#[cfg(feature = "fs")]
+pub async fn vm_pool() -> Json<Value> {
+    let pool = crate::vm_pool::scan();
+    let entries: Vec<Value> = pool
+        .entries()
+        .iter()
+        .map(|entry| {
+            json!({
+                "id": entry.id(),
+                "name": entry.name(),
+                "path": entry.path(),
+                "toml": entry.toml(),
+            })
+        })
+        .collect();
+    let issues: Vec<Value> = pool
+        .issues()
+        .iter()
+        .map(|issue| {
+            json!({
+                "kind": issue.kind().as_str(),
+                "path": issue.path(),
+                "detail": issue.kind().to_string(),
+            })
+        })
+        .collect();
+    Json(json!({
+        "directory": pool.directory(),
+        "entries": entries,
+        "issues": issues,
+    }))
+}
+
 /// `POST /api/vms/{id}/start` — start a VM.
-pub async fn vm_start(
-    _token: ApiToken,
-    Path(id_str): Path<String>,
-) -> Result<Json<Value>, StatusCode> {
+///
+/// An id that is not registered yet is created from its VM pool entry first
+/// (see [`Self::vm_pool`] and [`AxvmManager::ensure_registered`]), so a client
+/// can start what the pool lists without a separate create call. A full browser
+/// console lane table fails that creation with 503.
+pub async fn vm_start(Path(id_str): Path<String>) -> Result<Json<Value>, StatusCode> {
     vm_action(&id_str, VmAction::Start)
 }
 
@@ -104,10 +150,7 @@ pub async fn vm_start(
 ///
 /// `stop` has request semantics: it returns as soon as the request is accepted,
 /// while the vCPU exits and the VM reaches `Stopped` asynchronously.
-pub async fn vm_stop(
-    _token: ApiToken,
-    Path(id_str): Path<String>,
-) -> Result<Json<Value>, StatusCode> {
+pub async fn vm_stop(Path(id_str): Path<String>) -> Result<Json<Value>, StatusCode> {
     vm_action(&id_str, VmAction::Stop)
 }
 
@@ -116,10 +159,7 @@ pub async fn vm_stop(
 /// `pause` has the same request semantics as `stop`: the status flips to
 /// `Paused` synchronously while the running vCPUs park at their next run-loop
 /// iteration, so the response marks `async: true`.
-pub async fn vm_pause(
-    _token: ApiToken,
-    Path(id_str): Path<String>,
-) -> Result<Json<Value>, StatusCode> {
+pub async fn vm_pause(Path(id_str): Path<String>) -> Result<Json<Value>, StatusCode> {
     vm_action(&id_str, VmAction::Pause)
 }
 
@@ -128,10 +168,7 @@ pub async fn vm_pause(
 /// The status flips back to `Running` synchronously and the parked vCPUs are
 /// woken, so the response marks `async: false`; the guest re-executes once the
 /// vCPU tasks re-enter the guest.
-pub async fn vm_resume(
-    _token: ApiToken,
-    Path(id_str): Path<String>,
-) -> Result<Json<Value>, StatusCode> {
+pub async fn vm_resume(Path(id_str): Path<String>) -> Result<Json<Value>, StatusCode> {
     vm_action(&id_str, VmAction::Resume)
 }
 
@@ -151,8 +188,26 @@ fn vm_action(id_str: &str, action: VmAction) -> Result<Json<Value>, StatusCode> 
     let Ok(id) = id_str.parse::<usize>() else {
         return Err(StatusCode::NOT_FOUND);
     };
-    // No existence pre-check: an unknown VM surfaces as `VmNotFound` from the
-    // action and maps to 404 below, keeping the check-then-act window closed.
+    // A start whose id is still only a pool candidate is created from its pool
+    // entry first, so the control plane can start what `GET /api/vms/pool`
+    // lists without a separate create call. Registered ids skip this and keep
+    // the runtime's own state errors, and an id in neither place stays a 404:
+    // the existence check only gates the create attempt.
+    #[cfg(feature = "fs")]
+    if matches!(action, VmAction::Start) && AxvmManager::vm_by_id(id).is_none() {
+        match AxvmManager::ensure_registered(id) {
+            Ok(true) => {}
+            Ok(false) => return Err(StatusCode::NOT_FOUND),
+            Err(error) => {
+                return Err(map_axvm_error(
+                    error.context(format!("create VM[{id}] from the VM pool")),
+                ));
+            }
+        }
+    }
+    // No existence pre-check for the registered case: an unknown VM surfaces as
+    // `VmNotFound` from the action and maps to 404 below, keeping the
+    // check-then-act window closed.
     // Restart-after-stop is not supported: a fresh vCPU task on an idled pinned
     // CPU is never scheduled (no IPI wake source), so `start_vm` would accept
     // the start and leave the VM stuck in `Running`. Reject it explicitly so the

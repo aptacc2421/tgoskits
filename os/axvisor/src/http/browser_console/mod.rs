@@ -1,4 +1,14 @@
-//! Board-hosted HTTP/WebSocket gateway for the startup network console lanes.
+//! Board-hosted HTTP/WebSocket gateway for the current network console lanes.
+//!
+//! The console set is a runtime registry (see [`crate::network_console`]): a VM
+//! gets its lane when it is created and loses it when it is removed, so
+//! `/api/consoles` changes while the hypervisor runs and a route that answered
+//! a moment ago can be gone.
+//!
+//! This module serves the gateway only — discovery plus one socket per lane. The
+//! page a human actually looks at is the embedded dashboard (`crate::web`, the
+//! `web-ui` feature), which consumes this gateway; a build with `browser-console`
+//! but without `web-ui` is a headless gateway whose `/` stays a 404.
 
 use anyhow::{Context, Result};
 use axum::{
@@ -7,59 +17,19 @@ use axum::{
         Path,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, StatusCode, header},
-    response::{Html, IntoResponse, Response},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-mod page;
 
 const BROWSER_INPUT_CAPACITY: usize = 4096;
 /// Browser-console routes served by Axvisor's optional HTTP listener.
 pub(super) fn router() -> Router {
     Router::new()
-        .route("/", get(index))
-        .route("/assets/xterm.js", get(xterm_javascript))
-        .route("/assets/xterm.css", get(xterm_stylesheet))
         .route("/api/consoles", get(console_descriptions))
         .route("/ws/{endpoint}", get(upgrade_console))
-}
-
-async fn index() -> impl IntoResponse {
-    (
-        [
-            (header::CACHE_CONTROL, "no-store"),
-            (
-                header::CONTENT_SECURITY_POLICY,
-                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-            ),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        ],
-        Html(page::INDEX_HTML),
-    )
-}
-
-async fn xterm_javascript() -> impl IntoResponse {
-    (
-        [
-            (header::CACHE_CONTROL, "no-store"),
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        ],
-        page::XTERM_JAVASCRIPT,
-    )
-}
-
-async fn xterm_stylesheet() -> impl IntoResponse {
-    (
-        [
-            (header::CACHE_CONTROL, "no-store"),
-            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        ],
-        page::XTERM_STYLESHEET,
-    )
 }
 
 async fn console_descriptions() -> Json<Vec<Value>> {
@@ -81,7 +51,7 @@ async fn upgrade_console(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
-    validate_browser_origin(&headers)?;
+    super::validate_browser_origin(&headers)?;
     if !crate::network_console::has_console_route(&endpoint) {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -100,23 +70,6 @@ async fn upgrade_console(
             }
         })
         .into_response())
-}
-
-fn validate_browser_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .ok_or(StatusCode::FORBIDDEN)?;
-    let origin = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .ok_or(StatusCode::FORBIDDEN)?;
-
-    if origin == format!("http://{host}") || origin == format!("https://{host}") {
-        Ok(())
-    } else {
-        Err(StatusCode::FORBIDDEN)
-    }
 }
 
 async fn bridge_console(

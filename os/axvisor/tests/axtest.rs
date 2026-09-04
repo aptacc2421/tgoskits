@@ -11,6 +11,10 @@
 
 extern crate alloc;
 
+// The production pool module under test reports through the host log.
+#[macro_use]
+extern crate log;
+
 use ax_hal as _;
 use ax_std as _;
 use axvm as _;
@@ -31,6 +35,8 @@ mod guest_console_harness;
 mod host_terminal;
 mod manager;
 mod network_console;
+#[path = "../src/vm_pool.rs"]
+mod vm_pool;
 
 // These cases exercise the mux-to-network boundary through the stub above and
 // therefore must live beside the harness assembly instead of `mux/tests.rs`
@@ -300,5 +306,508 @@ mod tests {
         remove_guest_console(4);
         remove_guest_console(5);
         host::reset_output();
+    }
+
+    #[test]
+    fn browser_delivery_coalesces_ordered_dispatcher_batches() {
+        use crate::browser_console_delivery::DeliveryFrame;
+
+        let mut delivery = DeliveryFrame::with_capacity(16);
+
+        delivery.append(b"starry ", 0);
+        delivery.append(b"continues", 0);
+
+        ax_assert_eq!(delivery.into_bytes(), b"starry continues");
+    }
+
+    #[test]
+    fn browser_delivery_reports_source_queue_overflow_before_preserved_bytes() {
+        use crate::browser_console_delivery::DeliveryFrame;
+
+        let mut delivery = DeliveryFrame::with_capacity(96);
+
+        delivery.append(b"preserved", 11);
+
+        let output = delivery.into_bytes();
+        ax_assert!(
+            output.starts_with(b"\r\n[Axvisor browser console dropped 11 queued bytes]\r\n")
+        );
+        ax_assert!(output.ends_with(b"preserved"));
+    }
+
+    #[test]
+    fn browser_delivery_queue_preserves_old_output_and_reports_new_overflow() {
+        use crate::browser_console_delivery::DeliveryQueue;
+
+        let mut delivery = DeliveryQueue::<8>::new();
+        delivery.enqueue(b"old");
+        delivery.enqueue(b"overflow");
+
+        let mut output = [0; 8];
+        let (len, dropped_bytes) = delivery.dequeue(&mut output);
+        ax_assert_eq!(&output[..len], b"old");
+        ax_assert_eq!(dropped_bytes, 8);
+    }
+
+    #[test]
+    fn browser_delivery_waits_for_notification_without_timer_polling() {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        use std::{sync::Arc, thread, time::Duration};
+
+        use {
+            ax_std::os::arceos::modules::ax_runtime::task::sync::irq::IrqWaitCell,
+            ax_std::os::arceos::modules::ax_runtime::task::sync::irq::IrqWorkerWaiter,
+            ax_std::os::arceos::modules::ax_runtime::task::thread::current::current_thread_handle,
+        };
+
+        let signal = Arc::new(IrqWaitCell::new());
+        let waiting = Arc::new(AtomicBool::new(false));
+        let woke = Arc::new(AtomicBool::new(false));
+        let worker_signal = Arc::clone(&signal);
+        let worker_waiting = Arc::clone(&waiting);
+        let worker_woke = Arc::clone(&woke);
+        let worker = thread::spawn(move || {
+            let current =
+                current_thread_handle().expect("delivery waiter must bind to its runtime worker");
+            let waiter = IrqWorkerWaiter::new(current.wake_handle());
+            worker_waiting.store(true, Ordering::Release);
+            waiter
+                .wait(&worker_signal)
+                .expect("delivery waiter must accept one notification cell");
+            worker_woke.store(true, Ordering::Release);
+        });
+
+        while !waiting.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(30));
+        ax_assert!(!woke.load(Ordering::Acquire));
+
+        let _result = signal.notify();
+        worker
+            .join()
+            .expect("delivery waiter must exit after notify");
+        ax_assert!(woke.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn host_terminal_converts_only_bare_lf_across_batches() {
+        use crate::host_terminal::TerminalNewlineNormalizer;
+
+        let mut normalizer = TerminalNewlineNormalizer::new();
+        let mut output = Vec::new();
+        normalizer
+            .write(b"banner\nline\r", |bytes| {
+                output.extend_from_slice(bytes);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        normalizer
+            .write(b"\nnext\n", |bytes| {
+                output.extend_from_slice(bytes);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+
+        ax_assert_eq!(output, b"banner\r\nline\r\nnext\r\n");
+    }
+
+    #[test]
+    fn console_layout_allocates_guest_lanes_in_order_and_frees_them() {
+        use crate::browser_console_layout::{Layout, MAX_GUEST_CONSOLES};
+
+        let mut layout = Layout::new();
+        layout
+            .allocate(2, "zephyr")
+            .expect("a free lane must accept a guest");
+        layout
+            .allocate(1, "")
+            .expect("a free lane must accept a guest");
+
+        let endpoints = layout.endpoints();
+        ax_assert_eq!(endpoints.len(), 3);
+        ax_assert_eq!(endpoints[0].route, "axvisor");
+        ax_assert_eq!(endpoints[0].vm_id, None);
+        ax_assert_eq!(endpoints[1].vm_id, Some(2));
+        ax_assert_eq!(endpoints[1].display_name, "zephyr");
+        ax_assert_eq!(endpoints[1].lane.index(), 1);
+        ax_assert_eq!(endpoints[2].vm_id, Some(1));
+        ax_assert_eq!(endpoints[2].display_name, "VM 1");
+        ax_assert_eq!(endpoints[2].route, "vm-1");
+
+        // Re-registering a VM keeps its lane, and only a free slot is reused.
+        layout
+            .allocate(2, "zephyr")
+            .expect("re-registering a VM is idempotent");
+        ax_assert_eq!(layout.endpoints().len(), 3);
+        ax_assert_eq!(layout.guest(2).map(|guest| guest.lane.index()), Some(1));
+        ax_assert_eq!(layout.release(2).map(|guest| guest.lane.index()), Some(1));
+        layout
+            .allocate(3, "linux")
+            .expect("the freed lane must be reusable");
+        ax_assert_eq!(layout.guest(3).map(|guest| guest.lane.index()), Some(1));
+        ax_assert_eq!(layout.release(3).map(|guest| guest.lane.index()), Some(1));
+        ax_assert_eq!(layout.release(3).map(|guest| guest.lane.index()), None);
+
+        // A full table rejects the next guest instead of dropping an existing
+        // one, and does not disturb the lanes already handed out.
+        for vm_id in 0..MAX_GUEST_CONSOLES {
+            layout
+                .allocate(vm_id, "guest")
+                .expect("guest within the lane limit must be accepted");
+        }
+        ax_assert!(layout.allocate(MAX_GUEST_CONSOLES, "guest").is_err());
+        ax_assert_eq!(layout.endpoints().len(), MAX_GUEST_CONSOLES + 1);
+        ax_assert_eq!(layout.guest(0).map(|guest| guest.lane.index()), Some(1));
+        ax_assert_eq!(
+            layout
+                .guest(MAX_GUEST_CONSOLES - 1)
+                .map(|guest| guest.lane.index()),
+            Some(MAX_GUEST_CONSOLES)
+        );
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn vm_pool_scan_lists_only_configs_that_can_become_a_vm() {
+        use crate::vm_pool::scan_dir;
+
+        let root = "/tmp/axvisor-vm-pool-scan";
+        reset_test_dir(root);
+        let kernel = format!("{root}/kernel.bin");
+        fs::write(&kernel, b"guest kernel").expect("write kernel image fixture");
+
+        let entry_toml = |id: usize, name: &str, source: &str| {
+            format!(
+                "[base]\nid = {id}\nname = \"{name}\"\n\n[kernel]\nimage_location = \"{source}\"\nkernel_path = \"{kernel}\"\n"
+            )
+        };
+        fs::write(format!("{root}/named.toml"), entry_toml(7, "named", "fs"))
+            .expect("write filesystem entry");
+        // A memory-backed entry reads no guest path at runtime: its build-time
+        // kernel path is allowed to be absent from the guest filesystem.
+        fs::write(
+            format!("{root}/embedded.toml"),
+            format!(
+                "[base]\nid = 6\nname = \"embedded\"\n\n[kernel]\nimage_location = \"memory\"\nkernel_path = \"/no/such/embedded-image\"\n"
+            ),
+        )
+        .expect("write memory entry");
+        // Only the `.toml` suffix makes a file a pool candidate.
+        fs::write(format!("{root}/notes.txt"), b"[base]\nid = 9\n").expect("write note");
+        fs::write(format!("{root}/empty.toml"), b"").expect("write empty file");
+        fs::write(format!("{root}/broken.toml"), b"base = { id = 1,").expect("write broken file");
+        fs::write(format!("{root}/binary.toml"), [0xff, 0xfe, 0xfd]).expect("write binary file");
+        let absent = format!("{root}/absent.bin");
+        fs::write(
+            format!("{root}/missing.toml"),
+            format!(
+                "[base]\nid = 8\nname = \"missing\"\n\n[kernel]\nimage_location = \"fs\"\nkernel_path = \"{absent}\"\n"
+            ),
+        )
+        .expect("write missing-image entry");
+
+        let pool = scan_dir(root);
+
+        ax_assert_eq!(pool.directory(), root);
+        let mut ids: alloc::vec::Vec<usize> =
+            pool.entries().iter().map(|entry| entry.id()).collect();
+        ids.sort();
+        ax_assert_eq!(ids, [6, 7]);
+        let named = pool
+            .entries()
+            .iter()
+            .find(|entry| entry.id() == 7)
+            .expect("the filesystem entry must be listed");
+        ax_assert!(named.path().ends_with("named.toml"));
+        ax_assert!(named.toml().contains("id = 7"));
+
+        let mut reported: alloc::vec::Vec<_> = pool
+            .issues()
+            .iter()
+            .map(|issue| format!("{} {}", issue.kind().as_str(), issue.path()))
+            .collect();
+        reported.sort();
+        let mut expected = [
+            format!("empty {root}/empty.toml"),
+            format!("invalid-toml {root}/broken.toml"),
+            format!("missing-image {root}/missing.toml"),
+            format!("unreadable {root}/binary.toml"),
+        ];
+        expected.sort();
+        ax_assert_eq!(reported, expected);
+        // The reported reason names the file that is missing, not just the
+        // config that asked for it.
+        let missing = pool
+            .issues()
+            .iter()
+            .find(|issue| issue.path().ends_with("missing.toml"))
+            .expect("the missing image must be reported");
+        ax_assert!(format!("{missing}").contains(absent.as_str()));
+
+        // Two configs claiming one id: the first one listed wins and the other
+        // is reported, whichever the filesystem enumerates first.
+        let dupes = format!("{root}/dupes");
+        fs::create_dir(&dupes).expect("create duplicate fixture directory");
+        fs::write(format!("{dupes}/a.toml"), entry_toml(5, "a", "fs")).expect("write a.toml");
+        fs::write(format!("{dupes}/b.toml"), entry_toml(5, "b", "fs")).expect("write b.toml");
+        let dupe_pool = scan_dir(&dupes);
+        ax_assert_eq!(dupe_pool.entries().len(), 1);
+        ax_assert_eq!(dupe_pool.issues().len(), 1);
+        ax_assert_eq!(dupe_pool.issues()[0].kind().as_str(), "duplicate-id");
+        ax_assert_eq!(dupe_pool.entries()[0].id(), 5);
+        ax_assert!(dupe_pool.entries()[0].path() != dupe_pool.issues()[0].path());
+
+        // A directory that is not there yields no entries and one reason.
+        let absent_dir = "/tmp/axvisor-vm-pool-absent";
+        let _ = remove_path(
+            absent_dir,
+            RemoveOptions {
+                recursive: true,
+                force: true,
+                ..RemoveOptions::default()
+            },
+        );
+        let absent_pool = scan_dir(absent_dir);
+        ax_assert_eq!(absent_pool.entries().len(), 0);
+        ax_assert_eq!(absent_pool.issues().len(), 1);
+        ax_assert_eq!(
+            absent_pool.issues()[0].kind().as_str(),
+            "directory-unavailable"
+        );
+
+        remove_path(
+            root,
+            RemoveOptions {
+                recursive: true,
+                ..RemoveOptions::default()
+            },
+        )
+        .expect("remove pool fixture");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn touch_preserves_content_and_updates_times() {
+        let path = "/tmp/axvisor-touch-regression";
+        let touch_time = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let _ = fs::remove_file(path);
+        fs::write(path, b"preserve me").expect("create touch fixture");
+
+        touch_file_at(path, touch_time).expect("touch fixture");
+
+        let metadata = fs::metadata(path).expect("read touched metadata");
+        ax_assert_eq!(fs::read(path).expect("read touched file"), b"preserve me");
+        let accessed = unix_seconds(metadata.accessed().expect("read atime"));
+        let modified = unix_seconds(metadata.modified().expect("read mtime"));
+        ax_assert_eq!(accessed, unix_seconds(touch_time));
+        ax_assert_eq!(modified, unix_seconds(touch_time));
+
+        let unsupported_time = UNIX_EPOCH + Duration::from_secs(u32::MAX as u64 + 1);
+        let error = touch_file_at(path, unsupported_time)
+            .expect_err("timestamps that would be truncated must fail");
+        ax_assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        fs::remove_file(path).expect("remove touch fixture");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn cp_file_to_existing_directory_uses_source_basename() {
+        let root = "/tmp/axvisor-cp-file-regression";
+        reset_test_dir(root);
+        let source = format!("{root}/source.txt");
+        let destination = format!("{root}/destination");
+        fs::write(&source, b"copied payload").expect("create copy source");
+        fs::create_dir(&destination).expect("create copy destination");
+
+        copy_path(&source, &destination, CopyMode::File).expect("copy file into directory");
+
+        ax_assert_eq!(
+            fs::read(format!("{destination}/source.txt")).expect("read copied file"),
+            b"copied payload"
+        );
+        remove_path(
+            root,
+            RemoveOptions {
+                recursive: true,
+                ..RemoveOptions::default()
+            },
+        )
+        .expect("remove copy fixture");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn cp_rejects_copying_file_onto_itself_without_truncating_it() {
+        let path = "/tmp/axvisor-cp-self-file-regression";
+        let _ = fs::remove_file(path);
+        fs::write(path, b"keep this payload").expect("create self-copy fixture");
+
+        let error = copy_path(path, path, CopyMode::File)
+            .expect_err("copying a file onto itself must fail");
+
+        ax_assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        ax_assert_eq!(
+            fs::read(path).expect("read self-copy fixture"),
+            b"keep this payload"
+        );
+        fs::remove_file(path).expect("remove self-copy fixture");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn cp_recursive_directory_to_existing_directory_uses_source_basename() {
+        let root = "/tmp/axvisor-cp-dir-regression";
+        reset_test_dir(root);
+        let source = format!("{root}/source-dir");
+        let destination = format!("{root}/destination");
+        fs::create_dir(&source).expect("create recursive copy source");
+        fs::write(format!("{source}/child.txt"), b"recursive payload")
+            .expect("create recursive copy child");
+        fs::create_dir(&destination).expect("create recursive copy destination");
+
+        copy_path(&source, &destination, CopyMode::Recursive)
+            .expect("copy directory into directory");
+
+        ax_assert_eq!(
+            fs::read(format!("{destination}/source-dir/child.txt"))
+                .expect("read recursively copied file"),
+            b"recursive payload"
+        );
+        remove_path(
+            root,
+            RemoveOptions {
+                recursive: true,
+                ..RemoveOptions::default()
+            },
+        )
+        .expect("remove recursive copy fixture");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn cp_recursive_rejects_copying_directory_into_itself() {
+        let root = "/tmp/axvisor-cp-self-regression";
+        reset_test_dir(root);
+        let source = format!("{root}/dir");
+        fs::create_dir(&source).expect("create recursive copy source");
+        fs::create_dir(format!("{source}/dir")).expect("create recursion guard");
+
+        let error = copy_path(&source, &source, CopyMode::Recursive)
+            .expect_err("recursive copy into itself must fail");
+
+        ax_assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        remove_path(
+            root,
+            RemoveOptions {
+                recursive: true,
+                ..RemoveOptions::default()
+            },
+        )
+        .expect("remove self-copy fixture");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn cp_recursive_rejects_copying_directory_into_descendant() {
+        let root = "/tmp/axvisor-cp-descendant-regression";
+        reset_test_dir(root);
+        let source = format!("{root}/dir");
+        let destination = format!("{source}/subdir");
+        fs::create_dir(&source).expect("create recursive copy source");
+        fs::create_dir(&destination).expect("create descendant destination");
+        fs::create_dir(format!("{destination}/dir")).expect("create recursion guard");
+
+        let error = copy_path(&source, &destination, CopyMode::Recursive)
+            .expect_err("recursive copy into a descendant must fail");
+
+        ax_assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        remove_path(
+            root,
+            RemoveOptions {
+                recursive: true,
+                ..RemoveOptions::default()
+            },
+        )
+        .expect("remove descendant-copy fixture");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn cp_recursive_rejects_nonexistent_descendant_before_creation() {
+        let root = "/tmp/axvisor-cp-new-descendant-regression";
+        reset_test_dir(root);
+        let source = format!("{root}/dir");
+        let destination = format!("{source}/subdir");
+        fs::create_dir(&source).expect("create recursive copy source");
+
+        let error = ensure_recursive_destination_outside_source(&source, &destination)
+            .expect_err("nonexistent descendant must be rejected before creation");
+
+        ax_assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        ax_assert!(!fs::exists(&destination).expect("check descendant was not created"));
+        remove_path(
+            root,
+            RemoveOptions {
+                recursive: true,
+                ..RemoveOptions::default()
+            },
+        )
+        .expect("remove nonexistent-descendant fixture");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn mv_renames_file_on_same_filesystem() {
+        let root = "/tmp/axvisor-mv-regression";
+        reset_test_dir(root);
+        let source = format!("{root}/source.txt");
+        let destination = format!("{root}/destination.txt");
+        fs::write(&source, b"moved payload").expect("create move source");
+
+        move_file_or_dir(&source, &destination).expect("move file");
+
+        ax_assert!(!fs::exists(&source).expect("check move source"));
+        ax_assert_eq!(
+            fs::read(&destination).expect("read move destination"),
+            b"moved payload"
+        );
+        remove_path(
+            root,
+            RemoveOptions {
+                recursive: true,
+                ..RemoveOptions::default()
+            },
+        )
+        .expect("remove move fixture");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn rm_does_not_follow_a_directory_symlink() {
+        let metadata = metadata_for_remove("/var/run").expect("inspect rootfs directory symlink");
+
+        ax_assert!(metadata.file_type().is_symlink());
+        ax_assert!(!metadata.is_dir());
+    }
+
+    #[cfg(feature = "fs")]
+    fn reset_test_dir(path: &str) {
+        let _ = remove_path(
+            path,
+            RemoveOptions {
+                recursive: true,
+                force: true,
+                ..RemoveOptions::default()
+            },
+        );
+        fs::create_dir(path).expect("create test directory");
+    }
+
+    #[cfg(feature = "fs")]
+    fn unix_seconds(time: SystemTime) -> u64 {
+        time.duration_since(UNIX_EPOCH)
+            .expect("test time must not predate Unix epoch")
+            .as_secs()
     }
 }

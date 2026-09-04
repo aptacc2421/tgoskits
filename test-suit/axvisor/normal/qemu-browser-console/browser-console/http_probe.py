@@ -175,41 +175,18 @@ def receive_until_counting_frames(websocket, marker):
     return output, frames
 
 
-def check_page():
-    status, page = get("/")
-    expect_status("GET /", status, 200)
-    for marker in (
-        b"/api/consoles",
-        b"/assets/xterm.js",
-        b"/assets/xterm.css",
-        b"new Terminal",
-        b"terminal.onData",
-        b"catch(() => document.execCommand('copy'))",
-        b"rows: 40",
-        b"height: calc(100vh - 4.8rem)",
-    ):
-        if marker not in page:
-            raise AssertionError("embedded page is missing %r" % marker)
-    for external_asset in (
-        b"https://",
-        b"http://",
-    ):
-        if external_asset in page:
-            raise AssertionError("embedded page depends on %r" % external_asset)
-    if b".console { height: 34rem; }" in page:
-        raise AssertionError("mobile layout still stretches a fixed 24-row terminal")
-    if b"rows: 24" in page or b"syncFixedTerminalHeight" in page:
-        raise AssertionError("page still uses the shrunken 80x24 layout")
+def check_gateway():
+    """The console gateway of a build without a dashboard.
 
-    status, javascript = get("/assets/xterm.js")
-    expect_status("GET /assets/xterm.js", status, 200)
-    if b"Terminal" not in javascript:
-        raise AssertionError("xterm.js asset does not export Terminal")
-
-    status, stylesheet = get("/assets/xterm.css")
-    expect_status("GET /assets/xterm.css", status, 200)
-    if b".xterm" not in stylesheet:
-        raise AssertionError("xterm.css asset is incomplete")
+    This case builds `browser-console` alone: it is the terminal gateway the
+    dashboard drives, and it deliberately owns no page. `/` and `/assets/*` stay
+    404 here, which is what keeps "the UI is the embedded dashboard" true — the
+    dashboard case (`qemu-web-ui`) asserts the other half of that contract.
+    """
+    status, _ = get("/")
+    expect_status("GET / (no dashboard in this build)", status, 404)
+    status, _ = get("/assets/xterm.js")
+    expect_status("GET /assets/xterm.js (page asset is gone)", status, 404)
 
     status, body = get("/api/consoles")
     expect_status("GET /api/consoles", status, 200)
@@ -220,6 +197,26 @@ def check_page():
 
     status, _ = get("/api/vms")
     expect_status("GET /api/vms without http-axum", status, 404)
+
+    # The capability declaration has to describe this build: a console-only
+    # build offers both terminals and no VM management, so a browser that built
+    # its navigation from the manifest never calls a route this build lacks.
+    status, body = get("/api/manifest")
+    expect_status("GET /api/manifest", status, 200)
+    manifest = json.loads(body.decode("utf-8"))
+    if manifest.get("proto") != 1:
+        raise AssertionError("manifest proto was %r, expected 1" % (manifest.get("proto"),))
+    panels = manifest.get("panels")
+    if not isinstance(panels, list):
+        raise AssertionError("manifest panels was not a list: %r" % (manifest,))
+    if [panel.get("kind") for panel in panels] != ["console", "shell"]:
+        raise AssertionError("manifest panel kinds were %r" % (panels,))
+    for panel in panels:
+        if panel.get("verbs") != ["read", "write", "stream"]:
+            raise AssertionError("manifest panel %r had unexpected verbs" % (panel,))
+        if not panel.get("title"):
+            raise AssertionError("manifest panel %r had no title" % (panel,))
+    print("  browser console probe: GET /api/manifest -> console + shell")
 
 
 def check_websocket():
@@ -276,7 +273,7 @@ def check_websocket():
 
 def main():
     poll_ready()
-    check_page()
+    check_gateway()
     check_websocket()
     print("  browser console probe: PASS")
 

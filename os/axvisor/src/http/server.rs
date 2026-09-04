@@ -5,20 +5,28 @@
 //! but dispatch and JSON construction are delegated to axum + serde_json.
 //!
 //! ```text
+//! GET    /api/manifest       → 200 {proto, panels} (any HTTP build)
 //! GET    /api/vms            → 200, JSON array (summary form)
+//! GET    /api/vms/pool       → 200 {directory, entries, issues} (fs feature)
 //! GET    /api/vms/{id}       → 200, JSON detail (with vcpu_states) | 404
-//! POST   /api/vms/create     → 200 {"id":N} | 400 | 409 | 500 (body {"toml": "..."})
+//! POST   /api/vms/create     → 200 {"id":N} | 400 | 409 | 500 | 503 (body {"toml": "..."})
 //! DELETE /api/vms/{id}       → 204 | 404 | 500
-//! POST   /api/vms/{id}/start  → 200 {"ok":true,"status":...} | 404 | 409 | 503
+//! POST   /api/vms/{id}/start  → 200 {"ok":true,"status":...} | 404 | 409 | 500 | 503
 //! POST   /api/vms/{id}/stop   → 200 {"ok":true,"status":...} | 404 | 409 | 503
 //! POST   /api/vms/{id}/pause  → 200 {"ok":true,"status":...} | 404 | 409 | 503
 //! POST   /api/vms/{id}/resume → 200 {"ok":true,"status":...} | 404 | 409 | 503
+//! GET    /ws/events          → 101, then registry change frames (browser-console)
 //! ```
 //!
-//! Mutating routes (`create`/`delete`/`start`/`stop`/`pause`/`resume`) require
-//! `Authorization: Bearer <token>` with the build-time `[env] AXVM_HTTP_TOKEN`;
-//! see [`crate::http::auth`]. GET routes are open. The listener binds
-//! [`bind_addr`], loopback by default.
+//! An id that is not registered yet may still be startable: with the `fs`
+//! feature, `start` creates a VM from the matching config in the VM pool first
+//! (see [`crate::vm_pool`]), and `GET /api/vms/pool` reports those candidates.
+//! Starting an id that is neither registered nor pooled returns 404.
+//!
+//! The control plane runs under a local-host trust model and therefore has no
+//! authentication: every route is open to any caller that can reach the
+//! listener. The listener binds [`bind_addr`], loopback by default, so reaching
+//! it from another host requires an explicit `[env] AXVM_HTTP_BIND` opt-in.
 //!
 //! The tokio reactor is initialized with `enable_io()` only (no time driver),
 //! which needs only epoll, so no `timerfd` syscall is required.
@@ -57,8 +65,9 @@ use axum::Router;
 
 #[cfg(feature = "http-axum")]
 use crate::http::vm;
+use axum::routing::get;
 #[cfg(feature = "http-axum")]
-use axum::{routing::get, routing::post};
+use axum::routing::post;
 
 #[cfg(feature = "browser-console")]
 static LISTENING: AtomicBool = AtomicBool::new(false);
@@ -74,6 +83,10 @@ impl Drop for ListeningGuard {
 }
 
 /// Assemble only the HTTP services selected by build features.
+///
+/// `/api/manifest` is registered here rather than in either sub-router because
+/// its whole purpose is to describe the combination: it is the one route that
+/// must answer in every HTTP build, including a `browser-console`-only one.
 pub fn router() -> Router {
     let router = Router::new();
 
@@ -83,19 +96,35 @@ pub fn router() -> Router {
     #[cfg(feature = "browser-console")]
     let router = router.merge(crate::http::browser_console::router());
 
-    router
+    #[cfg(feature = "browser-console")]
+    let router = router.merge(crate::http::events::router());
+
+    // The dashboard owns `/` and `/assets/*`. When the feature is off those paths
+    // simply stay unregistered, which is how a console-gateway-only or API-only
+    // build keeps its own 404 instead of serving half a UI.
+    #[cfg(feature = "web-ui")]
+    let router = router.merge(crate::web::router());
+
+    router.route("/api/manifest", get(crate::http::manifest::get_manifest))
 }
 
 #[cfg(feature = "http-axum")]
 fn management_router() -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/api/vms", get(vm::list_vms))
         .route("/api/vms/{id}", get(vm::vm_detail).delete(vm::vm_delete))
         .route("/api/vms/create", post(vm::vm_create))
         .route("/api/vms/{id}/start", post(vm::vm_start))
         .route("/api/vms/{id}/stop", post(vm::vm_stop))
         .route("/api/vms/{id}/pause", post(vm::vm_pause))
-        .route("/api/vms/{id}/resume", post(vm::vm_resume))
+        .route("/api/vms/{id}/resume", post(vm::vm_resume));
+
+    // The pool is a directory on the host filesystem, so the query route only
+    // exists in builds that can read one.
+    #[cfg(feature = "fs")]
+    let router = router.route("/api/vms/pool", get(vm::vm_pool));
+
+    router
 }
 
 /// Bind address for the management HTTP server.
@@ -103,8 +132,7 @@ fn management_router() -> Router {
 /// Defaults to loopback (`127.0.0.1:8080`) so a stock `http-axum` build is not
 /// reachable from the management network. Test/dev flows that need QEMU
 /// hostfwd to reach the in-guest listener must opt in to all interfaces by
-/// setting `[env] AXVM_HTTP_BIND = "0.0.0.0:8080"` in their build config; the
-/// mutating routes still require the bearer token regardless of the bind.
+/// setting `[env] AXVM_HTTP_BIND = "0.0.0.0:8080"` in their build config.
 pub(super) fn bind_addr() -> &'static str {
     option_env!("AXVM_HTTP_BIND").unwrap_or("127.0.0.1:8080")
 }
