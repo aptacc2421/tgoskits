@@ -5,7 +5,7 @@ extern crate alloc;
 #[cfg(not(feature = "fs"))]
 use alloc::vec::Vec;
 #[cfg(feature = "fs")]
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 
 #[cfg(feature = "fs")]
 use anyhow::anyhow;
@@ -64,6 +64,30 @@ impl AxvmManager {
     #[cfg(any(feature = "fs", feature = "http-axum"))]
     pub fn create_vm_from_toml(raw_cfg: &str) -> Result<VMId> {
         crate::config::init_guest_vm(raw_cfg).context("create VM from TOML configuration")
+    }
+
+    /// Make sure `vm_id` is registered, creating it from the VM pool if needed.
+    ///
+    /// A start request names a VM, not a config file: when the id has no
+    /// registered VM yet, the pool entry claiming that id is created now. The
+    /// pool is re-read here, so a config repaired on the host takes effect on
+    /// the next start request. Returns `Ok(false)` when neither the registry
+    /// nor the pool knows the id.
+    #[cfg(feature = "fs")]
+    pub fn ensure_registered(vm_id: VMId) -> Result<bool> {
+        if Self::vm_by_id(vm_id).is_some() {
+            return Ok(true);
+        }
+
+        let pool = crate::vm_pool::scan();
+        let Some(entry) = pool.entry(vm_id) else {
+            crate::vm_pool::log_issues(&pool);
+            return Ok(false);
+        };
+
+        Self::create_vm_from_toml(entry.toml())
+            .with_context(|| format!("create VM[{vm_id}] from VM pool entry `{}`", entry.path()))?;
+        Ok(true)
     }
 
     /// Start a VM by ID.
@@ -147,70 +171,6 @@ impl AxvmManager {
         )
     )))]
     fn release_host_filesystem_for_guest_passthrough(&self) {}
-
-    /// Read VM config files from an Axvisor-owned directory.
-    #[cfg(feature = "fs")]
-    pub fn filesystem_vm_configs(config_dir: &str) -> Vec<String> {
-        let mut configs = Vec::new();
-
-        debug!("Read VM config files from filesystem.");
-
-        let entries = match ax_std::fs::read_dir(config_dir) {
-            Ok(entries) => {
-                info!("Find dir: {}", config_dir);
-                entries
-            }
-            Err(_) => {
-                info!("NOT find dir: {} in filesystem", config_dir);
-                return configs;
-            }
-        };
-
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => {
-                    warn!("Failed to read config directory entry: {e:?}");
-                    continue;
-                }
-            };
-            let path = entry.path();
-            let path_str = path.as_str();
-            debug!("Considering file: {}", path_str);
-            if !path_str.ends_with(".toml") {
-                continue;
-            }
-
-            let file_size = match Self::file_size(path_str) {
-                Ok(file_size) => file_size,
-                Err(e) => {
-                    error!("Failed to get config file {path_str} metadata: {e:#}");
-                    continue;
-                }
-            };
-            info!("File {} size: {}", path_str, file_size);
-
-            if file_size == 0 {
-                warn!("File {} is empty", path_str);
-                continue;
-            }
-
-            let buffer = match Self::read_file_exact(path_str, file_size) {
-                Ok(buffer) => buffer,
-                Err(e) => {
-                    error!("Failed to read file {path_str}: {e:#}");
-                    continue;
-                }
-            };
-
-            match String::from_utf8(buffer) {
-                Ok(content) => configs.push(content),
-                Err(e) => error!("Config file {} is not valid UTF-8: {:?}", path_str, e),
-            }
-        }
-
-        configs
-    }
 
     #[cfg(feature = "fs")]
     fn open_file(file_name: &str) -> Result<ax_std::fs::File> {

@@ -47,21 +47,20 @@ pub mod vmcfg {
         vec![]
     }
 
-    /// Read VM configs from filesystem
+    /// Read the configs that the startup path creates as the default guest set.
+    ///
+    /// Unlike the pool ([`crate::vm_pool`]), this directory is not a candidate
+    /// list: every config here is created before the management plane starts.
     #[cfg(feature = "fs")]
     pub fn filesystem_vm_configs() -> Vec<String> {
-        let config_dir = "/guest/vm_default";
-        crate::manager::AxvmManager::filesystem_vm_configs(config_dir)
-            .into_iter()
-            .filter_map(
-                |content| match axvmconfig::GuestConfig::from_toml(&content) {
-                    Ok(_) => Some(content),
-                    Err(e) => {
-                        warn!("Filesystem VM config is invalid: {:?}", e);
-                        None
-                    }
-                },
-            )
+        use crate::vm_pool;
+
+        let configs = vm_pool::scan_dir(vm_pool::DEFAULT_VM_CONFIG_DIR);
+        vm_pool::log_issues(&configs);
+        configs
+            .entries()
+            .iter()
+            .map(|entry| entry.toml().to_string())
             .collect()
     }
 

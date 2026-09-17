@@ -1,0 +1,148 @@
+# No default guest is configured for this case, so the shell starts with an
+# empty VM registry and `/pool` as the only candidate list. The steps below
+# provision that list the way a console user would — copy a guest image next to
+# it and write pool configs — then check listing, issue reporting and
+# start-on-demand through the management shell.
+#
+# The shell line buffer holds 256 bytes and TOML needs one key-value pair per
+# line, so a config written with `echo` carries a single root table. A bootable
+# guest needs `base` (its vCPU list) and `kernel` together, which only a host
+# writer can produce; `vm start` therefore reaches the VM pool entry and stops
+# in AxVM's own boot validation, and the assertion below pins exactly that
+# hand-off. The full start/stop cycle of a pool entry is exercised where the
+# config comes from the control plane, which writes real multi-line TOML.
+#
+# The guest image is the one the IVC case already boots, so this case adds no
+# new dependency on the managed rootfs image.
+args = [
+    "-nographic",
+    "-snapshot",
+    "-cpu",
+    "cortex-a72",
+    "-machine",
+    "virt,virtualization=on,gic-version=3",
+    "-smp",
+    "4",
+    "-device",
+    "nvme,drive=disk0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65",
+    "-drive",
+    "id=disk0,if=none,format=raw,file=${workspace}/tmp/axbuild/rootfs/rootfs-aarch64-alpine.img",
+    "-append",
+    "root=/dev/nvme0n1 rw init=/bin/sh",
+    "-m",
+    "8g",
+]
+fail_regex = [
+    "(?i)\\bpanic(?:ked)?\\b",
+    "(?i)login incorrect",
+    "(?i)permission denied",
+]
+timeout = 300
+to_bin = true
+uefi = false
+
+# The pool directory is empty until something provisions it, and the startup
+# path must report that instead of creating a guest.
+[[shell_check_steps]]
+shell_prefix = "axvisor:/$"
+shell_cmd = "vm pool"
+success_regex = [
+    "(?m)^VM pool directory: /pool\\s*$",
+    "(?m)^No config in the pool can be started\\.\\s*$",
+    "(?m)^✗ /pool: directory is unavailable: .+$",
+]
+
+[[shell_check_steps]]
+shell_cmd = "vm list"
+success_regex = ["(?m)^No virtual machines found\\.\\s*$"]
+
+# `vm start` on an id that is neither registered nor pooled has to report the
+# missing id instead of starting something else.
+[[shell_check_steps]]
+shell_cmd = "vm start 7"
+success_regex = ["(?m)^✗ VM\\[7\\] is neither registered nor listed in the VM pool\\s*$"]
+
+# Provision the pool: a guest image next to it plus one config per candidate.
+[[shell_check_steps]]
+shell_cmd = "mkdir -p /pool"
+
+[[shell_check_steps]]
+shell_cmd = "cp /guest/arceos/arceos-ivc-publisher.bin /k"
+
+[[shell_check_steps]]
+shell_cmd = "ls -l /k"
+success_regex = ["(?m)^-r\\S+\\s+\\d+\\s+/k\\s*$"]
+
+[[shell_check_steps]]
+shell_cmd = """echo 'kernel = {entry_point = 0x80200000, image_location = "fs", kernel_path = "/k", kernel_load_addr = 0x80200000, dtb_load_addr = 0x80000000, memory_regions = [[0x80000000, 0x40000000, 0x7, 1]]}' > /pool/boot.toml"""
+
+# A pool entry is only a candidate: the listing shows it while the VM registry
+# is still empty.
+[[shell_check_steps]]
+shell_cmd = "vm pool"
+success_regex = ["(?m)^0\\s+not-created\\s+/pool/boot\\.toml\\s*$"]
+
+# An entry that names itself is listed with its id and name.
+[[shell_check_steps]]
+shell_cmd = """echo 'base = {id = 9, name = "pool-a", cpu_num = 1}' > /pool/a.toml"""
+
+# A second config claiming an id the pool already uses is reported instead of
+# starting a second VM under that id. Which file the directory lists first
+# decides who owns the id, so both spellings are accepted.
+[[shell_check_steps]]
+shell_cmd = """echo 'base = {id = 9, name = "pool-b", cpu_num = 1}' > /pool/b.toml"""
+
+[[shell_check_steps]]
+shell_cmd = "vm pool"
+success_regex = [
+    "(?m)^✗ /pool/[ab]\\.toml: asks for VM id 9, which `/pool/[ab]\\.toml` already claims in this pool\\s*$",
+    "(?m)^9\\s+pool-[ab]\\s+not-created\\s+/pool/[ab]\\.toml\\s*$",
+]
+
+# Files that cannot be used are reported with their reason. `/etc/inittab` is a
+# real multi-line file, so this also covers text that is not TOML at all.
+[[shell_check_steps]]
+shell_cmd = "cp /etc/inittab /pool/broken.toml"
+
+[[shell_check_steps]]
+shell_cmd = "touch /pool/empty.toml"
+
+[[shell_check_steps]]
+shell_cmd = "vm pool"
+success_regex = [
+    "(?m)^✗ /pool/broken\\.toml: is not a guest config: .+$",
+    "(?m)^✗ /pool/empty\\.toml: is empty\\s*$",
+]
+
+# Only config files are candidates. A `.txt` file holding a parseable config
+# must not become an entry, which `vm start 11` shows: the id stays unknown, so
+# the shell reports a missing id instead of creating a VM from that file.
+[[shell_check_steps]]
+shell_cmd = """echo 'base = {id = 11, name = "pool-txt", cpu_num = 1}' > /pool/notes.txt"""
+
+[[shell_check_steps]]
+shell_cmd = "vm start 11"
+success_regex = ["(?m)^✗ VM\\[11\\] is neither registered nor listed in the VM pool\\s*$"]
+
+# Starting the entry creates the VM on demand from the pool entry. The config
+# above has no `base` table, so AxVM's boot validation rejects it: the point of
+# the assertion is the pool entry path in the context chain, which proves the
+# shell handed the entry's TOML to the create path.
+[[shell_check_steps]]
+shell_cmd = "vm start 0"
+success_regex = [
+    "(?m)^✗ create VM\\[0\\] from VM pool entry `/pool/boot\\.toml`: .+$",
+]
+
+# A failed create leaves the registry empty, so the entry is still a candidate.
+[[shell_check_steps]]
+shell_cmd = "vm list"
+success_regex = ["(?m)^No virtual machines found\\.\\s*$"]
+
+[[shell_check_steps]]
+shell_cmd = "vm pool"
+success_regex = ["(?m)^0\\s+not-created\\s+/pool/boot\\.toml\\s*$"]
+
+[[shell_check_steps]]
+shell_cmd = "echo AXVISOR_VM_POOL_PASSED"
+success_regex = ["(?m)^AXVISOR_VM_POOL_PASSED\\s*$"]

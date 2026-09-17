@@ -254,6 +254,11 @@ fn start_single_vm(vm: axvm::AxVMRef) -> anyhow::Result<()> {
 
 #[cfg(feature = "fs")]
 fn start_vm_by_id(vm_id: usize, attach_console: bool) {
+    if let Err(error) = ensure_registered(vm_id) {
+        println!("✗ {error:#}");
+        return;
+    }
+
     match crate::manager::AxvmManager::with_vm(vm_id, |vm| start_single_vm(vm.clone())) {
         Some(Ok(_)) => {
             println!("✓ VM[{}] started successfully", vm_id);
@@ -280,6 +285,51 @@ fn start_vm_by_id(vm_id: usize, attach_console: bool) {
             println!("✗ VM[{}] not found", vm_id);
         }
     }
+}
+
+/// Make sure `vm_id` has a registered VM before the start path runs.
+///
+/// start names a VM, not a config file, so an id that is still only a pool
+/// candidate is created from its pool entry first.
+#[cfg(feature = "fs")]
+fn ensure_registered(vm_id: usize) -> anyhow::Result<()> {
+    if crate::manager::AxvmManager::ensure_registered(vm_id)? {
+        return Ok(());
+    }
+
+    anyhow::bail!("VM[{vm_id}] is neither registered nor listed in the VM pool")
+}
+
+/// List the configs the VM pool offers, with the runtime state of each id.
+#[cfg(feature = "fs")]
+fn vm_pool(_cmd: &ParsedCommand) {
+    let pool = crate::vm_pool::scan();
+    println!("VM pool directory: {}", pool.directory());
+
+    if pool.entries().is_empty() {
+        println!("No config in the pool can be started.");
+    } else {
+        println!("{:<6} {:<16} {:<12} PATH", "VM ID", "NAME", "STATE");
+        println!("{:-<6} {:-<16} {:-<12} {:-<24}", "", "", "", "");
+        for entry in pool.entries() {
+            let state = match crate::manager::AxvmManager::vm_by_id(entry.id()) {
+                Some(vm) => vm.status().as_str().to_string(),
+                None => "not-created".to_string(),
+            };
+            println!(
+                "{:<6} {:<16} {:<12} {}",
+                entry.id(),
+                entry.name(),
+                state,
+                entry.path()
+            );
+        }
+    }
+
+    for issue in pool.issues() {
+        println!("✗ {issue}");
+    }
+    println!("Start an entry with 'vm start <VM_ID>'.");
 }
 
 fn vm_stop(cmd: &ParsedCommand) {
@@ -1291,9 +1341,14 @@ pub fn build_vm_cmd(tree: &mut BTreeMap<String, CommandNode>) {
 
     #[cfg(feature = "fs")]
     {
+        let pool_cmd = CommandNode::new("List the VMs the pool can start")
+            .with_handler(vm_pool)
+            .with_usage("vm pool");
+
         vm_node = vm_node
             .add_subcommand("create", create_cmd)
-            .add_subcommand("start", start_cmd);
+            .add_subcommand("start", start_cmd)
+            .add_subcommand("pool", pool_cmd);
     }
 
     vm_node = vm_node

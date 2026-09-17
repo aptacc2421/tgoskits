@@ -44,6 +44,8 @@ mod perf_load;
 mod shell;
 #[cfg(feature = "test-virq-delivery")]
 mod virq_regression;
+#[cfg(feature = "fs")]
+mod vm_pool;
 
 /// Axvisor kernel entry point.
 ///
@@ -52,7 +54,8 @@ mod virq_regression;
 /// 1. Configure the sole runtime host-console owner.
 /// 2. Print the startup banner through its output worker.
 /// 3. Check and enable hardware virtualization on every CPU.
-/// 4. Build the default guest VMs.
+/// 4. Build the default guest VMs, then report the pool of configs the
+///    management plane may start on demand.
 /// 5. Spawn the management plane first — the configured HTTP and network
 ///    console services so they are live before any guest boots — then the VM
 ///    lifecycle waiter and the physical-console shell.
@@ -70,6 +73,11 @@ fn main() {
     manager.init_default_vms();
     #[cfg(feature = "vcpu-perf-load")]
     let _performance_load = perf_load::start();
+
+    // The pool is reported, never created at startup: a config in it becomes a
+    // VM only when the shell or the control plane asks for it.
+    #[cfg(feature = "fs")]
+    vm_pool::log_startup_state();
 
     // The browser-console registry snapshots the successfully initialized
     // default VM set exactly once. Initialize it before HTTP so the browser's
