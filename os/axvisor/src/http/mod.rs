@@ -5,14 +5,13 @@
 //! features that may share this listener when both are enabled.
 //!
 //! The server binds `127.0.0.1:8080` by default and only binds wider when
-//! `[env] AXVM_HTTP_BIND` opts in. With `http-axum`, mutating VM routes also
-//! require the build-time bearer token implemented by the `auth` module.
+//! `[env] AXVM_HTTP_BIND` opts in. The control plane runs under a local-host
+//! trust model: it has no authentication, so every caller that can reach the
+//! listener may create, start, and delete VMs.
 //!
 //! This module is compiled when either optional HTTP feature is selected. Both
 //! features are off by default.
 
-#[cfg(feature = "http-axum")]
-pub mod auth;
 #[cfg(feature = "browser-console")]
 pub mod browser_console;
 pub mod server;

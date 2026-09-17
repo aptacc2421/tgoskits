@@ -16,14 +16,13 @@ networking hostfwd. Nothing in the hypervisor knows a test is running.
 Environment (set by the generic runner):
 
     AXVISOR_HTTP_BASE            http://127.0.0.1:<host_port> (forwarded)
-    AXVISOR_HTTP_TOKEN           bearer token for authenticated requests
     AXVISOR_HTTP_CASE_DIR        case directory holding `vm-memory.toml`
                                  (default: this file's directory)
     AXVISOR_HTTP_CONNECT_TIMEOUT seconds for the initial reachability wait
     AXVISOR_HTTP_REQUEST_TIMEOUT seconds per HTTP request
 
 The probe drives the whole `/api/vms` lifecycle contract in one boot —
-auth/error mapping, start/stop, pause/resume, and the destroy-then-recreate
+error mapping, start/stop, pause/resume, and the destroy-then-recreate
 resource re-acquire regression — mirroring
 `os/axvisor/doc/http-control-plane-quickstart.md`:
 
@@ -31,19 +30,13 @@ resource re-acquire regression — mirroring
     GET    /api/vms/1          -> 200 ready      (detail; id/name/cpu_num/vcpu_states/guest_entry_count)
     GET    /api/vms/not-an-id  -> 404            (non-numeric id)
     GET    /api/vms/999        -> 404            (unknown VM)
-    POST   /api/vms/create     -> 401            (no token)
-    POST   /api/vms/1/start    -> 401            (no token)
-    POST   /api/vms/1/stop     -> 401            (no token)
-    POST   /api/vms/1/pause    -> 401            (no token)
-    POST   /api/vms/1/resume   -> 401            (no token)
-    DELETE /api/vms/1          -> 401            (no token)
+    DELETE /api/vms/999        -> 404            (no auth header)
     POST   /api/vms/create {}  -> 400            (missing toml)
     POST   /api/vms/create <bad toml> -> 400     (invalid TOML)
-    POST   /api/vms/999/start  -> 404            (auth'd unknown VM)
-    POST   /api/vms/999/stop   -> 404            (auth'd unknown VM)
-    POST   /api/vms/999/pause  -> 404            (auth'd unknown VM)
-    POST   /api/vms/999/resume -> 404            (auth'd unknown VM)
-    DELETE /api/vms/999        -> 404            (auth'd unknown VM)
+    POST   /api/vms/999/start  -> 404            (unknown VM)
+    POST   /api/vms/999/stop   -> 404            (unknown VM)
+    POST   /api/vms/999/pause  -> 404            (unknown VM)
+    POST   /api/vms/999/resume -> 404            (unknown VM)
     POST   /api/vms/create     -> 409            (id=1 already registered)
     POST   /api/vms/1/pause    -> 409            (pause from Ready)
     POST   /api/vms/1/resume   -> 409            (resume from Ready)
@@ -112,7 +105,6 @@ import urllib.error
 import urllib.request
 
 BASE = os.environ.get("AXVISOR_HTTP_BASE", "http://127.0.0.1:8080").rstrip("/")
-TOKEN = os.environ.get("AXVISOR_HTTP_TOKEN", "")
 CASE_DIR = os.environ.get(
     "AXVISOR_HTTP_CASE_DIR", os.path.dirname(os.path.abspath(__file__))
 )
@@ -125,12 +117,11 @@ POLL_DEADLINE = 120.0
 POLL_INTERVAL = 1.0
 
 
-def request(method, path, token=None, body=None):
+def request(method, path, body=None):
     """One HTTP request; returns (status, parsed JSON or None).
 
-    `token` defaults to `None`: the unauthenticated steps assert the 401
-    rejections, and the poll loops mirror the runner's no-token GETs. The
-    authenticated steps pass `token=TOKEN` explicitly.
+    The control plane has no authentication: no request carries an
+    Authorization header, and each handler's own contract decides the status.
 
     A JSON `body` is sent with `Content-Type: application/json`. A non-2xx
     response is not an error here — the caller asserts the status. A transport
@@ -138,8 +129,6 @@ def request(method, path, token=None, body=None):
     or mid-transition) raises RuntimeError for the caller to retry or fail.
     """
     headers = {}
-    if token:
-        headers["Authorization"] = "Bearer " + token
     data = None
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -423,54 +412,44 @@ def main():
     status, _ = request("GET", "/api/vms/999")
     check("GET /api/vms/999", status, 404)
 
-    # 6-11. Auth: every mutating route rejects an unauthenticated write with
-    #        401, before any VM lookup or body parse.
-    status, _ = request("POST", "/api/vms/create")
-    check("POST /api/vms/create (no auth)", status, 401)
-    status, _ = request("POST", "/api/vms/1/start")
-    check("POST /api/vms/1/start (no auth)", status, 401)
-    status, _ = request("POST", "/api/vms/1/stop")
-    check("POST /api/vms/1/stop (no auth)", status, 401)
-    status, _ = request("POST", "/api/vms/1/pause")
-    check("POST /api/vms/1/pause (no auth)", status, 401)
-    status, _ = request("POST", "/api/vms/1/resume")
-    check("POST /api/vms/1/resume (no auth)", status, 401)
-    status, _ = request("DELETE", "/api/vms/1")
-    check("DELETE /api/vms/1 (no auth)", status, 401)
+    # 6. No authentication gate: a mutating route without any Authorization
+    #    header reaches its handler and is judged by the route's own contract.
+    #    An unknown id is 404, not 401; re-adding the removed `ApiToken`
+    #    extractor would fail this step before the handler ever runs.
+    status, _ = request("DELETE", "/api/vms/999")
+    check("DELETE /api/vms/999 (no auth header)", status, 404)
 
-    # 12-13. Create validates its body: a missing `toml` and an invalid TOML
+    # 7-8. Create validates its body: a missing `toml` and an invalid TOML
     #        document both reject with 400.
-    status, _ = request("POST", "/api/vms/create", token=TOKEN, body="{}")
+    status, _ = request("POST", "/api/vms/create", body="{}")
     check("POST /api/vms/create (missing toml)", status, 400)
-    status, _ = request("POST", "/api/vms/create", token=TOKEN, body=bad_body)
+    status, _ = request("POST", "/api/vms/create", body=bad_body)
     check("POST /api/vms/create (invalid toml)", status, 400)
 
-    # 14-17. Authenticated writes to an unknown VM are 404.
-    status, _ = request("POST", "/api/vms/999/start", token=TOKEN)
-    check("POST /api/vms/999/start (auth'd)", status, 404)
-    status, _ = request("POST", "/api/vms/999/stop", token=TOKEN)
-    check("POST /api/vms/999/stop (auth'd)", status, 404)
-    status, _ = request("POST", "/api/vms/999/pause", token=TOKEN)
-    check("POST /api/vms/999/pause (auth'd)", status, 404)
-    status, _ = request("POST", "/api/vms/999/resume", token=TOKEN)
-    check("POST /api/vms/999/resume (auth'd)", status, 404)
-    status, _ = request("DELETE", "/api/vms/999", token=TOKEN)
-    check("DELETE /api/vms/999 (auth'd)", status, 404)
+    # 9-12. Writes to an unknown VM are 404.
+    status, _ = request("POST", "/api/vms/999/start")
+    check("POST /api/vms/999/start", status, 404)
+    status, _ = request("POST", "/api/vms/999/stop")
+    check("POST /api/vms/999/stop", status, 404)
+    status, _ = request("POST", "/api/vms/999/pause")
+    check("POST /api/vms/999/pause", status, 404)
+    status, _ = request("POST", "/api/vms/999/resume")
+    check("POST /api/vms/999/resume", status, 404)
 
-    # 18. Duplicate create while id=1 is registered conflicts.
-    status, _ = request("POST", "/api/vms/create", token=TOKEN, body=create_body)
+    # 13. Duplicate create while id=1 is registered conflicts.
+    status, _ = request("POST", "/api/vms/create", body=create_body)
     check("POST /api/vms/create (duplicate id=1)", status, 409)
 
-    # 19-20. Pause/resume are only valid from Running/Paused respectively; a
+    # 14-15. Pause/resume are only valid from Running/Paused respectively; a
     #        `Ready` (not started) VM rejects both with 409.
-    status, _ = request("POST", "/api/vms/1/pause", token=TOKEN)
+    status, _ = request("POST", "/api/vms/1/pause")
     check("POST /api/vms/1/pause (from Ready)", status, 409)
-    status, _ = request("POST", "/api/vms/1/resume", token=TOKEN)
+    status, _ = request("POST", "/api/vms/1/resume")
     check("POST /api/vms/1/resume (from Ready)", status, 409)
 
-    # 21. Start the default VM: accepted synchronously (`async=false`), then
+    # 16. Start the default VM: accepted synchronously (`async=false`), then
     #     poll the detail into `running`.
-    status, body = request("POST", "/api/vms/1/start", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/start")
     check("POST /api/vms/1/start", status, 200)
     check_action("POST /api/vms/1/start", body, True, False)
     poll_vm_status(1, "running")
@@ -484,17 +463,17 @@ def main():
     # frozen value, so a status-only resume fails the assertion.
     parks = guest_park_count(body)
 
-    # 22. Re-starting an already-running VM conflicts.
-    status, _ = request("POST", "/api/vms/1/start", token=TOKEN)
+    # 17. Re-starting an already-running VM conflicts.
+    status, _ = request("POST", "/api/vms/1/start")
     check("POST /api/vms/1/start (already running)", status, 409)
 
-    # 23. Resume is only valid from Paused; a running VM rejects it.
-    status, _ = request("POST", "/api/vms/1/resume", token=TOKEN)
+    # 18. Resume is only valid from Paused; a running VM rejects it.
+    status, _ = request("POST", "/api/vms/1/resume")
     check("POST /api/vms/1/resume (from Running)", status, 409)
 
-    # 24. Pause is a request (`async=true`): the status flips to `Paused`
+    # 19. Pause is a request (`async=true`): the status flips to `Paused`
     #     synchronously while the vCPU parks at its next run-loop iteration.
-    status, body = request("POST", "/api/vms/1/pause", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/pause")
     check("POST /api/vms/1/pause", status, 200)
     check_action("POST /api/vms/1/pause", body, True, True)
     poll_vm_status(1, "paused")
@@ -510,13 +489,13 @@ def main():
     status, body = request("GET", "/api/vms/1")
     entries = guest_entry_count(body)
 
-    # 25. Pausing an already-paused VM conflicts.
-    status, _ = request("POST", "/api/vms/1/pause", token=TOKEN)
+    # 20. Pausing an already-paused VM conflicts.
+    status, _ = request("POST", "/api/vms/1/pause")
     check("POST /api/vms/1/pause (already paused)", status, 409)
 
-    # 26. Resume is synchronous (`async=false`): the status flips back to
+    # 21. Resume is synchronous (`async=false`): the status flips back to
     #     `Running` and the parked vCPU is woken to re-enter the guest.
-    status, body = request("POST", "/api/vms/1/resume", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/resume")
     check("POST /api/vms/1/resume", status, 200)
     check_action("POST /api/vms/1/resume", body, True, False)
     poll_vm_status(1, "running")
@@ -526,13 +505,13 @@ def main():
     poll_guest_entries(1, entries + 1)
     entries = entries + 1
 
-    # 27. Resuming an already-running VM conflicts.
-    status, _ = request("POST", "/api/vms/1/resume", token=TOKEN)
+    # 22. Resuming an already-running VM conflicts.
+    status, _ = request("POST", "/api/vms/1/resume")
     check("POST /api/vms/1/resume (already running)", status, 409)
 
-    # 28-29. Second suspend/wake cycle: a parked vCPU is woken and re-parked
+    # 23-24. Second suspend/wake cycle: a parked vCPU is woken and re-parked
     #        repeatedly, so the resume wake path must converge every time.
-    status, body = request("POST", "/api/vms/1/pause", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/pause")
     check("POST /api/vms/1/pause (cycle 2)", status, 200)
     check_action("POST /api/vms/1/pause (cycle 2)", body, True, True)
     poll_vm_status(1, "paused")
@@ -543,7 +522,7 @@ def main():
     # Re-sample the frozen re-entry baseline for the second cycle.
     status, body = request("GET", "/api/vms/1")
     entries = guest_entry_count(body)
-    status, body = request("POST", "/api/vms/1/resume", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/resume")
     check("POST /api/vms/1/resume (cycle 2)", status, 200)
     check_action("POST /api/vms/1/resume (cycle 2)", body, True, False)
     poll_vm_status(1, "running")
@@ -551,51 +530,51 @@ def main():
     poll_guest_entries(1, entries + 1)
     entries = entries + 1
 
-    # 30. Stop is a request (`async=true`): the `stopped` state arrives
+    # 25. Stop is a request (`async=true`): the `stopped` state arrives
     #     asynchronously once the vCPU observes it and exits.
-    status, body = request("POST", "/api/vms/1/stop", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/stop")
     check("POST /api/vms/1/stop", status, 200)
     check_action("POST /api/vms/1/stop", body, True, True)
     poll_vm_status(1, "stopped")
 
-    # 31. Restart-after-stop is a known scheduling limitation; the contract
+    # 26. Restart-after-stop is a known scheduling limitation; the contract
     #     rejects it with 409 rather than hanging the VM in `running`.
-    status, _ = request("POST", "/api/vms/1/start", token=TOKEN)
+    status, _ = request("POST", "/api/vms/1/start")
     check("POST /api/vms/1/start (restart-after-stop)", status, 409)
 
-    # 32. Delete the stopped VM, then poll until it is gone.
-    status, _ = request("DELETE", "/api/vms/1", token=TOKEN)
+    # 27. Delete the stopped VM, then poll until it is gone.
+    status, _ = request("DELETE", "/api/vms/1")
     check("DELETE /api/vms/1", status, 204)
     poll_vm_gone(1)
 
-    # 33. Recreate after delete: the embedded image is matched by id, so a
+    # 28. Recreate after delete: the embedded image is matched by id, so a
     #     fresh create with the same config succeeds and registers id 1 again.
-    status, body = request("POST", "/api/vms/create", token=TOKEN, body=create_body)
+    status, body = request("POST", "/api/vms/create", body=create_body)
     check("POST /api/vms/create (recreate)", status, 200)
     if not isinstance(body, dict) or body.get("id") != 1:
         raise AssertionError("recreate did not return id=1")
     poll_vm_status(1, "ready")
 
-    # 34. The re-registered id conflicts with a second create.
-    status, _ = request("POST", "/api/vms/create", token=TOKEN, body=create_body)
+    # 29. The re-registered id conflicts with a second create.
+    status, _ = request("POST", "/api/vms/create", body=create_body)
     check("POST /api/vms/create (recreate duplicate)", status, 409)
 
-    # 35-36. The recreated VM must be fully usable, not merely re-registered:
+    # 30-31. The recreated VM must be fully usable, not merely re-registered:
     #        destroy must have freed guest memory, vCPUs, devices, and the
     #        registry entry so a fresh VM can be rebuilt and run from the same
     #        embedded image. This is the resource re-acquire regression.
-    status, _ = request("POST", "/api/vms/1/start", token=TOKEN)
+    status, _ = request("POST", "/api/vms/1/start")
     check("POST /api/vms/1/start (recreated)", status, 200)
     poll_vm_status(1, "running")
     # The recreated runtime's vCPU must actually enter the guest, proving the
     # fresh build is runnable (not just registered as `Running`).
     poll_guest_entries(1, 1)
-    status, _ = request("POST", "/api/vms/1/stop", token=TOKEN)
+    status, _ = request("POST", "/api/vms/1/stop")
     check("POST /api/vms/1/stop (recreated)", status, 200)
     poll_vm_status(1, "stopped")
 
-    # 37. Cleanup: leave the hypervisor without a registered VM.
-    status, _ = request("DELETE", "/api/vms/1", token=TOKEN)
+    # 32. Cleanup: leave the hypervisor without a registered VM.
+    status, _ = request("DELETE", "/api/vms/1")
     check("DELETE /api/vms/1 (cleanup)", status, 204)
     poll_vm_gone(1)
 

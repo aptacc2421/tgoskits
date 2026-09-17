@@ -15,10 +15,10 @@
 //! POST   /api/vms/{id}/resume → 200 {"ok":true,"status":...} | 404 | 409 | 503
 //! ```
 //!
-//! Mutating routes (`create`/`delete`/`start`/`stop`/`pause`/`resume`) require
-//! `Authorization: Bearer <token>` with the build-time `[env] AXVM_HTTP_TOKEN`;
-//! see [`crate::http::auth`]. GET routes are open. The listener binds
-//! [`bind_addr`], loopback by default.
+//! The control plane runs under a local-host trust model and therefore has no
+//! authentication: every route is open to any caller that can reach the
+//! listener. The listener binds [`bind_addr`], loopback by default, so reaching
+//! it from another host requires an explicit `[env] AXVM_HTTP_BIND` opt-in.
 //!
 //! The tokio reactor is initialized with `enable_io()` only (no time driver),
 //! which needs only epoll, so no `timerfd` syscall is required.
