@@ -90,6 +90,10 @@ GUEST_INPUT_RESULT = b"12321"
 # The lane tells a browser why a keystroke went nowhere while the guest is not
 # running. Silent rejection is what makes a working terminal look broken.
 GUEST_INPUT_REJECTED = b"is not running; input was dropped"
+# Second guest command and its result, used by the lane-isolation check. The
+# value cannot appear in the command text, so seeing it proves the guest ran it.
+GUEST_ISOLATION_COMMAND = b"echo $((222*222))\r"
+GUEST_ISOLATION_RESULT = b"49284"
 
 # The default guest (`web-ui/vm-memory.toml`), kept `Ready` by `no-auto-start`.
 DEFAULT_VM_ID = 1
@@ -367,6 +371,22 @@ def receive_some(websocket, deadline):
         if TERMINAL_STATUS_QUERY in payload:
             websocket.send_binary(TERMINAL_STATUS_REPLY)
         return payload
+
+
+def drain_available(websocket, seconds):
+    """Everything that arrives within `seconds`; an idle lane returns b""."""
+    out = b""
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return out
+        ready, _, _ = select.select([websocket.stream], [], [], remaining)
+        if not ready:
+            return out
+        opcode, payload = websocket.recv_frame()
+        if opcode in (1, 2):
+            out += payload
 
 
 def receive_output_until(websocket, marker, deadline, label):
@@ -670,6 +690,32 @@ def check_lifecycle(events):
     receive_output_until(
         guest, GUEST_INPUT_RESULT, time.monotonic() + GUEST_BOOT_DEADLINE, "guest ran typed command"
     )
+
+    # Wiring: the management lane and a guest lane are two independent byte
+    # streams -- the dashboard shows them as separate panes, and a browser that
+    # reads one must never see the other's traffic. Both are attached at once
+    # here, which is the only way that claim can fail if routing is wrong.
+    shell = expect_upgrade("/ws/axvisor", 101)
+    receive_until(shell, b"axvisor:$ ")
+    guest.send_binary(GUEST_ISOLATION_COMMAND)
+    receive_output_until(
+        guest,
+        GUEST_ISOLATION_RESULT,
+        time.monotonic() + GUEST_BOOT_DEADLINE,
+        "guest ran a second command with the management lane attached",
+    )
+    stray = drain_available(shell, 2.0)
+    if GUEST_ISOLATION_RESULT in stray:
+        raise AssertionError("guest output leaked into the management lane: %r" % (stray[-200:],))
+    shell.send_binary(b"vm list\r")
+    receive_output_until(
+        shell, b"VM ID", time.monotonic() + REQUEST_TIMEOUT * 3, "management lane lists VMs"
+    )
+    stray = drain_available(guest, 2.0)
+    if b"VM ID" in stray or b"linux-web-ui" in stray:
+        raise AssertionError("management output leaked into the guest lane: %r" % (stray[-200:],))
+    shell.close()
+    print("  web-ui probe: management and guest lanes carry separate streams")
 
     guest.close()
     poll_lane_attached(
