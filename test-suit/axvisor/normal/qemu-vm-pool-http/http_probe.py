@@ -731,8 +731,37 @@ def phase_lane_limit():
     check_pool_matches_fixtures("GET /api/vms/pool at the end", body)
 
 
+def check_dashboard():
+    """The dashboard is served in this build too (`web-ui` plus `fs`).
+
+    This case is about the pool, not about the UI, so the check is deliberately
+    minimal: the shell resolves and the page it serves is the embedded bundle
+    rather than a directory listing or a 404. The dashboard's own contract is
+    asserted by the `qemu-web-ui` case.
+    """
+    # Raw on purpose: `get()` parses JSON, and this response is HTML.
+    deadline = time.monotonic() + POLL_DEADLINE
+    while True:
+        try:
+            with urllib.request.urlopen(BASE + "/", timeout=REQUEST_TIMEOUT) as resp:
+                expect_status("GET / (dashboard shell)", resp.status, 200)
+                body = resp.read()
+            break
+        except urllib.error.HTTPError as error:
+            raise AssertionError("GET / (dashboard shell) returned %d" % error.code)
+        except (urllib.error.URLError, OSError) as error:
+            if time.monotonic() >= deadline:
+                raise AssertionError("GET / (dashboard shell) failed: %s" % error)
+            time.sleep(POLL_INTERVAL)
+    for marker in (b'<div id="root">', b"/assets/"):
+        if marker not in body:
+            raise AssertionError("dashboard shell is missing %r" % marker)
+    print("  pool http probe: GET / -> embedded dashboard shell")
+
+
 def main():
     poll_ready()
+    check_dashboard()
     check_manifest()
     expect_websocket("/ws/axvisor")
     phase_pool()
