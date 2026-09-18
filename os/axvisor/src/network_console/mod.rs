@@ -405,6 +405,7 @@ pub(crate) fn open_browser_console(
         BrowserConsoleInput {
             endpoint,
             editor: ManagementLineEditor::new(),
+            rejected_input_reported: false,
             _active_session: active_session,
         },
         BrowserConsoleOutput {
@@ -476,6 +477,12 @@ fn receive_output_frame(
 pub(crate) struct BrowserConsoleInput {
     endpoint: Endpoint,
     editor: ManagementLineEditor,
+    /// Whether the current input streak was already rejected by a stopped guest.
+    ///
+    /// Keystrokes arrive one frame at a time, so reporting every rejected byte
+    /// would turn one attempt into a wall of text; one notice per streak tells
+    /// the operator why nothing is happening and stops on its own.
+    rejected_input_reported: bool,
     _active_session: ActiveSession,
 }
 
@@ -495,7 +502,18 @@ impl BrowserConsoleInput {
     /// Routes browser bytes to the selected shell and reports whether it stays open.
     pub(crate) fn route(&mut self, bytes: &[u8]) -> bool {
         if let Some(vm_id) = self.endpoint.vm_id {
-            crate::guest_console::route_network_input(vm_id, bytes);
+            if crate::guest_console::route_network_input(vm_id, bytes) {
+                self.rejected_input_reported = false;
+            } else if !self.rejected_input_reported {
+                // The guest console only accepts input while its VM runs. A
+                // dropped keystroke used to leave no trace at all, which is
+                // indistinguishable from a broken terminal: say why, once.
+                self.rejected_input_reported = true;
+                let notice = format!(
+                    "[Axvisor] VM {vm_id} is not running; input was dropped. Start it first.\r\n"
+                );
+                submit_guest_output(vm_id, notice.as_bytes());
+            }
             true
         } else {
             self.editor.process(bytes)

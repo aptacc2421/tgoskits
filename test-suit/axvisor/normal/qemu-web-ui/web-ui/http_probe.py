@@ -29,6 +29,7 @@ contract a browser depends on, not a browser:
     GET    /ws/axvisor            -> 101   (management shell: help output)
     GET    /ws/vm-1               -> 101   (guest lane greeting)
     GET    /ws/events             -> 101   (snapshot, then created/removed frames)
+    /ws/vm-1                      -> rejected input while the guest is stopped
     POST   /api/vms/1/start       -> 200   (guest really enters: guest_entry_count)
     /ws/vm-1                      -> guest shell runs a typed command
     DELETE /api/vms/1             -> 204   (registry, lane and event frame follow)
@@ -86,6 +87,9 @@ TERMINAL_STATUS_REPLY = b"\x1b[1;1R"
 # evaluated it — not that the host echoed keystrokes somewhere.
 GUEST_INPUT_COMMAND = b"echo $((111*111))\r"
 GUEST_INPUT_RESULT = b"12321"
+# The lane tells a browser why a keystroke went nowhere while the guest is not
+# running. Silent rejection is what makes a working terminal look broken.
+GUEST_INPUT_REJECTED = b"is not running; input was dropped"
 
 # The default guest (`web-ui/vm-memory.toml`), kept `Ready` by `no-auto-start`.
 DEFAULT_VM_ID = 1
@@ -602,6 +606,17 @@ def check_lifecycle(events):
         "guest lane held",
         lane_attached("GET /api/consoles (guest lane held)", "vm-1"),
         True,
+    )
+
+    # The lane is open but the guest is still `Ready`: bytes typed now have no
+    # running guest to read them, and the browser has to be told that instead of
+    # seeing its keystrokes vanish.
+    guest.send_binary(b"x")
+    receive_output_until(
+        guest,
+        GUEST_INPUT_REJECTED,
+        time.monotonic() + REQUEST_TIMEOUT * 3,
+        "input rejected while the guest is stopped",
     )
 
     status, body = request("POST", "/api/vms/%d/start" % DEFAULT_VM_ID)

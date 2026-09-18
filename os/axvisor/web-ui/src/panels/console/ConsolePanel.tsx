@@ -8,14 +8,10 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { TerminalView } from '@/components/Terminal'
-import { describeError, type ConsoleInfo, type PanelProps } from '@/api/types'
+import { describeError, describeStatus, type ConsoleInfo, type PanelProps } from '@/api/types'
 import { endpoints } from '@/api/endpoints'
+import { guestRoute, laneVmId } from '@/lib/lanes'
 import { cn } from '@/lib/utils'
-
-/** Route of the guest lane that belongs to `vmId` (`network_console::layout`). */
-export function guestRoute(vmId: number): string {
-  return `vm-${vmId}`
-}
 
 export default function ConsolePanel({ api, resources = [], focusVm = null }: PanelProps) {
   const [consoles, setConsoles] = useState<ConsoleInfo[] | null>(null)
@@ -101,22 +97,39 @@ export default function ConsolePanel({ api, resources = [], focusVm = null }: Pa
           </div>
           {/* Every lane stays mounted: the lanes are exclusive, so unmounting the
               inactive ones would tear down the session on each tab switch. */}
-          {guestLanes.map((console) => (
-            <div
-              key={console.route}
-              className={cn(
-                'min-h-0 flex-1',
-                console.route === activeRoute ? 'block' : 'hidden',
-              )}
-            >
-              <TerminalView
-                path={endpoints.terminal(console.route)}
-                title={console.name}
-                subtitle={endpoints.terminal(console.route)}
-                occupied={console.attached}
-              />
-            </div>
-          ))}
+          {guestLanes.map((console) => {
+            const vmId = laneVmId(console.route)
+            const vm = vmId === null ? undefined : resources.find((item) => item.id === vmId)
+            return (
+              <div
+                key={console.route}
+                className={cn(
+                  'flex min-h-0 flex-1 flex-col gap-1',
+                  console.route === activeRoute ? 'flex' : 'hidden',
+                )}
+              >
+                {/* A connected WebSocket only means the lane is open. Input still
+                    needs a running guest, and a stopped one drops it silently;
+                    saying which of the two is missing is the whole point here. */}
+                {vm !== undefined && vm.status !== 'running' && (
+                  <p
+                    role="status"
+                    className="shrink-0 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+                  >
+                    客户机「{vm.name}」当前为{describeStatus(vm.status)}：终端已连上通道，
+                    但输入不会送达客户机。先到「虚拟机」面板点「启动」，再回到这里输入。
+                  </p>
+                )}
+                <TerminalView
+                  path={endpoints.terminal(console.route)}
+                  title={console.name}
+                  subtitle={endpoints.terminal(console.route)}
+                  occupied={console.attached}
+                  className="min-h-0 flex-1"
+                />
+              </div>
+            )
+          })}
         </>
       )}
     </div>

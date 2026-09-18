@@ -413,7 +413,7 @@ disabled = [
 | 宿主日志插入正在编辑的命令 | 是否取得唯一日志订阅；记录是否经 `route_host_log()`；drop 摘要是否增长 | shell 模式必须清行、输出完整记录并重画；guest 前台模式必须缓存而非直写 |
 | `vm console` 报错 | VM ID 是否存在；Running VM 是否可附着；Stopped VM 是否仍有 console state | attach 不接受 Ready、Paused、Stopping；删除或从未建立 backend 的 VM 没有可回放 ring |
 | 客户机不立即收到输入 | 输入队列是否满及 overflow warning；`notify_vm` warning；vCPU0 是否持续产生可处理的 VM-exit | 4096 字节尾部丢弃并按 drain 周期报告一次；kick 会定向唤醒或退出 vCPU0 |
-| 网页终端没有回显，但客户机输出照常到达 | 该 VM 是否经过 `mark_running()` 登记：`vm start`、HTTP start/resume/reset 与 auto-start 都必须登记 | mux 只把输入交给 running 集合中的 VM；未登记时输入被丢弃，而客户机输出不受 running 限制，所以现象是“看得到、打不进” |
+| 网页终端没有回显，但客户机输出照常到达 | 该通道的 VM 是否在运行（`GET /api/vms` 的状态是否为 `running`）；该 VM 是否经过 `mark_running()` 登记：`vm start`、HTTP start/resume/reset 与 auto-start 都必须登记 | mux 只把输入交给 running 集合中的 VM；未登记时输入被丢弃，且输入链路会向该通道回一行说明丢弃原因；客户机输出不受 running 限制，所以现象是“看得到、打不进” |
 | reset 后控制台永久无输入输出 | reset 前是否调用过 `mark_stopped()`；是否误以为 reset 会创建 backend | reset clone 同一 backend Arc，不会发布新 generation；已失效 generation 不会自动复活 |
 | stop 后仍看到 guest output | 记录是 stop 前已进入 ordered record queue 的，还是 stop 后新的提交 | stop 清 active generation 并拒绝新的 input/output submission，但保留 identity，已排队记录仍可 replay；replacement/remove 才让旧 identity 失效，旧 backend 的新提交与 replay 都被拒绝 |
 | guest 输出停止或丢字 | PL011 retained TX FIFO 是否积压、`FR.TXFE/BUSY` 电平、ordered record queue 是否持续返回 `WouldBlock`、`notify_vm` warning、host transport 是否报告 drop 摘要 | record queue 满时 `try_write()` 返回 0 并记 `retained_tx`，PL011 在下一次 poll 重试；容量被消费后 pop 路径锁外 `notify_vm()` 发布该 poll，被唤醒的是被阻塞 VM 而不是被消费记录的 owner；只有 runtime 实际丢弃的记录或 direct host transport 溢出才报告摘要 |
