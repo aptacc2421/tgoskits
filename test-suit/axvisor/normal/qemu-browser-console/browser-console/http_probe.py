@@ -221,6 +221,26 @@ def check_page():
     status, _ = get("/api/vms")
     expect_status("GET /api/vms without http-axum", status, 404)
 
+    # The capability declaration has to describe this build: a console-only
+    # build offers both terminals and no VM management, so a browser that built
+    # its navigation from the manifest never calls a route this build lacks.
+    status, body = get("/api/manifest")
+    expect_status("GET /api/manifest", status, 200)
+    manifest = json.loads(body.decode("utf-8"))
+    if manifest.get("proto") != 1:
+        raise AssertionError("manifest proto was %r, expected 1" % (manifest.get("proto"),))
+    panels = manifest.get("panels")
+    if not isinstance(panels, list):
+        raise AssertionError("manifest panels was not a list: %r" % (manifest,))
+    if [panel.get("kind") for panel in panels] != ["console", "shell"]:
+        raise AssertionError("manifest panel kinds were %r" % (panels,))
+    for panel in panels:
+        if panel.get("verbs") != ["read", "write", "stream"]:
+            raise AssertionError("manifest panel %r had unexpected verbs" % (panel,))
+        if not panel.get("title"):
+            raise AssertionError("manifest panel %r had no title" % (panel,))
+    print("  browser console probe: GET /api/manifest -> console + shell")
+
 
 def check_websocket():
     websocket = expect_upgrade("/ws/axvisor", 101)

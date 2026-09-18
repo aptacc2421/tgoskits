@@ -13,10 +13,41 @@
 //! features are off by default.
 
 #[cfg(feature = "browser-console")]
+use axum::http::{HeaderMap, StatusCode, header};
+
+#[cfg(feature = "browser-console")]
 pub mod browser_console;
+#[cfg(feature = "browser-console")]
+pub mod events;
+pub mod manifest;
 pub mod server;
 #[cfg(feature = "http-axum")]
 pub mod vm;
+
+/// Rejects a WebSocket upgrade that a page from another origin started.
+///
+/// The control plane has no authentication, so the origin check is what keeps a
+/// random web page from opening the hypervisor's console or event sockets from
+/// the viewer's browser. It compares the `Origin` header against the `Host` the
+/// request was addressed to, which accepts the listener's own page and rejects
+/// anything else.
+#[cfg(feature = "browser-console")]
+pub(super) fn validate_browser_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::FORBIDDEN)?;
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::FORBIDDEN)?;
+
+    if origin == format!("http://{host}") || origin == format!("https://{host}") {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
 
 /// Blocking entry point for the configured HTTP services.
 ///

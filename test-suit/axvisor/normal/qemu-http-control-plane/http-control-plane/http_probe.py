@@ -377,6 +377,22 @@ def main():
     poll_ready()
     print("  http probe: guest management server reachable")
 
+    # 1b. Capability declaration: this build has the management API but no
+    #     browser console, so it must advertise the VM panel and nothing else.
+    #     The declaration has to follow the build's features, or a frontend
+    #     would offer a terminal that this hypervisor cannot serve.
+    status, body = request("GET", "/api/manifest")
+    check("GET /api/manifest", status, 200)
+    check("GET /api/manifest proto", body.get("proto"), 1)
+    panels = body.get("panels")
+    if not isinstance(panels, list):
+        raise AssertionError("GET /api/manifest panels was not a list: %r" % (body,))
+    kinds = [panel.get("kind") for panel in panels]
+    check("GET /api/manifest panel kinds", kinds, ["vms"])
+    check("GET /api/manifest vms verbs", panels[0].get("verbs"), ["read", "write"])
+    status, _ = request("GET", "/api/consoles")
+    check("GET /api/consoles without browser-console", status, 404)
+
     # 2. List: the default VM (id 1) is registered and `Ready`.
     status, body = request("GET", "/api/vms")
     check("GET /api/vms", status, 200)

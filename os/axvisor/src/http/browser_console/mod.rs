@@ -1,4 +1,9 @@
-//! Board-hosted HTTP/WebSocket gateway for the startup network console lanes.
+//! Board-hosted HTTP/WebSocket gateway for the current network console lanes.
+//!
+//! The console set is a runtime registry (see [`crate::network_console`]): a VM
+//! gets its lane when it is created and loses it when it is removed, so
+//! `/api/consoles` changes while the hypervisor runs and a route that answered
+//! a moment ago can be gone.
 
 use anyhow::{Context, Result};
 use axum::{
@@ -81,7 +86,7 @@ async fn upgrade_console(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
-    validate_browser_origin(&headers)?;
+    super::validate_browser_origin(&headers)?;
     if !crate::network_console::has_console_route(&endpoint) {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -100,23 +105,6 @@ async fn upgrade_console(
             }
         })
         .into_response())
-}
-
-fn validate_browser_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .ok_or(StatusCode::FORBIDDEN)?;
-    let origin = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .ok_or(StatusCode::FORBIDDEN)?;
-
-    if origin == format!("http://{host}") || origin == format!("https://{host}") {
-        Ok(())
-    } else {
-        Err(StatusCode::FORBIDDEN)
-    }
 }
 
 async fn bridge_console(

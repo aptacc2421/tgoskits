@@ -3,6 +3,7 @@
 //! JSON is built with `serde_json::json!()` (no hand-written escaping). These
 //! handlers are dispatched by the TCP serving path in [`super::server`].
 
+#[cfg(feature = "fs")]
 use alloc::string::ToString;
 
 use axum::{Json, extract::Path, http::StatusCode};
@@ -36,7 +37,9 @@ pub async fn vm_detail(Path(id_str): Path<String>) -> Result<Json<Value>, Status
 /// `base.id`, and that id must not currently be registered. Because embedded
 /// images are matched by id (`memory_images_for_vm`), a config whose id has no
 /// embedded image fails with 500 — the runtime can only realize guest images
-/// that were baked into the hypervisor at build time.
+/// that were baked into the hypervisor at build time. An exhausted host resource
+/// (memory, or the browser console lane table of a `browser-console` build) is a
+/// 503, so a caller can tell "try later" from "this config is wrong".
 pub async fn vm_create(Json(payload): Json<Value>) -> Result<Json<Value>, StatusCode> {
     let toml = payload
         .get("toml")
@@ -57,7 +60,10 @@ pub async fn vm_create(Json(payload): Json<Value>) -> Result<Json<Value>, Status
         }
         Err(error) => {
             error!("HTTP: create VM[{id}] failed: {error:#}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            // Shared mapping so an exhausted host resource (memory, and the
+            // browser console lane table when `browser-console` is on) is a
+            // distinguishable 503 here exactly as it is on a start request.
+            Err(map_axvm_error(error))
         }
     }
 }
@@ -131,6 +137,11 @@ pub async fn vm_pool() -> Json<Value> {
 }
 
 /// `POST /api/vms/{id}/start` — start a VM.
+///
+/// An id that is not registered yet is created from its VM pool entry first
+/// (see [`Self::vm_pool`] and [`AxvmManager::ensure_registered`]), so a client
+/// can start what the pool lists without a separate create call. A full browser
+/// console lane table fails that creation with 503.
 pub async fn vm_start(Path(id_str): Path<String>) -> Result<Json<Value>, StatusCode> {
     vm_action(&id_str, VmAction::Start)
 }

@@ -154,7 +154,19 @@ pub fn init_guest_vm(raw_cfg: &str) -> Result<usize> {
     vm.prepare()
         .with_context(|| format!("prepare devices and vCPUs for VM[{vm_id}]"))?;
 
+    // Allocate the browser console lane before the VM becomes visible. A full
+    // lane table must fail this creation (the HTTP control plane reports it as
+    // 503) instead of producing a VM no browser can attach to; on that path the
+    // local handle is dropped, destroying the VM before it is ever registered.
+    #[cfg(feature = "browser-console")]
+    crate::network_console::register_guest(vm_id, &vm.name())
+        .with_context(|| format!("register browser console for VM[{vm_id}]"))?;
+
     if !axvm::register_vm(vm.clone()) {
+        // The id is taken after all: release the lane again so a rejected
+        // registration does not consume a console slot forever.
+        #[cfg(feature = "browser-console")]
+        crate::network_console::release_guest(vm_id);
         bail!("register VM[{vm_id}]: a VM with this ID already exists");
     }
 

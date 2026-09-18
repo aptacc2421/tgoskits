@@ -22,23 +22,34 @@ Environment (set by the generic runner):
 
 The case boots with no default guest and a pool directory holding three complete
 guest configs plus one unusable file, all injected into the guest filesystem by
-the `sh/` asset pipeline. The probe drives the whole pool → lifecycle contract in
-one boot:
+the `sh/` asset pipeline. The probe drives the whole browser control plane in one
+boot:
 
+    GET    /api/manifest           -> 200 vms + console + shell panels
+    GET    /api/consoles           -> 200, management console only (no guest yet)
     GET    /api/vms                -> 200 []          (nothing created at startup)
     GET    /api/vms/pool           -> 200             (3 entries + 1 issue, TOML verbatim)
     POST   /api/vms/99/start       -> 404             (neither registered nor pooled)
     POST   /api/vms/1/start        -> 200 running     (created on demand from its entry)
+    GET    /api/consoles           -> 200             (the new guest console appeared)
     POST   /api/vms/1/start        -> 409             (already running)
     POST   /api/vms/2/start        -> 200 running     (second guest starts beside the first)
     POST   /api/vms/3/start        -> 200 running
     GET    /api/vms                -> 200             (exactly the three, all running)
     GET    /api/vms/pool           -> 200             (entries survive being started)
-    DELETE /api/vms/2              -> 204             (close)
+    GET    /ws/events              -> 101 snapshot     (then created/removed frames)
+    DELETE /api/vms/2              -> 204             (close; a `removed` frame follows)
     GET    /api/vms/2              -> 404             (gone from the registry)
-    GET    /api/vms/pool           -> 200             (its entry is still a candidate)
-    POST   /api/vms/2/start        -> 200 running     (restart from the same entry)
-    DELETE /api/vms/{1,2,3}        -> 204             (close the rest)
+    GET    /api/consoles           -> 200             (its console lane is gone too)
+    POST   /api/vms/2/start        -> 200 running     (restart from the same entry,
+                                                       announced as `created`)
+    POST   /api/vms/create × 8     -> 200             (fill every guest console lane)
+    GET    /api/consoles           -> 200              (8 guests + management)
+    POST   /api/vms/1/start        -> 503             (no console lane left)
+    GET    /api/vms/1              -> 404             (and no half-created VM behind it)
+    DELETE /api/vms/{filler}       -> 204             (frees one lane)
+    POST   /api/vms/1/start        -> 200 running     (the freed lane is reusable)
+    DELETE /api/vms/{1,filler×7}   -> 204             (close everything)
     GET    /api/vms                -> 200 []          (registry empty again)
     GET    /api/vms/pool           -> 200             (pool unchanged throughout)
 
@@ -48,14 +59,22 @@ actually (re-)entered, so a start that merely flips a status without running the
 guest cannot pass. The pool listing is compared against the fixture files in
 `sh/` byte for byte, so a listing that invents or mangles configs cannot pass,
 and entries are matched by id rather than by position so the assertions do not
-depend on the directory's enumeration order.
+depend on the directory's enumeration order. The browser surfaces are checked
+against the registry rather than against each other: consoles must appear and
+disappear with the VM, the manifest must only declare panels this build can
+serve, and the event frames must follow the create/remove cycle.
 """
 
+import base64
 import json
 import os
+import select
+import socket
+import struct
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 BASE = os.environ.get("AXVISOR_HTTP_BASE", "http://127.0.0.1:8080").rstrip("/")
@@ -68,6 +87,9 @@ REQUEST_TIMEOUT = float(os.environ.get("AXVISOR_HTTP_REQUEST_TIMEOUT", "5"))
 # `timeout` (600s) so a stuck transition fails on the probe, not on QEMU.
 POLL_DEADLINE = 120.0
 POLL_INTERVAL = 1.0
+# The event watcher samples the registry every 250ms, so a frame can take a
+# moment to arrive; this is far above that and only bounds a broken channel.
+EVENT_TIMEOUT = 60.0
 
 # The pool entries the `sh/` pipeline injected, keyed by VM id.
 POOL_ENTRIES = {
@@ -76,6 +98,28 @@ POOL_ENTRIES = {
     3: "pool-guest-3.toml",
 }
 BROKEN_ENTRY = "pool-broken.toml"
+
+# Guest console lanes the build provides, excluding the management console. The
+# lane-limit phase fills all of them with cheap configs (a 16M guest region, no
+# device, never started) and then starts a pool entry to observe the refusal.
+GUEST_CONSOLE_LANES = 8
+FILLER_ID_BASE = 21
+# A filler only has to be created, never run: it exists to occupy one console
+# lane, so its region is far smaller than a bootable guest's.
+FILLER_TOML = """[base]
+id = {vm_id}
+name = "lane-filler-{vm_id}"
+cpu_num = 1
+phys_cpu_ids = [1]
+
+[kernel]
+entry_point = 0x8020_0000
+image_location = "fs"
+kernel_path = "/guest/arceos/arceos-ivc-publisher.bin"
+kernel_load_addr = 0x8020_0000
+dtb_load_addr = 0x8000_0000
+memory_regions = [[0x8000_0000, 0x1000000, 0x7, 0]]
+"""
 
 
 def request(method, path, body=None):
@@ -117,10 +161,10 @@ def get(path, label):
     """One GET, retried until the deadline.
 
     The management API runs on a single-threaded runtime *inside* the guest and
-    a start request creates the VM synchronously, so the server stops answering
-    while it reads a guest kernel image and builds the VM. A read that lands in
-    that window times out at the transport level; retrying keeps the probe
-    deterministic without turning a busy server into a failure.
+    a create or start request builds the VM synchronously, so the server stops
+    answering while it reads a guest kernel image and builds the VM. A read that
+    lands in that window times out at the transport level; retrying keeps the
+    probe deterministic without turning a busy server into a failure.
     """
     start = time.monotonic()
     while True:
@@ -238,6 +282,174 @@ def check_pool_issue(label, body):
     print("  pool http probe: %s -> %s reported as %r" % (label, BROKEN_ENTRY, issue["kind"]))
 
 
+def console_routes(label):
+    """Fetch `/api/consoles` as {route: display name}."""
+    status, body = get("/api/consoles", label)
+    expect_status(label, status, 200)
+    if not isinstance(body, list):
+        raise AssertionError("%s did not return a JSON array: %r" % (label, body))
+    routes = {}
+    for console in body:
+        if not isinstance(console, dict):
+            raise AssertionError("%s listed a non-object console: %r" % (label, console))
+        routes[console.get("route")] = console.get("name")
+    print("  pool http probe: %s -> %r" % (label, sorted(routes)))
+    return routes
+
+
+def check_manifest():
+    """Assert the capability declaration describes this build.
+
+    The case builds `http-axum` and `browser-console` together, so all three
+    panels must be declared, each with the verbs its routes implement. Every
+    declared panel is then checked against the route that backs it, so a
+    declaration that survives while its code path is dropped cannot pass — the
+    same assertions run against builds with fewer features in the
+    `http-control-plane` and `browser-console` cases.
+    """
+    status, body = get("/api/manifest", "GET /api/manifest")
+    expect_status("GET /api/manifest", status, 200)
+    if not isinstance(body, dict):
+        raise AssertionError("GET /api/manifest did not return an object: %r" % (body,))
+    check("manifest proto", body.get("proto"), 1)
+    panels = body.get("panels")
+    if not isinstance(panels, list):
+        raise AssertionError("manifest panels was not a list: %r" % (body,))
+    declared = {panel.get("kind"): panel.get("verbs") for panel in panels}
+    check("manifest panel kinds", sorted(declared), ["console", "shell", "vms"])
+    check("vms panel verbs", declared["vms"], ["read", "write"])
+    check("console panel verbs", declared["console"], ["read", "write", "stream"])
+    check("shell panel verbs", declared["shell"], ["read", "write", "stream"])
+    for kind, route in (("vms", "/api/vms"), ("console", "/api/consoles")):
+        if kind in declared:
+            status, _ = get(route, "%s backing route" % kind)
+            expect_status("%s panel backing route %s" % (kind, route), status, 200)
+    for panel in panels:
+        if not isinstance(panel.get("title"), str) or not panel["title"]:
+            raise AssertionError("manifest panel had no title: %r" % (panel,))
+
+
+class WebSocket:
+    """Small RFC 6455 client sufficient for the in-guest socket checks."""
+
+    def __init__(self, stream, buffered):
+        self.stream = stream
+        self.buffered = buffered
+
+    def recv_exact(self, length):
+        while len(self.buffered) < length:
+            chunk = self.stream.recv(length - len(self.buffered))
+            if not chunk:
+                raise AssertionError("WebSocket closed while receiving a frame")
+            self.buffered += chunk
+        output = self.buffered[:length]
+        self.buffered = self.buffered[length:]
+        return output
+
+    def recv_frame(self):
+        first, second = self.recv_exact(2)
+        opcode = first & 0x0F
+        length = second & 0x7F
+        if length == 126:
+            length = struct.unpack("!H", self.recv_exact(2))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", self.recv_exact(8))[0]
+        if second & 0x80:
+            mask = self.recv_exact(4)
+            payload = bytes(
+                byte ^ mask[index % 4]
+                for index, byte in enumerate(self.recv_exact(length))
+            )
+        else:
+            payload = self.recv_exact(length)
+        return opcode, payload
+
+    def close(self):
+        self.stream.close()
+
+
+def open_websocket(path):
+    """Upgrade one WebSocket route from the probe's own origin."""
+    parsed = urllib.parse.urlsplit(BASE)
+    host = parsed.hostname
+    port = parsed.port or 80
+    key = base64.b64encode(os.urandom(16)).decode("ascii")
+    stream = socket.create_connection((host, port), timeout=REQUEST_TIMEOUT)
+    stream.settimeout(REQUEST_TIMEOUT)
+    handshake = (
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s:%d\r\n"
+        "Origin: %s\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "Sec-WebSocket-Key: %s\r\n\r\n"
+    ) % (path, host, port, BASE, key)
+    stream.sendall(handshake.encode("ascii"))
+    response = b""
+    while b"\r\n\r\n" not in response:
+        chunk = stream.recv(4096)
+        if not chunk:
+            raise AssertionError("%s closed during the WebSocket upgrade" % path)
+        response += chunk
+    response_head, buffered = response.split(b"\r\n\r\n", 1)
+    if not response_head.startswith(b"HTTP/1.1 101"):
+        raise AssertionError("%s upgrade returned %r" % (path, response_head))
+    print("  pool http probe: %s upgrade -> 101" % path)
+    return WebSocket(stream, buffered)
+
+
+def expect_websocket(path):
+    """Assert one console route upgrades, then close it again.
+
+    This is the cheapest proof that a declared `console`/`shell` panel is backed
+    by a real socket in this build.
+    """
+    websocket = open_websocket(path)
+    websocket.close()
+
+
+def read_json_frame(websocket, deadline):
+    """Return the next frame decoded as JSON, or fail once `deadline` passes.
+
+    Waiting for readability with a short `select` rather than relying on the
+    socket timeout keeps a quiet channel a clear `TimeoutError` at the frame
+    boundary: the caller reports "no event arrived" instead of a transport
+    error, and a frame cannot be truncated by a timeout in the middle of it.
+    """
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError()
+        ready, _, _ = select.select([websocket.stream], [], [], min(remaining, 1.0))
+        if not ready:
+            continue
+        opcode, payload = websocket.recv_frame()
+        if opcode == 8:
+            raise AssertionError("event socket closed while waiting for a frame")
+        if opcode not in (1, 2):
+            raise AssertionError("event socket sent unexpected opcode %d" % opcode)
+        return json.loads(payload.decode("utf-8"))
+
+
+def expect_frame(predicate, description):
+    """Read frames until `predicate(frame)` holds, or fail on the deadline."""
+    deadline = time.monotonic() + EVENT_TIMEOUT
+    seen = []
+    while True:
+        try:
+            frame = read_json_frame(EVENTS_SOCKET, deadline)
+        except TimeoutError:
+            raise AssertionError(
+                "no event matched %s within %.0fs; frames seen: %r"
+                % (description, EVENT_TIMEOUT, seen)
+            )
+        seen.append(frame)
+        if predicate(frame):
+            print("  pool http probe: event %s -> %r" % (description, frame))
+            return frame
+
+
 def vm_status(body):
     if not isinstance(body, dict) or not isinstance(body.get("status"), str):
         raise AssertionError("VM detail response had no status: %r" % (body,))
@@ -312,6 +524,21 @@ def start_vm(vm_id, expected_body_status="running"):
     check_guest_ran(vm_id)
 
 
+def create_vm(toml):
+    """Create one VM from a TOML body, asserting it was accepted."""
+    status, body = request("POST", "/api/vms/create", body=json.dumps({"toml": toml}))
+    expect_status("POST /api/vms/create (id %s)" % _toml_id(toml), status, 200)
+    return body
+
+
+def _toml_id(toml):
+    """Read `base.id` out of a generated config for labelling only."""
+    for line in toml.splitlines():
+        if line.startswith("id = "):
+            return int(line.split("=", 1)[1].strip())
+    return "?"
+
+
 def close_vm(vm_id):
     """Close one guest: `delete` is the close action, not `stop`."""
     try:
@@ -360,12 +587,13 @@ def list_report(label):
     return report
 
 
-def main():
-    poll_ready()
+EVENTS_SOCKET = None
 
-    # Nothing in the pool is created at startup: the registry is empty and the
-    # pool is only a list of candidates.
+
+def phase_pool():
+    """The pool is a candidate list: nothing in it is created at startup."""
     check("VM registry at startup", list_report("GET /api/vms"), {})
+    check("console routes at startup", sorted(console_routes("GET /api/consoles")), ["axvisor"])
 
     pool = pool_body("GET /api/vms/pool")
     check("pool directory", pool["directory"], "/usr/bin")
@@ -376,13 +604,20 @@ def main():
     status, _ = request("POST", "/api/vms/99/start")
     expect_status("POST /api/vms/99/start", status, 404)
 
-    # Starting a pooled id creates it from its entry and boots it. The second
-    # call hits the running VM and reports the lifecycle conflict.
+
+def phase_lifecycle():
+    """Start-on-demand, duplicate start, coexistence, close and restart."""
     start_vm(1)
+    # The guest console lane follows the registry, not a startup snapshot.
+    routes = console_routes("GET /api/consoles after start 1")
+    check("console routes after start 1", sorted(routes), ["axvisor", "vm-1"])
+    check("guest console name", routes["vm-1"], "pool-guest-1")
+    # A declared console panel must be backed by a socket a browser can open.
+    expect_websocket("/ws/vm-1")
+
     status, _ = request("POST", "/api/vms/1/start")
     expect_status("POST /api/vms/1/start (running)", status, 409)
 
-    # A second and third candidate start beside the first one.
     start_vm(2)
     start_vm(3)
     check(
@@ -390,31 +625,120 @@ def main():
         list_report("GET /api/vms"),
         {1: "running", 2: "running", 3: "running"},
     )
+    check(
+        "three guest consoles",
+        sorted(console_routes("GET /api/consoles after starts")),
+        ["axvisor", "vm-1", "vm-2", "vm-3"],
+    )
 
     # Starting is not consuming: every entry is still a candidate.
     body = pool_body("GET /api/vms/pool after starts")
     check_pool_matches_fixtures("GET /api/vms/pool after starts", body)
 
+
+def phase_events():
+    """The event channel follows the same create/close cycle."""
+    global EVENTS_SOCKET
+    EVENTS_SOCKET = open_websocket("/ws/events")
+    snapshot = read_json_frame(EVENTS_SOCKET, time.monotonic() + EVENT_TIMEOUT)
+    check("event snapshot type", snapshot.get("type"), "snapshot")
+    check(
+        "event snapshot list",
+        {vm["id"]: vm["status"] for vm in snapshot.get("vms", [])},
+        {1: "running", 2: "running", 3: "running"},
+    )
+
     # Close one guest and start it again from the same entry: this is the
-    # repeated start/close cycle the pool exists for.
+    # repeated start/close cycle the pool exists for, observed through both the
+    # REST list and the event socket.
     close_vm(2)
+    expect_frame(
+        lambda frame: frame.get("type") == "removed" and frame.get("id") == 2,
+        "removed VM[2]",
+    )
     check(
         "registry after closing one guest",
         list_report("GET /api/vms after close"),
         {1: "running", 3: "running"},
     )
+    check(
+        "console routes after close",
+        sorted(console_routes("GET /api/consoles after close")),
+        ["axvisor", "vm-1", "vm-3"],
+    )
     body = pool_body("GET /api/vms/pool after close")
     check_pool_matches_fixtures("GET /api/vms/pool after close", body)
-    start_vm(2)
 
-    # Close the rest and confirm the registry empties while the pool survives.
+    start_vm(2)
+    expect_frame(
+        lambda frame: frame.get("type") == "created" and frame.get("id") == 2,
+        "created VM[2]",
+    )
+    EVENTS_SOCKET.close()
+    EVENTS_SOCKET = None
+
+
+def phase_lane_limit():
+    """A full console lane table refuses the start instead of hiding it."""
+    # Start from an empty registry so the lane arithmetic is exact: eight
+    # fillers take all eight guest lanes and the ninth guest is refused. The
+    # guests from the earlier phases have to go first, otherwise the fillers
+    # would consume the lanes they still hold.
+    for vm_id in (1, 2, 3):
+        close_vm(vm_id)
+    check(
+        "VM registry before filling the lanes",
+        list_report("GET /api/vms before filling lanes"),
+        {},
+    )
+
+    fillers = [FILLER_ID_BASE + index for index in range(GUEST_CONSOLE_LANES)]
+    for vm_id in fillers:
+        create_vm(FILLER_TOML.format(vm_id=vm_id))
+    check(
+        "console lanes are full",
+        len(console_routes("GET /api/consoles with full lanes")),
+        GUEST_CONSOLE_LANES + 1,
+    )
+
+    # Every lane is taken by a VM that never runs, so starting a pool entry has
+    # to fail with the resource-exhaustion status, and the failed creation must
+    # not leave the VM behind.
+    status, _ = request("POST", "/api/vms/1/start")
+    expect_status("POST /api/vms/1/start (no lane left)", status, 503)
+    status, _ = get("/api/vms/1", "VM[1] after the refused start")
+    expect_status("GET /api/vms/1 after the refused start", status, 404)
+
+    # Closing one guest frees exactly its lane for the next start.
+    close_vm(fillers[0])
+    start_vm(1)
+    check(
+        "console routes after the lane was freed",
+        sorted(console_routes("GET /api/consoles after freeing a lane")),
+        ["axvisor", "vm-1"] + ["vm-%d" % vm_id for vm_id in fillers[1:]],
+    )
+
     close_vm(1)
-    close_vm(3)
-    close_vm(2)
+    for vm_id in fillers[1:]:
+        close_vm(vm_id)
     check("VM registry after closing all guests", list_report("GET /api/vms after close all"), {})
+    check(
+        "console routes after closing all guests",
+        sorted(console_routes("GET /api/consoles after close all")),
+        ["axvisor"],
+    )
     body = pool_body("GET /api/vms/pool at the end")
     check_pool_matches_fixtures("GET /api/vms/pool at the end", body)
 
+
+def main():
+    poll_ready()
+    check_manifest()
+    expect_websocket("/ws/axvisor")
+    phase_pool()
+    phase_lifecycle()
+    phase_events()
+    phase_lane_limit()
     print("  pool http probe: PASS")
 
 

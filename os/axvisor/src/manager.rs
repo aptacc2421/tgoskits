@@ -123,8 +123,16 @@ impl AxvmManager {
     }
 
     /// Remove a VM by ID.
+    ///
+    /// The browser console lane belongs to the registry entry, so it is freed
+    /// with the entry: the next VM can take the slot, and the previous
+    /// occupant's console session is stopped first (see
+    /// [`crate::network_console::release_guest`]).
     pub fn remove_vm(vm_id: VMId) -> Option<AxVMRef> {
-        AxvmRuntime::remove_vm(vm_id)
+        let vm = AxvmRuntime::remove_vm(vm_id)?;
+        #[cfg(feature = "browser-console")]
+        crate::network_console::release_guest(vm_id);
+        Some(vm)
     }
 
     /// Run a closure with a VM by ID.

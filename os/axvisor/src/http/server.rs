@@ -5,15 +5,17 @@
 //! but dispatch and JSON construction are delegated to axum + serde_json.
 //!
 //! ```text
+//! GET    /api/manifest       → 200 {proto, panels} (any HTTP build)
 //! GET    /api/vms            → 200, JSON array (summary form)
 //! GET    /api/vms/pool       → 200 {directory, entries, issues} (fs feature)
 //! GET    /api/vms/{id}       → 200, JSON detail (with vcpu_states) | 404
-//! POST   /api/vms/create     → 200 {"id":N} | 400 | 409 | 500 (body {"toml": "..."})
+//! POST   /api/vms/create     → 200 {"id":N} | 400 | 409 | 500 | 503 (body {"toml": "..."})
 //! DELETE /api/vms/{id}       → 204 | 404 | 500
 //! POST   /api/vms/{id}/start  → 200 {"ok":true,"status":...} | 404 | 409 | 500 | 503
 //! POST   /api/vms/{id}/stop   → 200 {"ok":true,"status":...} | 404 | 409 | 503
 //! POST   /api/vms/{id}/pause  → 200 {"ok":true,"status":...} | 404 | 409 | 503
 //! POST   /api/vms/{id}/resume → 200 {"ok":true,"status":...} | 404 | 409 | 503
+//! GET    /ws/events          → 101, then registry change frames (browser-console)
 //! ```
 //!
 //! An id that is not registered yet may still be startable: with the `fs`
@@ -63,8 +65,9 @@ use axum::Router;
 
 #[cfg(feature = "http-axum")]
 use crate::http::vm;
+use axum::routing::get;
 #[cfg(feature = "http-axum")]
-use axum::{routing::get, routing::post};
+use axum::routing::post;
 
 #[cfg(feature = "browser-console")]
 static LISTENING: AtomicBool = AtomicBool::new(false);
@@ -80,6 +83,10 @@ impl Drop for ListeningGuard {
 }
 
 /// Assemble only the HTTP services selected by build features.
+///
+/// `/api/manifest` is registered here rather than in either sub-router because
+/// its whole purpose is to describe the combination: it is the one route that
+/// must answer in every HTTP build, including a `browser-console`-only one.
 pub fn router() -> Router {
     let router = Router::new();
 
@@ -89,7 +96,10 @@ pub fn router() -> Router {
     #[cfg(feature = "browser-console")]
     let router = router.merge(crate::http::browser_console::router());
 
-    router
+    #[cfg(feature = "browser-console")]
+    let router = router.merge(crate::http::events::router());
+
+    router.route("/api/manifest", get(crate::http::manifest::get_manifest))
 }
 
 #[cfg(feature = "http-axum")]

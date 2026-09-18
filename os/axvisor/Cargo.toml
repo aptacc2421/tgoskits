@@ -93,8 +93,10 @@ futures-util = { version = "0.3", optional = true, features = ["sink"] }
 serde_json = { version = "1", optional = true }
 # The runtime only enables the IO driver (`enable_io()`), so no `time` driver
 # and thus no `timerfd` syscall is needed. `rt` + `net` cover the manually
-# built current-thread runtime and `TcpListener`.
-tokio = { version = "1", optional = true, features = ["net", "rt"] }
+# built current-thread runtime and `TcpListener`; `sync` + `macros` add the
+# per-browser event channel and the `select!` that serves `/ws/events` and
+# watches for a client that closes the socket.
+tokio = { version = "1", optional = true, features = ["macros", "net", "rt", "sync"] }
 
 # System dependent modules provided by ArceOS.
 ax-api.workspace = true

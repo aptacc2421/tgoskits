@@ -1,9 +1,11 @@
-# The HTTP control plane over the VM pool: no default guest, the pool directory
-# is provisioned by the `sh/` asset pipeline, and the host-side probe drives
-# start/close cycles through the control API only. The point of the case is that
-# a client can learn what the pool offers and start, close and restart guests by
-# id without ever sending a config.
-features = ["ax-driver/nvme", "fs", "http-axum"]
+# The full browser control plane over the VM pool: no default guest, the pool
+# directory is provisioned by the `sh/` asset pipeline, and the host-side probe
+# drives start/close cycles through the control API only. The point of the case
+# is that a client can learn what the pool offers, start, close and restart
+# guests by id without ever sending a config, and that the browser-facing
+# surfaces (`/api/manifest`, `/api/consoles`, `/ws/events`) follow the VM
+# registry while all of that happens.
+features = ["ax-driver/nvme", "browser-console", "fs", "http-axum"]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
 vm_configs = []
