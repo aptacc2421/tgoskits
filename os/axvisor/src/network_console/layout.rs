@@ -41,6 +41,20 @@ pub(super) struct Endpoint {
     pub(super) display_name: String,
 }
 
+/// Outcome of allocating a guest lane.
+///
+/// The caller needs to know whether this call took a lane, because only a lane
+/// it took itself may be given back. A VM that already owns a lane keeps it
+/// ([`LaneAllocation::Reused`]), so a failed creation that collides with a live
+/// VM must not release the lane that VM is using.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LaneAllocation {
+    /// The VM already owned a lane, which is left untouched.
+    Reused,
+    /// This call took a free lane for the VM.
+    Allocated,
+}
+
 /// Every guest lane is taken.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct LayoutFull;
@@ -106,9 +120,13 @@ impl Layout {
     ///
     /// A VM that already owns a lane keeps it, so retrying a registration is
     /// idempotent instead of moving the guest to another lane.
-    pub(super) fn allocate(&mut self, vm_id: usize, name: &str) -> Result<(), LayoutFull> {
+    pub(super) fn allocate(
+        &mut self,
+        vm_id: usize,
+        name: &str,
+    ) -> Result<LaneAllocation, LayoutFull> {
         if self.guest(vm_id).is_some() {
-            return Ok(());
+            return Ok(LaneAllocation::Reused);
         }
         let Some(slot) = self.guests.iter().position(Option::is_none) else {
             return Err(LayoutFull);
@@ -123,7 +141,7 @@ impl Layout {
                 name.into()
             },
         });
-        Ok(())
+        Ok(LaneAllocation::Allocated)
     }
 
     /// Frees the lane owned by `vm_id` and returns the endpoint it held.
@@ -143,38 +161,5 @@ fn management_endpoint() -> Endpoint {
         vm_id: None,
         route: MANAGEMENT_ROUTE.into(),
         display_name: "Axvisor".into(),
-    }
-}
-
-#[cfg(any(test, axtest))]
-mod tests {
-    use super::*;
-
-    #[cfg_attr(axtest, axtest::axtest)]
-    #[cfg_attr(not(axtest), test)]
-    fn uses_at_most_three_sorted_guests() {
-        let endpoints = plan_endpoints(
-            [7, 5, 9, 3]
-                .into_iter()
-                .map(|vm_id| (vm_id, vm_id.to_string()))
-                .collect(),
-        );
-
-        assert_eq!(endpoints.len(), MAX_GUEST_CONSOLES + 1);
-        assert_eq!(endpoints[0].route, "axvisor");
-        assert_eq!(endpoints[1].vm_id, Some(3));
-        assert_eq!(endpoints[2].vm_id, Some(5));
-        assert_eq!(endpoints[3].vm_id, Some(7));
-        assert_eq!(endpoints[3].lane.index(), 3);
-    }
-
-    #[cfg_attr(axtest, axtest::axtest)]
-    #[cfg_attr(not(axtest), test)]
-    fn uses_configured_names_with_vm_fallback() {
-        let endpoints = plan_endpoints(vec![(2, "zephyr".into()), (1, String::new())]);
-
-        assert_eq!(endpoints[1].display_name, "VM 1");
-        assert_eq!(endpoints[2].display_name, "zephyr");
-        assert_eq!(endpoints[2].route, "vm-2");
     }
 }

@@ -61,7 +61,7 @@ export class ApiError extends Error {
   readonly detail: string
 
   constructor(status: number, detail: string) {
-    super(`HTTP ${status} · ${detail}`)
+    super(status === 0 ? detail : `HTTP ${status} · ${detail}`)
     this.name = 'ApiError'
     this.status = status
     this.detail = detail
@@ -70,6 +70,15 @@ export class ApiError extends Error {
 
 export function describeError(e: unknown): string {
   if (e instanceof ApiError) {
+    // Status 0 is the client's own marker for "the request never reached the
+    // hypervisor", which is a different situation from any HTTP rejection: the
+    // reader is not being told what the backend thinks, they are being told
+    // there is no backend to ask. That is what a stopped or restarted instance
+    // looks like from the dashboard, so say it instead of showing the browser's
+    // `Failed to fetch`.
+    if (e.status === 0) {
+      return '没有连上后端：连接中断，或后端已退出/正在重启。刷新页面；仍失败就重启实例。'
+    }
     // A body the backend did not fill in still has to read as a sentence: the
     // status code alone already identifies the failure class on this API.
     const detail = e.detail.length > 0 ? e.detail : STATUS_HINTS[e.status] ?? ''
@@ -131,7 +140,15 @@ export interface VmSummary {
 export interface VcpuState {
   id: number
   state: string
-  phys_cpu_set: number[]
+  /**
+   * CPU affinity as a **bitmask**, `null` when the vCPU is not pinned.
+   *
+   * The control plane reports AxVisor's `phys_cpu_set: Option<usize>` verbatim
+   * (`http/vm.rs`), so `0b10` means "Core 1" and nothing here is a list of ids.
+   * Decode it with `lib/vcpu.ts`; a `number[]` reading is a contract bug that
+   * throws at render time (`.join` on a number).
+   */
+  phys_cpu_set: number | null
 }
 
 /** `GET /api/vms/{id}`: the summary plus per-vCPU state and the progress counters. */
@@ -162,14 +179,16 @@ export interface PoolEntry {
   id: number
   name: string
   path: string
+  /** Directory this entry was read from, which is what a conflict is between. */
+  source: string
   /** The raw TOML of the entry, so a client can show or prefill it. */
   toml: string
 }
 
 /**
- * One file in the pool directory that cannot become a VM, with the reason the
- * scanner rejected it (`empty`, `invalid-toml`, `unreadable`, `duplicate-id`,
- * `missing-image`, `not-a-guest-config`, `directory-unavailable`).
+ * One file in the pool or browse listing that cannot become a VM, with the
+ * reason the scanner rejected it (`empty`, `invalid-toml`, `unreadable`,
+ * `duplicate-id`, `missing-image`, `directory-unavailable`).
  */
 export interface PoolIssue {
   kind: string
@@ -180,7 +199,27 @@ export interface PoolIssue {
 /** `GET /api/vms/pool` (`fs` builds only). */
 export interface PoolInfo {
   directory: string
+  /** Every directory the pool reads, in precedence order. */
+  sources: string[]
   entries: PoolEntry[]
+  issues: PoolIssue[]
+}
+
+/** One subdirectory of `GET /api/vms/browse`. */
+export interface BrowseDirectory {
+  name: string
+  path: string
+}
+
+/** `GET /api/vms/browse?path=...` (`fs` builds only). */
+export interface BrowseInfo {
+  path: string
+  /** Parent directory, or `null` at the filesystem root. */
+  parent: string | null
+  directories: BrowseDirectory[]
+  /** Startable `.toml` files in this directory. */
+  entries: PoolEntry[]
+  /** `.toml` files here that cannot become a VM, and unreadable directories. */
   issues: PoolIssue[]
 }
 
@@ -188,4 +227,10 @@ export interface PoolInfo {
 export interface ConsoleInfo {
   route: string
   name: string
+  /**
+   * Whether a browser already holds this lane. The lanes are exclusive, so this
+   * is the only way to tell an operator why their own socket was refused: a
+   * browser WebSocket hides the server's 409 behind an anonymous 1006.
+   */
+  attached: boolean
 }

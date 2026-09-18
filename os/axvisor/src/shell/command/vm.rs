@@ -248,7 +248,6 @@ fn start_single_vm(vm: axvm::AxVMRef) -> anyhow::Result<()> {
     // Validate state transition using helper function
     can_start_vm(status).map_err(anyhow::Error::msg)?;
     crate::manager::AxvmManager::start_vm(vm_id).with_context(|| format!("boot VM[{vm_id}]"))?;
-    crate::guest_console::mark_running(vm_id);
     Ok(())
 }
 
@@ -384,7 +383,6 @@ fn stop_vm_by_id(vm_id: usize, force: bool) {
             .with_context(|| format!("send shutdown request to VM[{vm_id}]"))
     }) {
         Some(Ok(_)) => {
-            crate::guest_console::mark_stopped(vm_id);
             println!("✓ VM[{}] stop signal sent successfully", vm_id);
             println!(
                 "  Note: vCPU threads will exit gracefully, VM status will transition to Stopped"
@@ -422,7 +420,6 @@ fn reset_vm_by_id(vm_id: usize) {
     println!("Resetting VM[{}]...", vm_id);
     match crate::manager::AxvmManager::reset_vm(vm_id) {
         Ok(()) => {
-            crate::guest_console::mark_running(vm_id);
             println!("✓ VM[{}] reset and started successfully", vm_id);
         }
         Err(err) => println!("✗ VM[{vm_id}] reset failed: {err:#}"),
@@ -563,7 +560,6 @@ fn resume_vm_by_id(vm_id: usize) {
 
     match result {
         Some(Ok(_)) => {
-            crate::guest_console::mark_running(vm_id);
             println!("✓ VM[{}] resumed successfully", vm_id);
         }
         Some(Err(err)) => {

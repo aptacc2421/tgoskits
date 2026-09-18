@@ -8,6 +8,17 @@
 import { useRef } from 'react'
 import { ApiError } from './types'
 
+/**
+ * Status used for "the request never reached the backend".
+ *
+ * `fetch` rejects with a plain `TypeError` when it cannot connect at all, which
+ * carries no status and reads as `Failed to fetch` in the UI. The client turns
+ * that into the same `ApiError` shape every caller already handles, with status
+ * 0 so `describeError` can name the situation instead of leaking the browser's
+ * wording.
+ */
+export const NO_RESPONSE_STATUS = 0
+
 export class ApiClient {
   get<T>(path: string, signal?: AbortSignal): Promise<T> {
     return this.request<T>('GET', path, undefined, signal)
@@ -19,7 +30,7 @@ export class ApiClient {
 
   /** `DELETE` returns 204 with an empty body, so the caller gets the status only. */
   async del(path: string, signal?: AbortSignal): Promise<number> {
-    const res = await fetch(path, { method: 'DELETE', signal })
+    const res = await send(() => fetch(path, { method: 'DELETE', signal }))
     if (!res.ok) throw await parseError(res)
     return res.status
   }
@@ -37,12 +48,29 @@ export class ApiClient {
       init.body = JSON.stringify(body)
     }
 
-    const res = await fetch(path, init)
+    const res = await send(() => fetch(path, init))
     if (!res.ok) throw await parseError(res)
     // A successful response with no body would break `res.json()`; the control
     // plane always answers with JSON on 2xx, so an empty body is treated as such.
     const text = await res.text()
     return (text.length > 0 ? JSON.parse(text) : undefined) as T
+  }
+}
+
+/**
+ * Runs one `fetch`, mapping a transport failure onto [`ApiError`] with
+ * [`NO_RESPONSE_STATUS`]. An aborted request keeps its own error: the caller
+ * cancelled it, so it is not a backend failure.
+ */
+async function send(request: () => Promise<Response>): Promise<Response> {
+  try {
+    return await request()
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error
+    if (error instanceof TypeError) {
+      throw new ApiError(NO_RESPONSE_STATUS, error.message)
+    }
+    throw error
   }
 }
 

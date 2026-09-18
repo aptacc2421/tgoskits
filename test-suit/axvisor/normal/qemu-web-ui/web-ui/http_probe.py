@@ -19,16 +19,25 @@ the default guest stays `Ready` until the probe starts it. The probe covers the
 contract a browser depends on, not a browser:
 
     GET    /                      -> 200   (dashboard shell; CSP + no-cache + nosniff)
-    GET    /assets/{hashed}       -> 200   (every asset the shell references; immutable)
+    GET    /assets/{hashed}       -> 200   (every asset the shell references and
+                                            every chunk + stylesheet those refer
+                                            to, all immutable; the graph has to
+                                            hold the lazy panel chunks and a
+                                            stylesheet)
     GET    /no-such-page          -> 404   (no SPA catch-all)
     GET    /assets/no-such.js     -> 404   (asset table is exact)
     <bundle>                      -> holds every endpoint the UI calls
     GET    /api/manifest          -> 200   (vms + console + shell panels)
-    GET    /api/consoles          -> 200   (management lane + the default VM's lane)
+    GET    /api/consoles          -> 200   (management lane + the default VM's lane,
+                                            each with a boolean `attached`)
     GET    /ws/axvisor            -> 101   (management shell: help output)
     GET    /ws/vm-1               -> 101   (guest lane greeting)
     GET    /ws/events             -> 101   (snapshot, then created/removed frames)
+    /ws/vm-1                      -> rejected input while the guest is stopped
     POST   /api/vms/1/start       -> 200   (guest really enters: guest_entry_count)
+    /ws/vm-1                      -> guest shell runs a typed command
+    POST   /api/vms/1/stop        -> 200   (guest settles, console lane kept,
+                                            input rejected again)
     DELETE /api/vms/1             -> 204   (registry, lane and event frame follow)
     POST   /api/vms/create        -> 200   (recreate from the fixture TOML)
     DELETE /api/vms/1             -> 204   (cleanup)
@@ -41,7 +50,7 @@ on the served asset, so they run without a browser.
 Environment (set by the generic runner):
 
     AXVISOR_HTTP_BASE            http://127.0.0.1:<host_port> (forwarded)
-    AXVISOR_HTTP_CASE_DIR        case directory holding `vm-memory.toml`
+    AXVISOR_HTTP_CASE_DIR        case directory holding `vm-linux-alpine.toml`
     AXVISOR_HTTP_CONNECT_TIMEOUT seconds for the initial reachability wait
     AXVISOR_HTTP_REQUEST_TIMEOUT seconds per HTTP request
 """
@@ -70,8 +79,29 @@ POLL_DEADLINE = 120.0
 POLL_INTERVAL = 1.0
 # The event watcher samples the registry every 250ms, so a frame takes a moment.
 EVENT_TIMEOUT = 60.0
+# The guest fixture boots a Linux kernel and a BusyBox initramfs; its shell
+# prompt is the precondition for the input check.
+GUEST_BOOT_DEADLINE = 90.0
 
-# The default guest (`web-ui/vm-memory.toml`), kept `Ready` by `no-auto-start`.
+# The guest shell writes this when it is ready for input; the status query on the
+# same line is what a terminal has to answer for line editing to proceed.
+GUEST_PROMPT = b"~ #"
+TERMINAL_STATUS_QUERY = b"\x1b[6n"
+TERMINAL_STATUS_REPLY = b"\x1b[1;1R"
+# Typed command whose result cannot be found in its own text: echoing the line
+# back contains `111*111`, never `12321`, so seeing `12321` proves the guest shell
+# evaluated it — not that the host echoed keystrokes somewhere.
+GUEST_INPUT_COMMAND = b"echo $((111*111))\r"
+GUEST_INPUT_RESULT = b"12321"
+# The lane tells a browser why a keystroke went nowhere while the guest is not
+# running. Silent rejection is what makes a working terminal look broken.
+GUEST_INPUT_REJECTED = b"is not running; input was dropped"
+# Second guest command and its result, used by the lane-isolation check. The
+# value cannot appear in the command text, so seeing it proves the guest ran it.
+GUEST_ISOLATION_COMMAND = b"echo $((222*222))\r"
+GUEST_ISOLATION_RESULT = b"49284"
+
+# The default guest (`web-ui/vm-linux-alpine.toml`), kept `Ready` by `no-auto-start`.
 DEFAULT_VM_ID = 1
 # Endpoints the dashboard bundle must contain: the UI is wired to them, so a
 # bundle that does not carry them cannot drive this build.
@@ -310,6 +340,26 @@ def expect_event(websocket, expected_type, vm_id, deadline, label):
             return frame
 
 
+def receive_until_prompt(websocket, timeout=REQUEST_TIMEOUT):
+    """Wait for the management shell prompt, whatever cwd it reports.
+
+    The shell prints `axvisor:<cwd>$ `, and the cwd is empty when the build has
+    no root filesystem, so a fixed marker would only match one of the two builds.
+    """
+    output = b""
+    deadline = time.monotonic() + timeout
+    while not re.search(rb"axvisor:[^\r\n]*\$ ", output):
+        if time.monotonic() >= deadline:
+            raise AssertionError("management shell prompt never arrived: %r" % (output[-200:],))
+        opcode, payload = websocket.recv_frame()
+        if opcode in (1, 2):
+            output += payload
+            continue
+        if opcode == 8:
+            raise AssertionError("WebSocket closed before the shell prompt")
+    return output
+
+
 def receive_until(websocket, marker, timeout=REQUEST_TIMEOUT):
     output = b""
     deadline = time.monotonic() + timeout
@@ -319,8 +369,62 @@ def receive_until(websocket, marker, timeout=REQUEST_TIMEOUT):
         opcode, payload = websocket.recv_frame()
         if opcode in (1, 2):
             output += payload
-        elif opcode == 8:
+            continue
+        if opcode == 8:
             raise AssertionError("WebSocket closed before output marker %r" % marker)
+    return output
+
+
+def receive_some(websocket, deadline):
+    """Next data frame, answering the terminal status query a shell may send.
+
+    BusyBox's line editor asks the *terminal* for the cursor position and waits
+    for the answer, so a console that never replies can look exactly like a
+    console whose input is broken.
+    """
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError("no console output arrived before the deadline")
+        ready, _, _ = select.select([websocket.stream], [], [], remaining)
+        if not ready:
+            continue
+        opcode, payload = websocket.recv_frame()
+        if opcode == 8:
+            raise AssertionError("the console closed before the output arrived")
+        if opcode not in (1, 2):
+            continue
+        if TERMINAL_STATUS_QUERY in payload:
+            websocket.send_binary(TERMINAL_STATUS_REPLY)
+        return payload
+
+
+def drain_available(websocket, seconds):
+    """Everything that arrives within `seconds`; an idle lane returns b""."""
+    out = b""
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return out
+        ready, _, _ = select.select([websocket.stream], [], [], remaining)
+        if not ready:
+            return out
+        opcode, payload = websocket.recv_frame()
+        if opcode in (1, 2):
+            out += payload
+
+
+def receive_output_until(websocket, marker, deadline, label):
+    """Accumulate console output until it contains `marker`, or fail."""
+    output = b""
+    while marker not in output:
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                "%s: %r never arrived; last output was %r" % (label, marker, output[-400:])
+            )
+        output += receive_some(websocket, deadline)
+    print("  web-ui probe: %s -> %r" % (label, marker.decode("utf-8", "replace")))
     return output
 
 
@@ -337,6 +441,45 @@ def console_routes(label):
         routes[console.get("route")] = console.get("name")
     print("  web-ui probe: %s -> %r" % (label, sorted(routes)))
     return routes
+
+
+def lane_attached(label, route):
+    """`attached` for one lane, checking the field on every reported console.
+
+    The dashboard needs this fact to explain a refused terminal: a browser
+    WebSocket hides the server's 409 (lane already taken) behind an anonymous
+    1006 close, so a missing or non-boolean field turns "close the other page"
+    back into "typing does nothing".
+    """
+    status, body = get("/api/consoles", label)
+    expect_status(label, status, 200)
+    if not isinstance(body, list):
+        raise AssertionError("%s did not return a JSON array: %r" % (label, body))
+    table = {}
+    for console in body:
+        if not isinstance(console, dict):
+            raise AssertionError("%s listed a non-object console: %r" % (label, console))
+        attached = console.get("attached")
+        if not isinstance(attached, bool):
+            raise AssertionError(
+                "%s reported attached=%r for lane %r"
+                % (label, attached, console.get("route"))
+            )
+        table[console.get("route")] = attached
+    if route not in table:
+        raise AssertionError("%s has no lane %r: %r" % (label, route, sorted(table)))
+    print("  web-ui probe: %s -> %s attached=%r" % (label, route, table[route]))
+    return table[route]
+
+
+def poll_lane_attached(label, route, expected, deadline):
+    """Wait until one lane reports `expected`; a released lane has to come back."""
+    while True:
+        if lane_attached(label, route) == expected:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError("%s never became attached=%r" % (label, expected))
+        time.sleep(POLL_INTERVAL)
 
 
 def poll_consoles_for(label, expected_routes, deadline):
@@ -412,10 +555,22 @@ def check_dashboard():
         for reference in asset_references(payload):
             if reference not in fetched:
                 pending.add(reference)
-    scripts = [path for path in fetched if path.endswith(".js")]
-    if not scripts:
-        raise AssertionError("the shell references no script")
+    scripts = sorted(path for path in fetched if path.endswith(".js"))
+    stylesheets = sorted(path for path in fetched if path.endswith(".css"))
+    # The panels are lazily imported chunks, so the graph always holds more than
+    # the shell script, and it always holds the stylesheet that comes with the
+    # terminal chunk. A graph without them means the crawl stopped following the
+    # bundle's references: the check would keep passing while covering almost
+    # nothing, which is worse than failing.
+    if len(scripts) < 2:
+        raise AssertionError(
+            "the shell is the only script in the asset graph: %r" % (scripts,)
+        )
+    if not stylesheets:
+        raise AssertionError("the asset graph carries no stylesheet")
     print("  web-ui probe: asset graph resolved -> %d files" % len(fetched))
+    for path in sorted(fetched):
+        print("  web-ui probe:   asset %s" % path)
 
     # No SPA catch-all: an unknown path keeps the router's 404, and the asset
     # table is exact rather than a directory listing.
@@ -454,14 +609,18 @@ def check_terminals():
     # The guest lane is named after the configured VM, not after its id: the
     # dashboard shows this string, so it has to come from the registry.
     check("guest lane name", routes["vm-1"], "linux-web-ui")
+    # Nothing has attached yet, so no lane may claim to be taken.
+    check("idle guest lane", lane_attached("GET /api/consoles (idle lanes)", "vm-1"), False)
 
     shell = expect_upgrade("/ws/axvisor", 101)
     receive_until(shell, b"Welcome to AxVisor Browser Shell!")
+    # A held lane is the one fact a refused browser cannot see for itself.
+    check("held management lane", lane_attached("GET /api/consoles (shell held)", "axvisor"), True)
     # A real command, not just a greeting: the web shell drives the same
     # interpreter as the board console, and its table must show the same VM the
     # REST list reports.
     shell.send_binary(b"vm list\r")
-    output = receive_until(shell, b"axvisor:$ ")
+    output = receive_until_prompt(shell)
     for marker in (b"VM ID", b"linux-web-ui"):
         if marker not in output:
             raise AssertionError("`vm list` output is missing %r: %r" % (marker, output))
@@ -496,6 +655,28 @@ def check_terminals():
 
 def check_lifecycle(events):
     """Drive the registry the dashboard renders, watching the event channel."""
+    # Attach before the guest starts: a console lane is live as soon as the VM
+    # exists, and the input check below needs the lane to be watching while the
+    # fixture guest boots and reaches its shell.
+    guest = expect_upgrade("/ws/vm-1", 101)
+    receive_until(guest, b"browser console attached to VM 1")
+    check(
+        "guest lane held",
+        lane_attached("GET /api/consoles (guest lane held)", "vm-1"),
+        True,
+    )
+
+    # The lane is open but the guest is still `Ready`: bytes typed now have no
+    # running guest to read them, and the browser has to be told that instead of
+    # seeing its keystrokes vanish.
+    guest.send_binary(b"x")
+    receive_output_until(
+        guest,
+        GUEST_INPUT_REJECTED,
+        time.monotonic() + REQUEST_TIMEOUT * 3,
+        "input rejected while the guest is stopped",
+    )
+
     status, body = request("POST", "/api/vms/%d/start" % DEFAULT_VM_ID)
     expect_status("POST /api/vms/1/start", status, 200)
     if body.get("ok") is not True:
@@ -523,6 +704,88 @@ def check_lifecycle(events):
             raise AssertionError("VM[1] never entered the guest: %r" % (detail,))
         time.sleep(POLL_INTERVAL)
 
+    # vCPU affinity is a *bitmask* (`Option<usize>` on the AxVisor side) and the
+    # fixture pins vCPU 0 to Core 1 (`phys_cpu_ids = [1]`), so the detail has to
+    # report 2 — not a CPU id, not a list. The dashboard decodes this mask; a
+    # `number[]` reading is what blanked the page.
+    vcpus = detail.get("vcpu_states")
+    if not isinstance(vcpus, list) or not vcpus:
+        raise AssertionError("GET /api/vms/1 reported no vcpu_states: %r" % (detail,))
+    masks = [vcpu.get("phys_cpu_set") for vcpu in vcpus]
+    for mask in masks:
+        if mask is not None and not isinstance(mask, int):
+            raise AssertionError("phys_cpu_set was %r, expected a bitmask or null" % (mask,))
+    check("vcpu affinity mask", masks[0], 2)
+
+    # Input path: bytes sent to the guest lane have to reach the guest's UART and
+    # be executed there. A start that only flips the VMM status leaves the
+    # console mux's own "running" set empty, which silently drops every byte a
+    # browser types — the queue accepts it and nobody answers.
+    receive_output_until(
+        guest, GUEST_PROMPT, time.monotonic() + GUEST_BOOT_DEADLINE, "guest shell prompt"
+    )
+    guest.send_binary(GUEST_INPUT_COMMAND)
+    receive_output_until(
+        guest, GUEST_INPUT_RESULT, time.monotonic() + GUEST_BOOT_DEADLINE, "guest ran typed command"
+    )
+
+    # Wiring: the management lane and a guest lane are two independent byte
+    # streams -- the dashboard shows them as separate panes, and a browser that
+    # reads one must never see the other's traffic. Both are attached at once
+    # here, which is the only way that claim can fail if routing is wrong.
+    shell = expect_upgrade("/ws/axvisor", 101)
+    receive_until_prompt(shell)
+    guest.send_binary(GUEST_ISOLATION_COMMAND)
+    receive_output_until(
+        guest,
+        GUEST_ISOLATION_RESULT,
+        time.monotonic() + GUEST_BOOT_DEADLINE,
+        "guest ran a second command with the management lane attached",
+    )
+    stray = drain_available(shell, 2.0)
+    if GUEST_ISOLATION_RESULT in stray:
+        raise AssertionError("guest output leaked into the management lane: %r" % (stray[-200:],))
+    shell.send_binary(b"vm list\r")
+    receive_output_until(
+        shell, b"VM ID", time.monotonic() + REQUEST_TIMEOUT * 3, "management lane lists VMs"
+    )
+    stray = drain_available(guest, 2.0)
+    if b"VM ID" in stray or b"linux-web-ui" in stray:
+        raise AssertionError("management output leaked into the guest lane: %r" % (stray[-200:],))
+    shell.close()
+    print("  web-ui probe: management and guest lanes carry separate streams")
+
+    # `stop` settles the guest but keeps it registered, so its console lane stays
+    # in place and input is still routed -- and still rejected. This is also the
+    # second proof of the rejection notice: it has to be re-armed by the
+    # successful input above, or the browser would hear nothing this time.
+    status, body = request("POST", "/api/vms/%d/stop" % DEFAULT_VM_ID)
+    expect_status("POST /api/vms/1/stop", status, 200)
+    deadline = time.monotonic() + POLL_DEADLINE
+    while True:
+        detail = vm_detail(DEFAULT_VM_ID, "GET /api/vms/1 (waiting for stop)")
+        if detail.get("status") == "stopped":
+            print("  web-ui probe: VM[1] stopped, console lane kept")
+            break
+        if time.monotonic() >= deadline:
+            raise AssertionError("VM[1] never stopped: %r" % (detail,))
+        time.sleep(POLL_INTERVAL)
+    guest.send_binary(b"x")
+    receive_output_until(
+        guest,
+        GUEST_INPUT_REJECTED,
+        time.monotonic() + REQUEST_TIMEOUT * 3,
+        "input rejected again after the guest stopped",
+    )
+
+    guest.close()
+    poll_lane_attached(
+        "GET /api/consoles (guest lane released)",
+        "vm-1",
+        False,
+        time.monotonic() + POLL_DEADLINE,
+    )
+
     status, _ = request("DELETE", "/api/vms/%d" % DEFAULT_VM_ID)
     expect_status("DELETE /api/vms/1", status, 204)
     expect_event(
@@ -536,7 +799,7 @@ def check_lifecycle(events):
 
 def check_recreate(events):
     """Recreate the default guest from the fixture, the way the panel does."""
-    with open(os.path.join(CASE_DIR, "vm-memory.toml"), "r", encoding="utf-8") as handle:
+    with open(os.path.join(CASE_DIR, "vm-linux-alpine.toml"), "r", encoding="utf-8") as handle:
         vm_config = handle.read()
     status, body = request(
         "POST", "/api/vms/create", json.dumps({"toml": vm_config})
