@@ -94,6 +94,21 @@ pub enum IssueKind {
     DuplicateId { id: usize, claimed_by: String },
 }
 
+impl IssueKind {
+    /// Stable token naming the kind, for machine readers such as the control
+    /// plane's JSON. The `Display` text is human-facing and may change; this
+    /// token is the part clients may match on.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DirectoryUnavailable(_) => "directory-unavailable",
+            Self::Unreadable(_) => "unreadable",
+            Self::Empty => "empty",
+            Self::InvalidToml(_) => "invalid-toml",
+            Self::DuplicateId { .. } => "duplicate-id",
+        }
+    }
+}
+
 impl core::fmt::Display for IssueKind {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -119,6 +134,11 @@ pub struct Issue {
 }
 
 impl Issue {
+    /// Path of the file that could not be used, or of the directory itself.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
     /// What is wrong with the reported path.
     pub fn kind(&self) -> &IssueKind {
         &self.kind

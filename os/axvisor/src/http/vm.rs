@@ -3,6 +3,8 @@
 //! JSON is built with `serde_json::json!()` (no hand-written escaping). These
 //! handlers are dispatched by the TCP serving path in [`super::server`].
 
+use alloc::string::ToString;
+
 use axum::{Json, extract::Path, http::StatusCode};
 use axvm::{AxVMRef, AxVmError, VmStatus, VmVcpuState};
 use axvmconfig::GuestConfig;
@@ -85,6 +87,49 @@ pub async fn vm_delete(Path(id_str): Path<String>) -> Result<StatusCode, StatusC
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `GET /api/vms/pool` — the configs a start request can create on demand.
+///
+/// The pool is the guest config directory named by the build config
+/// (`AXVISOR_VM_POOL`, see [`crate::vm_pool`]). It is not the VM registry: a
+/// pool entry is only a candidate and is created when a start request names its
+/// id. `entries` carries the raw TOML so a client can show or prefill a config,
+/// and `issues` reports every file in the directory that cannot become an entry
+/// (unreadable, empty, not a guest config, id claimed twice) instead of hiding
+/// it. `directory` is echoed so the client can tell "nothing provisioned" from
+/// "wrong directory".
+#[cfg(feature = "fs")]
+pub async fn vm_pool() -> Json<Value> {
+    let pool = crate::vm_pool::scan();
+    let entries: Vec<Value> = pool
+        .entries()
+        .iter()
+        .map(|entry| {
+            json!({
+                "id": entry.id(),
+                "name": entry.name(),
+                "path": entry.path(),
+                "toml": entry.toml(),
+            })
+        })
+        .collect();
+    let issues: Vec<Value> = pool
+        .issues()
+        .iter()
+        .map(|issue| {
+            json!({
+                "kind": issue.kind().as_str(),
+                "path": issue.path(),
+                "detail": issue.kind().to_string(),
+            })
+        })
+        .collect();
+    Json(json!({
+        "directory": pool.directory(),
+        "entries": entries,
+        "issues": issues,
+    }))
+}
+
 /// `POST /api/vms/{id}/start` — start a VM.
 pub async fn vm_start(Path(id_str): Path<String>) -> Result<Json<Value>, StatusCode> {
     vm_action(&id_str, VmAction::Start)
@@ -132,8 +177,26 @@ fn vm_action(id_str: &str, action: VmAction) -> Result<Json<Value>, StatusCode> 
     let Ok(id) = id_str.parse::<usize>() else {
         return Err(StatusCode::NOT_FOUND);
     };
-    // No existence pre-check: an unknown VM surfaces as `VmNotFound` from the
-    // action and maps to 404 below, keeping the check-then-act window closed.
+    // A start whose id is still only a pool candidate is created from its pool
+    // entry first, so the control plane can start what `GET /api/vms/pool`
+    // lists without a separate create call. Registered ids skip this and keep
+    // the runtime's own state errors, and an id in neither place stays a 404:
+    // the existence check only gates the create attempt.
+    #[cfg(feature = "fs")]
+    if matches!(action, VmAction::Start) && AxvmManager::vm_by_id(id).is_none() {
+        match AxvmManager::ensure_registered(id) {
+            Ok(true) => {}
+            Ok(false) => return Err(StatusCode::NOT_FOUND),
+            Err(error) => {
+                return Err(map_axvm_error(
+                    error.context(format!("create VM[{id}] from the VM pool")),
+                ));
+            }
+        }
+    }
+    // No existence pre-check for the registered case: an unknown VM surfaces as
+    // `VmNotFound` from the action and maps to 404 below, keeping the
+    // check-then-act window closed.
     // Restart-after-stop is not supported: a fresh vCPU task on an idled pinned
     // CPU is never scheduled (no IPI wake source), so `start_vm` would accept
     // the start and leave the VM stuck in `Running`. Reject it explicitly so the
