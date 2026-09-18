@@ -40,6 +40,7 @@ async fn console_descriptions() -> Json<Vec<Value>> {
                 json!({
                     "route": console.route,
                     "name": console.display_name,
+                    "attached": console.attached,
                 })
             })
             .collect(),

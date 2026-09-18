@@ -24,11 +24,13 @@ contract a browser depends on, not a browser:
     GET    /assets/no-such.js     -> 404   (asset table is exact)
     <bundle>                      -> holds every endpoint the UI calls
     GET    /api/manifest          -> 200   (vms + console + shell panels)
-    GET    /api/consoles          -> 200   (management lane + the default VM's lane)
+    GET    /api/consoles          -> 200   (management lane + the default VM's lane,
+                                            each with a boolean `attached`)
     GET    /ws/axvisor            -> 101   (management shell: help output)
     GET    /ws/vm-1               -> 101   (guest lane greeting)
     GET    /ws/events             -> 101   (snapshot, then created/removed frames)
     POST   /api/vms/1/start       -> 200   (guest really enters: guest_entry_count)
+    /ws/vm-1                      -> guest shell runs a typed command
     DELETE /api/vms/1             -> 204   (registry, lane and event frame follow)
     POST   /api/vms/create        -> 200   (recreate from the fixture TOML)
     DELETE /api/vms/1             -> 204   (cleanup)
@@ -70,6 +72,20 @@ POLL_DEADLINE = 120.0
 POLL_INTERVAL = 1.0
 # The event watcher samples the registry every 250ms, so a frame takes a moment.
 EVENT_TIMEOUT = 60.0
+# The guest fixture boots a Linux kernel and a BusyBox initramfs; its shell
+# prompt is the precondition for the input check.
+GUEST_BOOT_DEADLINE = 90.0
+
+# The guest shell writes this when it is ready for input; the status query on the
+# same line is what a terminal has to answer for line editing to proceed.
+GUEST_PROMPT = b"~ #"
+TERMINAL_STATUS_QUERY = b"\x1b[6n"
+TERMINAL_STATUS_REPLY = b"\x1b[1;1R"
+# Typed command whose result cannot be found in its own text: echoing the line
+# back contains `111*111`, never `12321`, so seeing `12321` proves the guest shell
+# evaluated it — not that the host echoed keystrokes somewhere.
+GUEST_INPUT_COMMAND = b"echo $((111*111))\r"
+GUEST_INPUT_RESULT = b"12321"
 
 # The default guest (`web-ui/vm-memory.toml`), kept `Ready` by `no-auto-start`.
 DEFAULT_VM_ID = 1
@@ -319,8 +335,46 @@ def receive_until(websocket, marker, timeout=REQUEST_TIMEOUT):
         opcode, payload = websocket.recv_frame()
         if opcode in (1, 2):
             output += payload
-        elif opcode == 8:
+            continue
+        if opcode == 8:
             raise AssertionError("WebSocket closed before output marker %r" % marker)
+    return output
+
+
+def receive_some(websocket, deadline):
+    """Next data frame, answering the terminal status query a shell may send.
+
+    BusyBox's line editor asks the *terminal* for the cursor position and waits
+    for the answer, so a console that never replies can look exactly like a
+    console whose input is broken.
+    """
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError("no console output arrived before the deadline")
+        ready, _, _ = select.select([websocket.stream], [], [], remaining)
+        if not ready:
+            continue
+        opcode, payload = websocket.recv_frame()
+        if opcode == 8:
+            raise AssertionError("the console closed before the output arrived")
+        if opcode not in (1, 2):
+            continue
+        if TERMINAL_STATUS_QUERY in payload:
+            websocket.send_binary(TERMINAL_STATUS_REPLY)
+        return payload
+
+
+def receive_output_until(websocket, marker, deadline, label):
+    """Accumulate console output until it contains `marker`, or fail."""
+    output = b""
+    while marker not in output:
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                "%s: %r never arrived; last output was %r" % (label, marker, output[-400:])
+            )
+        output += receive_some(websocket, deadline)
+    print("  web-ui probe: %s -> %r" % (label, marker.decode("utf-8", "replace")))
     return output
 
 
@@ -337,6 +391,45 @@ def console_routes(label):
         routes[console.get("route")] = console.get("name")
     print("  web-ui probe: %s -> %r" % (label, sorted(routes)))
     return routes
+
+
+def lane_attached(label, route):
+    """`attached` for one lane, checking the field on every reported console.
+
+    The dashboard needs this fact to explain a refused terminal: a browser
+    WebSocket hides the server's 409 (lane already taken) behind an anonymous
+    1006 close, so a missing or non-boolean field turns "close the other page"
+    back into "typing does nothing".
+    """
+    status, body = get("/api/consoles", label)
+    expect_status(label, status, 200)
+    if not isinstance(body, list):
+        raise AssertionError("%s did not return a JSON array: %r" % (label, body))
+    table = {}
+    for console in body:
+        if not isinstance(console, dict):
+            raise AssertionError("%s listed a non-object console: %r" % (label, console))
+        attached = console.get("attached")
+        if not isinstance(attached, bool):
+            raise AssertionError(
+                "%s reported attached=%r for lane %r"
+                % (label, attached, console.get("route"))
+            )
+        table[console.get("route")] = attached
+    if route not in table:
+        raise AssertionError("%s has no lane %r: %r" % (label, route, sorted(table)))
+    print("  web-ui probe: %s -> %s attached=%r" % (label, route, table[route]))
+    return table[route]
+
+
+def poll_lane_attached(label, route, expected, deadline):
+    """Wait until one lane reports `expected`; a released lane has to come back."""
+    while True:
+        if lane_attached(label, route) == expected:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError("%s never became attached=%r" % (label, expected))
+        time.sleep(POLL_INTERVAL)
 
 
 def poll_consoles_for(label, expected_routes, deadline):
@@ -454,9 +547,13 @@ def check_terminals():
     # The guest lane is named after the configured VM, not after its id: the
     # dashboard shows this string, so it has to come from the registry.
     check("guest lane name", routes["vm-1"], "linux-web-ui")
+    # Nothing has attached yet, so no lane may claim to be taken.
+    check("idle guest lane", lane_attached("GET /api/consoles (idle lanes)", "vm-1"), False)
 
     shell = expect_upgrade("/ws/axvisor", 101)
     receive_until(shell, b"Welcome to AxVisor Browser Shell!")
+    # A held lane is the one fact a refused browser cannot see for itself.
+    check("held management lane", lane_attached("GET /api/consoles (shell held)", "axvisor"), True)
     # A real command, not just a greeting: the web shell drives the same
     # interpreter as the board console, and its table must show the same VM the
     # REST list reports.
@@ -496,6 +593,17 @@ def check_terminals():
 
 def check_lifecycle(events):
     """Drive the registry the dashboard renders, watching the event channel."""
+    # Attach before the guest starts: a console lane is live as soon as the VM
+    # exists, and the input check below needs the lane to be watching while the
+    # fixture guest boots and reaches its shell.
+    guest = expect_upgrade("/ws/vm-1", 101)
+    receive_until(guest, b"browser console attached to VM 1")
+    check(
+        "guest lane held",
+        lane_attached("GET /api/consoles (guest lane held)", "vm-1"),
+        True,
+    )
+
     status, body = request("POST", "/api/vms/%d/start" % DEFAULT_VM_ID)
     expect_status("POST /api/vms/1/start", status, 200)
     if body.get("ok") is not True:
@@ -522,6 +630,39 @@ def check_lifecycle(events):
         if time.monotonic() >= deadline:
             raise AssertionError("VM[1] never entered the guest: %r" % (detail,))
         time.sleep(POLL_INTERVAL)
+
+    # vCPU affinity is a *bitmask* (`Option<usize>` on the AxVisor side) and the
+    # fixture pins vCPU 0 to Core 1 (`phys_cpu_ids = [1]`), so the detail has to
+    # report 2 — not a CPU id, not a list. The dashboard decodes this mask; a
+    # `number[]` reading is what blanked the page.
+    vcpus = detail.get("vcpu_states")
+    if not isinstance(vcpus, list) or not vcpus:
+        raise AssertionError("GET /api/vms/1 reported no vcpu_states: %r" % (detail,))
+    masks = [vcpu.get("phys_cpu_set") for vcpu in vcpus]
+    for mask in masks:
+        if mask is not None and not isinstance(mask, int):
+            raise AssertionError("phys_cpu_set was %r, expected a bitmask or null" % (mask,))
+    check("vcpu affinity mask", masks[0], 2)
+
+    # Input path: bytes sent to the guest lane have to reach the guest's UART and
+    # be executed there. A start that only flips the VMM status leaves the
+    # console mux's own "running" set empty, which silently drops every byte a
+    # browser types — the queue accepts it and nobody answers.
+    receive_output_until(
+        guest, GUEST_PROMPT, time.monotonic() + GUEST_BOOT_DEADLINE, "guest shell prompt"
+    )
+    guest.send_binary(GUEST_INPUT_COMMAND)
+    receive_output_until(
+        guest, GUEST_INPUT_RESULT, time.monotonic() + GUEST_BOOT_DEADLINE, "guest ran typed command"
+    )
+
+    guest.close()
+    poll_lane_attached(
+        "GET /api/consoles (guest lane released)",
+        "vm-1",
+        False,
+        time.monotonic() + POLL_DEADLINE,
+    )
 
     status, _ = request("DELETE", "/api/vms/%d" % DEFAULT_VM_ID)
     expect_status("DELETE /api/vms/1", status, 204)

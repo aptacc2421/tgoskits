@@ -91,6 +91,11 @@ export default function ConsolePanel({ api, resources = [], focusVm = null }: Pa
                 )}
               >
                 {console.name}
+                {console.attached && (
+                  <span className="ml-1 text-amber-400" title="已被另一个浏览器页面占用">
+                    ●
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -108,6 +113,7 @@ export default function ConsolePanel({ api, resources = [], focusVm = null }: Pa
                 path={endpoints.terminal(console.route)}
                 title={console.name}
                 subtitle={endpoints.terminal(console.route)}
+                occupied={console.attached}
               />
             </div>
           ))}

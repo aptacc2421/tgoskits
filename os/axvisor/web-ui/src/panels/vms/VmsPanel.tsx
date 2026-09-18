@@ -38,6 +38,7 @@ import {
   type VmStatus,
   type VmSummary,
 } from '@/api/types'
+import { describeCpuAffinity } from '@/lib/vcpu'
 import { endpoints } from '@/api/endpoints'
 import {
   countersOf,
@@ -289,7 +290,7 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
             <ul className="flex flex-wrap gap-2">
               {(detail.vcpu_states ?? []).map((vcpu) => (
                 <li key={vcpu.id} className="rounded border px-2 py-1 font-mono text-xs">
-                  vCPU {vcpu.id} · {vcpu.state} · 物理 CPU {vcpu.phys_cpu_set.join(',') || '-'}
+                  vCPU {vcpu.id} · {vcpu.state} · 物理 {describeCpuAffinity(vcpu.phys_cpu_set)}
                 </li>
               ))}
             </ul>

@@ -1,13 +1,9 @@
 //! WebSocket plumbing shared by the VM registry feed and every terminal.
 //!
-//! Two rules come from the axvisor side and shape this module:
-//!
-//! - a console socket accepts at most 4096 bytes per frame
-//!   (`BROWSER_INPUT_CAPACITY`), so user input is chunked on **character**
-//!   boundaries — a multi-byte character must not be split across frames;
-//! - a browser WebSocket reports every failed handshake as 1006, so "this lane
-//!   is already taken" (the server's 409) is discovered with a plain `fetch`
-//!   probe against the same route before upgrading.
+//! One rule comes from the axvisor side and shapes this module: a console socket
+//! accepts at most 4096 bytes per frame (`BROWSER_INPUT_CAPACITY`), so user
+//! input is chunked on **character** boundaries — a multi-byte character must
+//! not be split across frames.
 
 /** Same-origin `ws(s)` URL: no token, no query, no build-time host. */
 export function wsUrl(path: string): string {
@@ -15,13 +11,7 @@ export function wsUrl(path: string): string {
   return `${scheme}//${location.host}${path}`
 }
 
-/** The `http(s)` form of the same route, for the pre-upgrade probe. */
-function httpUrl(path: string): string {
-  const scheme = location.protocol === 'https:' ? 'https:' : 'http:'
-  return `${scheme}//${location.host}${path}`
-}
-
-export type SocketStatus = 'connecting' | 'open' | 'busy' | 'closed'
+export type SocketStatus = 'connecting' | 'open' | 'closed'
 
 export interface SocketHandlers {
   /** Decoded text of one data frame (the console lanes send binary frames). */
@@ -71,20 +61,8 @@ export class ConsoleSocket {
     this.socket = null
   }
 
-  private async connect(): Promise<void> {
+  private connect(): void {
     this.handlers.onStatus('connecting')
-
-    try {
-      const probe = await fetch(httpUrl(this.path))
-      if (probe.status === 409) {
-        // The lane exists but someone else holds it: the console lanes are exclusive.
-        this.handlers.onStatus('busy', '该终端已被占用（独占订阅）')
-        return
-      }
-    } catch {
-      // A failed probe (the server may be restarting) must not block the upgrade
-      // attempt: let the WebSocket report its own error.
-    }
     if (this.closedByUs) return
 
     const socket = new WebSocket(wsUrl(this.path))
@@ -99,6 +77,10 @@ export class ConsoleSocket {
           : this.decoder.decode(event.data as ArrayBuffer, { stream: true })
       this.handlers.onData(text)
     }
+    // A browser WebSocket reports every failed handshake — including the
+    // server's 409 for a lane that is already taken — as an anonymous 1006
+    // close. `GET /api/consoles` is where the client learns whether that is
+    // what happened; this socket only reports that it is down.
     socket.onerror = () => {
       if (!this.closedByUs) this.handlers.onStatus('closed', '连接错误')
     }

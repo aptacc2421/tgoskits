@@ -17,7 +17,6 @@ import { cn } from '@/lib/utils'
 const STATUS_TEXT: Record<SocketStatus, string> = {
   connecting: '连接中…',
   open: '已连接',
-  busy: '已被占用',
   closed: '已断开',
 }
 
@@ -28,10 +27,16 @@ export interface TerminalViewProps {
   title: string
   /** Extra description next to the title (the console's display name). */
   subtitle?: string
+  /**
+   * `GET /api/consoles` says another browser holds this lane. The lanes are
+   * exclusive, so the socket below will simply fail; saying why up front is the
+   * difference between "input does nothing" and "close the other page".
+   */
+  occupied?: boolean
   className?: string
 }
 
-export function TerminalView({ path, title, subtitle, className }: TerminalViewProps) {
+export function TerminalView({ path, title, subtitle, occupied, className }: TerminalViewProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const [status, setStatus] = useState<SocketStatus>('connecting')
   const [detail, setDetail] = useState<string | null>(null)
@@ -130,9 +135,9 @@ export function TerminalView({ path, title, subtitle, className }: TerminalViewP
         </div>
       </div>
 
-      {status === 'busy' && (
-        <p className="bg-red-950/60 px-2 py-1 text-xs text-red-300">
-          {detail ?? '该终端已被占用（独占订阅）'}
+      {occupied && status !== 'open' && (
+        <p className="bg-amber-950/60 px-2 py-1 text-xs text-amber-300">
+          该终端通道已被另一个浏览器页面占用（通道为独占订阅）。关闭占用它的页面后点「重连」。
         </p>
       )}
       {status === 'closed' && detail && (

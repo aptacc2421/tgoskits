@@ -191,7 +191,7 @@ def check_gateway():
     status, body = get("/api/consoles")
     expect_status("GET /api/consoles", status, 200)
     consoles = json.loads(body.decode("utf-8"))
-    expected = [{"route": "axvisor", "name": "Axvisor"}]
+    expected = [{"route": "axvisor", "name": "Axvisor", "attached": False}]
     if consoles != expected:
         raise AssertionError("console snapshot returned %r, expected %r" % (consoles, expected))
 

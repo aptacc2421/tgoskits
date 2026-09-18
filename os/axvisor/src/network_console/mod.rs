@@ -340,20 +340,28 @@ pub(crate) fn has_console_route(route: &str) -> bool {
 }
 
 /// Browser-visible console descriptors for the current VM set.
+///
+/// `attached` reports whether a browser session already holds the lane. The
+/// lanes are exclusive, so a client that wants to explain its own failed
+/// WebSocket upgrade needs this fact: the browser API hides the server's 409
+/// behind an anonymous 1006 close, and a non-upgrade request never reaches the
+/// upgrade handler at all.
 pub(crate) fn console_descriptions() -> Vec<ConsoleDescription> {
     endpoints()
         .into_iter()
         .map(|endpoint| ConsoleDescription {
             route: endpoint.route,
             display_name: endpoint.display_name,
+            attached: OUTPUT_HUB.is_connected(endpoint.lane),
         })
         .collect()
 }
 
-/// One console entry returned to the embedded browser page.
+/// One console entry as the control plane reports it.
 pub(crate) struct ConsoleDescription {
     pub(crate) route: String,
     pub(crate) display_name: String,
+    pub(crate) attached: bool,
 }
 
 /// Copies Axvisor shell bytes into its fixed browser queue.

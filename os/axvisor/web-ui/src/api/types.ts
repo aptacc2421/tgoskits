@@ -131,7 +131,15 @@ export interface VmSummary {
 export interface VcpuState {
   id: number
   state: string
-  phys_cpu_set: number[]
+  /**
+   * CPU affinity as a **bitmask**, `null` when the vCPU is not pinned.
+   *
+   * The control plane reports AxVisor's `phys_cpu_set: Option<usize>` verbatim
+   * (`http/vm.rs`), so `0b10` means "Core 1" and nothing here is a list of ids.
+   * Decode it with `lib/vcpu.ts`; a `number[]` reading is a contract bug that
+   * throws at render time (`.join` on a number).
+   */
+  phys_cpu_set: number | null
 }
 
 /** `GET /api/vms/{id}`: the summary plus per-vCPU state and the progress counters. */
@@ -169,7 +177,7 @@ export interface PoolEntry {
 /**
  * One file in the pool directory that cannot become a VM, with the reason the
  * scanner rejected it (`empty`, `invalid-toml`, `unreadable`, `duplicate-id`,
- * `missing-image`, `not-a-guest-config`, `directory-unavailable`).
+ * `missing-image`, `directory-unavailable`).
  */
 export interface PoolIssue {
   kind: string
@@ -188,4 +196,10 @@ export interface PoolInfo {
 export interface ConsoleInfo {
   route: string
   name: string
+  /**
+   * Whether a browser already holds this lane. The lanes are exclusive, so this
+   * is the only way to tell an operator why their own socket was refused: a
+   * browser WebSocket hides the server's 409 behind an anonymous 1006.
+   */
+  attached: boolean
 }
