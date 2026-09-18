@@ -48,6 +48,8 @@ mod virq_regression;
 mod vm_events;
 #[cfg(feature = "fs")]
 mod vm_pool;
+#[cfg(feature = "web-ui")]
+mod web;
 
 /// Axvisor kernel entry point.
 ///

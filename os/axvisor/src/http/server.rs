@@ -99,6 +99,12 @@ pub fn router() -> Router {
     #[cfg(feature = "browser-console")]
     let router = router.merge(crate::http::events::router());
 
+    // The dashboard owns `/` and `/assets/*`. When the feature is off those paths
+    // simply stay unregistered, which is how a console-gateway-only or API-only
+    // build keeps its own 404 instead of serving half a UI.
+    #[cfg(feature = "web-ui")]
+    let router = router.merge(crate::web::router());
+
     router.route("/api/manifest", get(crate::http::manifest::get_manifest))
 }
 
