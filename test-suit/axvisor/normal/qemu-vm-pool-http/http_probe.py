@@ -29,6 +29,11 @@ boot:
     GET    /api/consoles           -> 200, management console only (no guest yet)
     GET    /api/vms                -> 200 []          (nothing created at startup)
     GET    /api/vms/pool           -> 200             (3 entries + 1 issue, TOML verbatim)
+    GET    /api/vms/browse         -> 200             (folders are folders, `/usr/bin` is startable)
+    GET    /api/vms/browse         -> 200             (a missing folder is an empty listing + reason)
+    POST   /api/vms/create         -> 400             (a config path that does not exist)
+    POST   /api/vms/pool           -> 400             (a name that would escape the directory)
+    POST   /api/vms/pool           -> 400             (text that is not a guest config)
     POST   /api/vms/99/start       -> 404             (neither registered nor pooled)
     POST   /api/vms/1/start        -> 200 running     (created on demand from its entry)
     GET    /api/consoles           -> 200             (the new guest console appeared)
@@ -222,7 +227,7 @@ def pool_body(label):
     expect_status(label, status, 200)
     if not isinstance(body, dict):
         raise AssertionError("%s did not return a JSON object: %r" % (label, body))
-    for field in ("directory", "entries", "issues"):
+    for field in ("directory", "sources", "entries", "issues"):
         if field not in body:
             raise AssertionError("%s had no %s field: %r" % (label, field, body))
     if not isinstance(body["entries"], list) or not isinstance(body["issues"], list):
@@ -246,9 +251,16 @@ def check_pool_matches_fixtures(label, body):
         )
     for vm_id, fixture in POOL_ENTRIES.items():
         entry = entries[vm_id]
-        for field in ("id", "name", "path", "toml"):
+        for field in ("id", "name", "path", "toml", "source"):
             if field not in entry:
                 raise AssertionError("%s entry %d had no %s: %r" % (label, vm_id, field, entry))
+        # Every entry says which folder it came from, which is what makes a
+        # config in the second folder traceable instead of anonymous.
+        if entry["source"] != body["directory"]:
+            raise AssertionError(
+                "%s entry %d came from %r, expected %r"
+                % (label, vm_id, entry["source"], body["directory"])
+            )
         expected_toml = fixture_text(fixture)
         if entry["toml"] != expected_toml:
             raise AssertionError(
@@ -280,6 +292,93 @@ def check_pool_issue(label, body):
     if not isinstance(issue.get("detail"), str) or not issue["detail"]:
         raise AssertionError("%s issue had no detail text: %r" % (label, issue))
     print("  pool http probe: %s -> %s reported as %r" % (label, BROKEN_ENTRY, issue["kind"]))
+
+
+def check_folder_browsing():
+    """Browsing lists folders as folders and configs as parsed candidates.
+
+    Both halves matter: a folder reported as an unreadable file is a browse that
+    cannot be walked, and a config listed as a folder is a browse that cannot be
+    used. A directory that is not there is a visible empty listing with a reason,
+    not a failed request.
+    """
+    status, body = get("/api/vms/browse?path=/usr", "GET /api/vms/browse?path=/usr")
+    expect_status("GET /api/vms/browse?path=/usr", status, 200)
+    check("browse path", body.get("path"), "/usr")
+    check("browse parent", body.get("parent"), "/")
+    listed = {item.get("path"): item.get("name") for item in body.get("directories", [])}
+    if "/usr/bin" not in listed:
+        raise AssertionError("browse did not list /usr/bin as a folder: %r" % (body,))
+    for issue in body.get("issues", []):
+        if issue.get("path") == "/usr/bin":
+            raise AssertionError(
+                "browse reported the pool folder as unusable (%s): %r"
+                % (issue.get("kind"), issue)
+            )
+    print("  pool http probe: GET /api/vms/browse?path=/usr -> %r" % sorted(listed))
+
+    # The pool folder itself holds the case's fixtures, so browsing it must
+    # offer the same startable ids the pool lists.
+    status, body = get("/api/vms/browse?path=/usr/bin", "GET /api/vms/browse?path=/usr/bin")
+    expect_status("GET /api/vms/browse?path=/usr/bin", status, 200)
+    check("browse has no subdirectories", body.get("directories"), [])
+    check(
+        "browse lists the pooled ids",
+        sorted(entry.get("id") for entry in body.get("entries", [])),
+        sorted(POOL_ENTRIES),
+    )
+    check(
+        "browse reports the unusable file",
+        sorted(issue.get("kind") for issue in body.get("issues", [])),
+        ["invalid-toml"],
+    )
+
+    status, body = get(
+        "/api/vms/browse?path=/no/such/directory",
+        "GET /api/vms/browse?path=/no/such/directory",
+    )
+    expect_status("GET /api/vms/browse?path=/no/such/directory", status, 200)
+    check("absent folder has no entries", body.get("entries"), [])
+    check(
+        "absent folder reports why",
+        [issue.get("kind") for issue in body.get("issues", [])],
+        ["directory-unavailable"],
+    )
+
+
+def check_config_inputs():
+    """Creating from a path and writing to the pool reject what they cannot use.
+
+    Only refusals are exercised here: a valid save would add a file to the case's
+    pool directory and change what every later phase lists, and the accepted path
+    is already covered by `sh/` provisioning. The refusals are the part that must
+    not regress — a config path that is not there and a pool name that could
+    escape its directory alike have to be errors.
+    """
+    status, _ = request(
+        "POST", "/api/vms/create", json.dumps({"path": "/no/such/config.toml"})
+    )
+    expect_status("POST /api/vms/create (absent path)", status, 400)
+
+    # A directory is not a config either: the path form reads a file.
+    status, _ = request("POST", "/api/vms/create", json.dumps({"path": "/usr/bin"}))
+    expect_status("POST /api/vms/create (directory path)", status, 400)
+
+    status, _ = request("POST", "/api/vms/create", json.dumps({}))
+    expect_status("POST /api/vms/create (no body fields)", status, 400)
+
+    valid_toml = fixture_text(POOL_ENTRIES[1])
+    for name in ("", "guest", "../escape.toml", ".hidden.toml"):
+        status, _ = request(
+            "POST", "/api/vms/pool", json.dumps({"name": name, "toml": valid_toml})
+        )
+        expect_status("POST /api/vms/pool (name %r)" % name, status, 400)
+    status, _ = request(
+        "POST",
+        "/api/vms/pool",
+        json.dumps({"name": "broken.toml", "toml": "base = { id = 1,"}),
+    )
+    expect_status("POST /api/vms/pool (unparsable toml)", status, 400)
 
 
 def console_routes(label):
@@ -597,8 +696,11 @@ def phase_pool():
 
     pool = pool_body("GET /api/vms/pool")
     check("pool directory", pool["directory"], "/usr/bin")
+    check("pool folders", pool["sources"], ["/usr/bin"])
     check_pool_matches_fixtures("GET /api/vms/pool", pool)
     check_pool_issue("GET /api/vms/pool", pool)
+    check_folder_browsing()
+    check_config_inputs()
 
     # An id that is neither registered nor pooled is unknown, not created.
     status, _ = request("POST", "/api/vms/99/start")

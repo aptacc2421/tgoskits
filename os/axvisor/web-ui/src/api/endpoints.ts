@@ -20,7 +20,11 @@ export const endpoints = {
   vm: (id: number) => `/api/vms/${id}`,
   /** Pool directory scan; only an `fs` build answers it. */
   pool: '/api/vms/pool',
-  /** Create a guest from a TOML document. */
+  /** Store a pasted config as a pool file (`POST`, `fs` builds only). */
+  poolSave: '/api/vms/pool',
+  /** Browse one directory of the guest filesystem (`fs` builds only). */
+  browse: (path: string) => `/api/vms/browse?path=${encodeURIComponent(path)}`,
+  /** Create a guest from a TOML document or from a config path. */
   create: '/api/vms/create',
   /** Lifecycle action on an existing guest. */
   action: (id: number, action: VmAction) => `/api/vms/${id}/${action}`,

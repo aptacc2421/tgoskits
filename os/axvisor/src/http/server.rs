@@ -7,9 +7,11 @@
 //! ```text
 //! GET    /api/manifest       → 200 {proto, panels} (any HTTP build)
 //! GET    /api/vms            → 200, JSON array (summary form)
-//! GET    /api/vms/pool       → 200 {directory, entries, issues} (fs feature)
+//! GET    /api/vms/pool       → 200 {directory, sources, entries, issues} (fs feature)
+//! POST   /api/vms/pool       → 200 {"path":"..."} | 400 | 500 (body {"name":"g.toml","toml":"..."})
+//! GET    /api/vms/browse     → 200 {path, parent, directories, entries, issues} (fs feature)
 //! GET    /api/vms/{id}       → 200, JSON detail (with vcpu_states) | 404
-//! POST   /api/vms/create     → 200 {"id":N} | 400 | 409 | 500 | 503 (body {"toml": "..."})
+//! POST   /api/vms/create     → 200 {"id":N} | 400 | 409 | 500 | 503 (body {"toml":"..."} or {"path":"..."})
 //! DELETE /api/vms/{id}       → 204 | 404 | 500
 //! POST   /api/vms/{id}/start  → 200 {"ok":true,"status":...} | 404 | 409 | 500 | 503
 //! POST   /api/vms/{id}/stop   → 200 {"ok":true,"status":...} | 404 | 409 | 503
@@ -122,7 +124,9 @@ fn management_router() -> Router {
     // The pool is a directory on the host filesystem, so the query route only
     // exists in builds that can read one.
     #[cfg(feature = "fs")]
-    let router = router.route("/api/vms/pool", get(vm::vm_pool));
+    let router = router
+        .route("/api/vms/pool", get(vm::vm_pool).post(vm::vm_pool_save))
+        .route("/api/vms/browse", get(vm::vm_browse));
 
     router
 }

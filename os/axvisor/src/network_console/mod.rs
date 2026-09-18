@@ -24,6 +24,7 @@ mod layout;
 mod delivery;
 
 use delivery::{DeliveryFrame, DeliveryQueue};
+pub(crate) use layout::LaneAllocation;
 use layout::{ConsoleLane, Endpoint, Layout, LayoutFull, MAX_GUEST_CONSOLES};
 
 const CONSOLE_LANE_COUNT: usize = ConsoleLane::COUNT;
@@ -291,7 +292,10 @@ impl Drop for ActiveSession {
 /// no browser can attach to. The failure is reported as
 /// [`AxVmError::ResourceUnavailable`], which the HTTP control plane maps to 503
 /// like any other exhausted host resource.
-pub(crate) fn register_guest(vm_id: VMId, name: &str) -> Result<()> {
+///
+/// The result says whether this call took a lane or the VM already had one, so
+/// a caller that has to undo the registration gives back only its own lane.
+pub(crate) fn register_guest(vm_id: VMId, name: &str) -> Result<LaneAllocation> {
     LAYOUT.lock().allocate(vm_id, name).map_err(|LayoutFull| {
         anyhow::anyhow!(AxVmError::ResourceUnavailable {
             resource: "browser console lane",
@@ -340,20 +344,28 @@ pub(crate) fn has_console_route(route: &str) -> bool {
 }
 
 /// Browser-visible console descriptors for the current VM set.
+///
+/// `attached` reports whether a browser session already holds the lane. The
+/// lanes are exclusive, so a client that wants to explain its own failed
+/// WebSocket upgrade needs this fact: the browser API hides the server's 409
+/// behind an anonymous 1006 close, and a non-upgrade request never reaches the
+/// upgrade handler at all.
 pub(crate) fn console_descriptions() -> Vec<ConsoleDescription> {
     endpoints()
         .into_iter()
         .map(|endpoint| ConsoleDescription {
             route: endpoint.route,
             display_name: endpoint.display_name,
+            attached: OUTPUT_HUB.is_connected(endpoint.lane),
         })
         .collect()
 }
 
-/// One console entry returned to the embedded browser page.
+/// One console entry as the control plane reports it.
 pub(crate) struct ConsoleDescription {
     pub(crate) route: String,
     pub(crate) display_name: String,
+    pub(crate) attached: bool,
 }
 
 /// Copies Axvisor shell bytes into its fixed browser queue.
@@ -397,6 +409,7 @@ pub(crate) fn open_browser_console(
         BrowserConsoleInput {
             endpoint,
             editor: ManagementLineEditor::new(),
+            rejected_input_reported: false,
             _active_session: active_session,
         },
         BrowserConsoleOutput {
@@ -468,6 +481,12 @@ fn receive_output_frame(
 pub(crate) struct BrowserConsoleInput {
     endpoint: Endpoint,
     editor: ManagementLineEditor,
+    /// Whether the current input streak was already rejected by a stopped guest.
+    ///
+    /// Keystrokes arrive one frame at a time, so reporting every rejected byte
+    /// would turn one attempt into a wall of text; one notice per streak tells
+    /// the operator why nothing is happening and stops on its own.
+    rejected_input_reported: bool,
     _active_session: ActiveSession,
 }
 
@@ -487,7 +506,18 @@ impl BrowserConsoleInput {
     /// Routes browser bytes to the selected shell and reports whether it stays open.
     pub(crate) fn route(&mut self, bytes: &[u8]) -> bool {
         if let Some(vm_id) = self.endpoint.vm_id {
-            crate::guest_console::route_network_input(vm_id, bytes);
+            if crate::guest_console::route_network_input(vm_id, bytes) {
+                self.rejected_input_reported = false;
+            } else if !self.rejected_input_reported {
+                // The guest console only accepts input while its VM runs. A
+                // dropped keystroke used to leave no trace at all, which is
+                // indistinguishable from a broken terminal: say why, once.
+                self.rejected_input_reported = true;
+                let notice = format!(
+                    "[Axvisor] VM {vm_id} is not running; input was dropped. Start it first.\r\n"
+                );
+                submit_guest_output(vm_id, notice.as_bytes());
+            }
             true
         } else {
             self.editor.process(bytes)

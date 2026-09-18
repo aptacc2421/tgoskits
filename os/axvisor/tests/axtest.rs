@@ -37,6 +37,11 @@ mod manager;
 mod network_console;
 #[path = "../src/vm_pool.rs"]
 mod vm_pool;
+// The pool suites clean their fixtures through the production filesystem
+// helpers, so the harness compiles that module for its in-file suite too.
+#[allow(dead_code)]
+#[path = "../src/shell_fs.rs"]
+mod shell_fs;
 
 // These cases exercise the mux-to-network boundary through the stub above and
 // therefore must live beside the harness assembly instead of `mux/tests.rs`
@@ -44,6 +49,11 @@ mod vm_pool;
 #[axtest::tests]
 mod tests {
     use axtest::prelude::*;
+
+    #[cfg(feature = "fs")]
+    use crate::shell_fs::{RemoveOptions, remove_path};
+    #[cfg(feature = "fs")]
+    use ax_std::fs;
 
     fn remove_guest_console(vm_id: usize) {
         use crate::guest_console_harness::mux;
@@ -414,12 +424,18 @@ mod tests {
 
     #[test]
     fn console_layout_allocates_guest_lanes_in_order_and_frees_them() {
-        use crate::browser_console_layout::{Layout, MAX_GUEST_CONSOLES};
+        use crate::browser_console_layout::{LaneAllocation, Layout, MAX_GUEST_CONSOLES};
 
         let mut layout = Layout::new();
-        layout
-            .allocate(2, "zephyr")
-            .expect("a free lane must accept a guest");
+        // The outcome tells the caller whether it may give a lane back later: a
+        // lane reported as reused belongs to a VM that already existed, so a
+        // creation that is rejected afterwards must not release it.
+        ax_assert_eq!(
+            layout
+                .allocate(2, "zephyr")
+                .expect("a free lane must accept a guest"),
+            LaneAllocation::Allocated,
+        );
         layout
             .allocate(1, "")
             .expect("a free lane must accept a guest");
@@ -436,15 +452,21 @@ mod tests {
         ax_assert_eq!(endpoints[2].route, "vm-1");
 
         // Re-registering a VM keeps its lane, and only a free slot is reused.
-        layout
-            .allocate(2, "zephyr")
-            .expect("re-registering a VM is idempotent");
+        ax_assert_eq!(
+            layout
+                .allocate(2, "zephyr")
+                .expect("re-registering a VM is idempotent"),
+            LaneAllocation::Reused,
+        );
         ax_assert_eq!(layout.endpoints().len(), 3);
         ax_assert_eq!(layout.guest(2).map(|guest| guest.lane.index()), Some(1));
         ax_assert_eq!(layout.release(2).map(|guest| guest.lane.index()), Some(1));
-        layout
-            .allocate(3, "linux")
-            .expect("the freed lane must be reusable");
+        ax_assert_eq!(
+            layout
+                .allocate(3, "linux")
+                .expect("the freed lane must be reusable"),
+            LaneAllocation::Allocated,
+        );
         ax_assert_eq!(layout.guest(3).map(|guest| guest.lane.index()), Some(1));
         ax_assert_eq!(layout.release(3).map(|guest| guest.lane.index()), Some(1));
         ax_assert_eq!(layout.release(3).map(|guest| guest.lane.index()), None);
@@ -468,6 +490,19 @@ mod tests {
     }
 
     #[cfg(feature = "fs")]
+    fn reset_test_dir(path: &str) {
+        let _ = remove_path(
+            path,
+            RemoveOptions {
+                recursive: true,
+                force: true,
+                ..RemoveOptions::default()
+            },
+        );
+        fs::create_dir(path).expect("create test directory");
+    }
+
+    #[cfg(feature = "fs")]
     #[test]
     fn vm_pool_scan_lists_only_configs_that_can_become_a_vm() {
         use crate::vm_pool::scan_dir;
@@ -482,25 +517,25 @@ mod tests {
                 "[base]\nid = {id}\nname = \"{name}\"\n\n[kernel]\nimage_location = \"{source}\"\nkernel_path = \"{kernel}\"\n"
             )
         };
-        fs::write(format!("{root}/named.toml"), entry_toml(7, "named", "fs"))
+        fs::write(&format!("{root}/named.toml"), entry_toml(7, "named", "fs"))
             .expect("write filesystem entry");
         // A memory-backed entry reads no guest path at runtime: its build-time
         // kernel path is allowed to be absent from the guest filesystem.
         fs::write(
-            format!("{root}/embedded.toml"),
+            &format!("{root}/embedded.toml"),
             format!(
                 "[base]\nid = 6\nname = \"embedded\"\n\n[kernel]\nimage_location = \"memory\"\nkernel_path = \"/no/such/embedded-image\"\n"
             ),
         )
         .expect("write memory entry");
         // Only the `.toml` suffix makes a file a pool candidate.
-        fs::write(format!("{root}/notes.txt"), b"[base]\nid = 9\n").expect("write note");
-        fs::write(format!("{root}/empty.toml"), b"").expect("write empty file");
-        fs::write(format!("{root}/broken.toml"), b"base = { id = 1,").expect("write broken file");
-        fs::write(format!("{root}/binary.toml"), [0xff, 0xfe, 0xfd]).expect("write binary file");
+        fs::write(&format!("{root}/notes.txt"), b"[base]\nid = 9\n").expect("write note");
+        fs::write(&format!("{root}/empty.toml"), b"").expect("write empty file");
+        fs::write(&format!("{root}/broken.toml"), b"base = { id = 1,").expect("write broken file");
+        fs::write(&format!("{root}/binary.toml"), [0xff, 0xfe, 0xfd]).expect("write binary file");
         let absent = format!("{root}/absent.bin");
         fs::write(
-            format!("{root}/missing.toml"),
+            &format!("{root}/missing.toml"),
             format!(
                 "[base]\nid = 8\nname = \"missing\"\n\n[kernel]\nimage_location = \"fs\"\nkernel_path = \"{absent}\"\n"
             ),
@@ -549,8 +584,8 @@ mod tests {
         // is reported, whichever the filesystem enumerates first.
         let dupes = format!("{root}/dupes");
         fs::create_dir(&dupes).expect("create duplicate fixture directory");
-        fs::write(format!("{dupes}/a.toml"), entry_toml(5, "a", "fs")).expect("write a.toml");
-        fs::write(format!("{dupes}/b.toml"), entry_toml(5, "b", "fs")).expect("write b.toml");
+        fs::write(&format!("{dupes}/a.toml"), entry_toml(5, "a", "fs")).expect("write a.toml");
+        fs::write(&format!("{dupes}/b.toml"), entry_toml(5, "b", "fs")).expect("write b.toml");
         let dupe_pool = scan_dir(&dupes);
         ax_assert_eq!(dupe_pool.entries().len(), 1);
         ax_assert_eq!(dupe_pool.issues().len(), 1);
@@ -588,44 +623,153 @@ mod tests {
 
     #[cfg(feature = "fs")]
     #[test]
-    fn touch_preserves_content_and_updates_times() {
-        let path = "/tmp/axvisor-touch-regression";
-        let touch_time = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let _ = fs::remove_file(path);
-        fs::write(path, b"preserve me").expect("create touch fixture");
+    fn vm_pool_reads_several_directories_in_precedence_order() {
+        use crate::vm_pool::{browse, scan_dirs, sources};
 
-        touch_file_at(path, touch_time).expect("touch fixture");
+        // The drop-in directory comes first, so a config an operator drops in
+        // shadows a same-id config from a directory that is only read.
+        ax_assert_eq!(sources().first(), Some(&"/guest/vm_pool".to_string()));
 
-        let metadata = fs::metadata(path).expect("read touched metadata");
-        ax_assert_eq!(fs::read(path).expect("read touched file"), b"preserve me");
-        let accessed = unix_seconds(metadata.accessed().expect("read atime"));
-        let modified = unix_seconds(metadata.modified().expect("read mtime"));
-        ax_assert_eq!(accessed, unix_seconds(touch_time));
-        ax_assert_eq!(modified, unix_seconds(touch_time));
+        let root = "/tmp/axvisor-vm-pool-multi";
+        reset_test_dir(root);
+        let kernel = format!("{root}/kernel.bin");
+        fs::write(&kernel, b"guest kernel").expect("write kernel image fixture");
+        let entry_toml = |id: usize, name: &str| {
+            format!(
+                "[base]\nid = {id}\nname = \"{name}\"\n\n[kernel]\nimage_location = \"fs\"\nkernel_path = \"{kernel}\"\n"
+            )
+        };
 
-        let unsupported_time = UNIX_EPOCH + Duration::from_secs(u32::MAX as u64 + 1);
-        let error = touch_file_at(path, unsupported_time)
-            .expect_err("timestamps that would be truncated must fail");
-        ax_assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        fs::remove_file(path).expect("remove touch fixture");
+        let first = format!("{root}/first");
+        let second = format!("{root}/second");
+        fs::create_dir(&first).expect("create first fixture directory");
+        fs::create_dir(&second).expect("create second fixture directory");
+        fs::write(&format!("{first}/only.toml"), entry_toml(1, "only-first"))
+            .expect("write first-only entry");
+        fs::write(
+            &format!("{second}/other.toml"),
+            entry_toml(2, "only-second"),
+        )
+        .expect("write second-only entry");
+        fs::write(&format!("{first}/shadow.toml"), entry_toml(3, "from-first"))
+            .expect("write shadowing entry");
+        fs::write(
+            &format!("{second}/shadow.toml"),
+            entry_toml(3, "from-second"),
+        )
+        .expect("write shadowed entry");
+
+        let pool = scan_dirs(&[first.clone(), second.clone()]);
+
+        ax_assert_eq!(pool.directory(), first.as_str());
+        ax_assert_eq!(pool.sources(), [first.clone(), second.clone()].as_slice());
+        let mut names: alloc::vec::Vec<&str> =
+            pool.entries().iter().map(|entry| entry.name()).collect();
+        names.sort();
+        ax_assert_eq!(names, ["from-first", "only-first", "only-second"]);
+        // Every entry says which folder it came from, which is what makes a
+        // duplicate id traceable to two files.
+        let from_second = pool
+            .entries()
+            .iter()
+            .find(|entry| entry.name() == "only-second")
+            .expect("the second directory must contribute entries");
+        ax_assert_eq!(from_second.source(), second.as_str());
+        let shadow = pool
+            .issues()
+            .iter()
+            .find(|issue| issue.path().ends_with("second/shadow.toml"))
+            .expect("the shadowed file must be reported");
+        ax_assert_eq!(shadow.kind().as_str(), "duplicate-id");
+
+        // Browsing walks one directory: folders are listed as folders to enter
+        // rather than as unreadable files, and only `.toml` files are entries.
+        fs::write(&format!("{first}/notes.txt"), b"not a config").expect("write note");
+        let folder = browse(&first);
+        ax_assert_eq!(folder.path(), first.as_str());
+        ax_assert_eq!(folder.parent(), Some(root));
+        ax_assert!(folder.directories().is_empty());
+        ax_assert_eq!(folder.entries().len(), 2);
+        ax_assert!(folder.issues().is_empty());
+
+        let nested = browse(root);
+        let mut subdirectories: alloc::vec::Vec<&str> = nested
+            .directories()
+            .iter()
+            .map(|directory| directory.name())
+            .collect();
+        subdirectories.sort();
+        ax_assert_eq!(subdirectories, ["first", "second"]);
+        // `kernel.bin` is neither a directory nor a `.toml`, so it is not
+        // reported as a problem: browsing must not turn a normal file into noise.
+        ax_assert!(nested.issues().is_empty());
+
+        remove_path(
+            root,
+            RemoveOptions {
+                recursive: true,
+                ..RemoveOptions::default()
+            },
+        )
+        .expect("remove multi-directory fixture");
     }
 
     #[cfg(feature = "fs")]
     #[test]
-    fn cp_file_to_existing_directory_uses_source_basename() {
-        let root = "/tmp/axvisor-cp-file-regression";
+    fn vm_pool_save_only_writes_validated_configs_inside_the_directory() {
+        use crate::vm_pool::{SaveError, save_in, scan_dir};
+
+        let root = "/tmp/axvisor-vm-pool-save";
         reset_test_dir(root);
-        let source = format!("{root}/source.txt");
-        let destination = format!("{root}/destination");
-        fs::write(&source, b"copied payload").expect("create copy source");
-        fs::create_dir(&destination).expect("create copy destination");
+        let kernel = format!("{root}/kernel.bin");
+        fs::write(&kernel, b"guest kernel").expect("write kernel image fixture");
+        let valid = format!(
+            "[base]\nid = 4\nname = \"saved\"\n\n[kernel]\nimage_location = \"fs\"\nkernel_path = \"{kernel}\"\n"
+        );
 
-        copy_path(&source, &destination, CopyMode::File).expect("copy file into directory");
+        // A name that could escape the directory is refused before any write,
+        // so a request cannot place a file anywhere it likes.
+        for name in [
+            "",
+            "  ",
+            "guest",
+            "guest.toml.bak",
+            "../escape.toml",
+            ".hidden.toml",
+        ] {
+            ax_assert!(matches!(
+                save_in(root, name, &valid),
+                Err(SaveError::InvalidName(_))
+            ));
+        }
+        ax_assert!(fs::metadata(&format!("{root}/../escape.toml")).is_err());
 
+        // Text that is not a guest config is refused too: the pool only ever
+        // holds files that can become a VM.
+        ax_assert!(matches!(
+            save_in(root, "broken.toml", "base = { id = 1,"),
+            Err(SaveError::InvalidToml(_))
+        ));
+        ax_assert!(fs::metadata(&format!("{root}/broken.toml")).is_err());
+
+        // The happy path is observable: the file lands where it was asked to
+        // and the next scan lists it as a candidate.
+        let path = save_in(root, "saved.toml", &valid).expect("save a valid config");
+        ax_assert_eq!(path, format!("{root}/saved.toml"));
         ax_assert_eq!(
-            fs::read(format!("{destination}/source.txt")).expect("read copied file"),
-            b"copied payload"
+            fs::read_to_string(&path).expect("read the saved config"),
+            valid
         );
+        let pool = scan_dir(root);
+        ax_assert_eq!(pool.entries().len(), 1);
+        ax_assert_eq!(pool.entries()[0].id(), 4);
+        ax_assert_eq!(pool.entries()[0].name(), "saved");
+
+        // Writing again replaces the file instead of appending to it.
+        save_in(root, "saved.toml", &valid).expect("save a second time");
+        let rewritten = scan_dir(root);
+        ax_assert_eq!(rewritten.entries().len(), 1);
+
         remove_path(
             root,
             RemoveOptions {
@@ -633,181 +777,6 @@ mod tests {
                 ..RemoveOptions::default()
             },
         )
-        .expect("remove copy fixture");
-    }
-
-    #[cfg(feature = "fs")]
-    #[test]
-    fn cp_rejects_copying_file_onto_itself_without_truncating_it() {
-        let path = "/tmp/axvisor-cp-self-file-regression";
-        let _ = fs::remove_file(path);
-        fs::write(path, b"keep this payload").expect("create self-copy fixture");
-
-        let error = copy_path(path, path, CopyMode::File)
-            .expect_err("copying a file onto itself must fail");
-
-        ax_assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        ax_assert_eq!(
-            fs::read(path).expect("read self-copy fixture"),
-            b"keep this payload"
-        );
-        fs::remove_file(path).expect("remove self-copy fixture");
-    }
-
-    #[cfg(feature = "fs")]
-    #[test]
-    fn cp_recursive_directory_to_existing_directory_uses_source_basename() {
-        let root = "/tmp/axvisor-cp-dir-regression";
-        reset_test_dir(root);
-        let source = format!("{root}/source-dir");
-        let destination = format!("{root}/destination");
-        fs::create_dir(&source).expect("create recursive copy source");
-        fs::write(format!("{source}/child.txt"), b"recursive payload")
-            .expect("create recursive copy child");
-        fs::create_dir(&destination).expect("create recursive copy destination");
-
-        copy_path(&source, &destination, CopyMode::Recursive)
-            .expect("copy directory into directory");
-
-        ax_assert_eq!(
-            fs::read(format!("{destination}/source-dir/child.txt"))
-                .expect("read recursively copied file"),
-            b"recursive payload"
-        );
-        remove_path(
-            root,
-            RemoveOptions {
-                recursive: true,
-                ..RemoveOptions::default()
-            },
-        )
-        .expect("remove recursive copy fixture");
-    }
-
-    #[cfg(feature = "fs")]
-    #[test]
-    fn cp_recursive_rejects_copying_directory_into_itself() {
-        let root = "/tmp/axvisor-cp-self-regression";
-        reset_test_dir(root);
-        let source = format!("{root}/dir");
-        fs::create_dir(&source).expect("create recursive copy source");
-        fs::create_dir(format!("{source}/dir")).expect("create recursion guard");
-
-        let error = copy_path(&source, &source, CopyMode::Recursive)
-            .expect_err("recursive copy into itself must fail");
-
-        ax_assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        remove_path(
-            root,
-            RemoveOptions {
-                recursive: true,
-                ..RemoveOptions::default()
-            },
-        )
-        .expect("remove self-copy fixture");
-    }
-
-    #[cfg(feature = "fs")]
-    #[test]
-    fn cp_recursive_rejects_copying_directory_into_descendant() {
-        let root = "/tmp/axvisor-cp-descendant-regression";
-        reset_test_dir(root);
-        let source = format!("{root}/dir");
-        let destination = format!("{source}/subdir");
-        fs::create_dir(&source).expect("create recursive copy source");
-        fs::create_dir(&destination).expect("create descendant destination");
-        fs::create_dir(format!("{destination}/dir")).expect("create recursion guard");
-
-        let error = copy_path(&source, &destination, CopyMode::Recursive)
-            .expect_err("recursive copy into a descendant must fail");
-
-        ax_assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        remove_path(
-            root,
-            RemoveOptions {
-                recursive: true,
-                ..RemoveOptions::default()
-            },
-        )
-        .expect("remove descendant-copy fixture");
-    }
-
-    #[cfg(feature = "fs")]
-    #[test]
-    fn cp_recursive_rejects_nonexistent_descendant_before_creation() {
-        let root = "/tmp/axvisor-cp-new-descendant-regression";
-        reset_test_dir(root);
-        let source = format!("{root}/dir");
-        let destination = format!("{source}/subdir");
-        fs::create_dir(&source).expect("create recursive copy source");
-
-        let error = ensure_recursive_destination_outside_source(&source, &destination)
-            .expect_err("nonexistent descendant must be rejected before creation");
-
-        ax_assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        ax_assert!(!fs::exists(&destination).expect("check descendant was not created"));
-        remove_path(
-            root,
-            RemoveOptions {
-                recursive: true,
-                ..RemoveOptions::default()
-            },
-        )
-        .expect("remove nonexistent-descendant fixture");
-    }
-
-    #[cfg(feature = "fs")]
-    #[test]
-    fn mv_renames_file_on_same_filesystem() {
-        let root = "/tmp/axvisor-mv-regression";
-        reset_test_dir(root);
-        let source = format!("{root}/source.txt");
-        let destination = format!("{root}/destination.txt");
-        fs::write(&source, b"moved payload").expect("create move source");
-
-        move_file_or_dir(&source, &destination).expect("move file");
-
-        ax_assert!(!fs::exists(&source).expect("check move source"));
-        ax_assert_eq!(
-            fs::read(&destination).expect("read move destination"),
-            b"moved payload"
-        );
-        remove_path(
-            root,
-            RemoveOptions {
-                recursive: true,
-                ..RemoveOptions::default()
-            },
-        )
-        .expect("remove move fixture");
-    }
-
-    #[cfg(feature = "fs")]
-    #[test]
-    fn rm_does_not_follow_a_directory_symlink() {
-        let metadata = metadata_for_remove("/var/run").expect("inspect rootfs directory symlink");
-
-        ax_assert!(metadata.file_type().is_symlink());
-        ax_assert!(!metadata.is_dir());
-    }
-
-    #[cfg(feature = "fs")]
-    fn reset_test_dir(path: &str) {
-        let _ = remove_path(
-            path,
-            RemoveOptions {
-                recursive: true,
-                force: true,
-                ..RemoveOptions::default()
-            },
-        );
-        fs::create_dir(path).expect("create test directory");
-    }
-
-    #[cfg(feature = "fs")]
-    fn unix_seconds(time: SystemTime) -> u64 {
-        time.duration_since(UNIX_EPOCH)
-            .expect("test time must not predate Unix epoch")
-            .as_secs()
+        .expect("remove save fixture");
     }
 }

@@ -11,6 +11,7 @@ import type { ApiClient } from '@/api/client'
 import type { VmSummary } from '@/api/types'
 import type { PanelMeta, PanelRegistry } from '@/api/types'
 import { cn } from '@/lib/utils'
+import { PanelErrorBoundary } from './PanelErrorBoundary'
 import type { TabState } from './App'
 
 interface TabsProps {
@@ -115,9 +116,13 @@ export function Tabs(props: TabsProps) {
           const Panel = registry.resolve(tab.kind)
           return (
             <div key={tab.id} className={cn('h-full', tab.id === activeId ? 'block' : 'hidden')}>
-              <Suspense fallback={<p className="text-sm text-muted-foreground">加载面板…</p>}>
-                <Panel meta={meta} api={api} resources={resources} focusVm={focusVm} />
-              </Suspense>
+              {/* One boundary per tab: a panel that throws on one VM must not
+                  take the shell, the navigation or the other tabs down. */}
+              <PanelErrorBoundary title={meta.title}>
+                <Suspense fallback={<p className="text-sm text-muted-foreground">加载面板…</p>}>
+                  <Panel meta={meta} api={api} resources={resources} focusVm={focusVm} />
+                </Suspense>
+              </PanelErrorBoundary>
             </div>
           )
         })}

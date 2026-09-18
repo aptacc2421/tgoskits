@@ -45,7 +45,14 @@ impl AxvmManager {
         )
     )]
     pub fn launch_default_vms(&self) -> Vec<VMId> {
-        self.runtime.launch_default_vms()
+        let launched = self.runtime.launch_default_vms();
+        // The auto-start path bypasses `Self::start_vm`, so it republishes the
+        // console state itself: without this, browser input on an auto-started
+        // guest's lane is dropped exactly as it is on a control-plane start.
+        for vm_id in &launched {
+            crate::guest_console::mark_running(*vm_id);
+        }
+        launched
     }
 
     /// Wait until every running VM has stopped.
@@ -91,14 +98,28 @@ impl AxvmManager {
     }
 
     /// Start a VM by ID.
+    ///
+    /// A successful start is published to the guest console mux, exactly like
+    /// the shell's own `vm start`: the mux keeps its own `running` set and gates
+    /// guest input (`guest_console::route_network_input`) and host-log
+    /// formatting on it, so a start that only changes the VMM state silently
+    /// drops every byte a browser sends to that guest's console lane.
     #[cfg(any(feature = "fs", feature = "http-axum"))]
     pub fn start_vm(vm_id: VMId) -> Result<()> {
-        AxvmRuntime::start_vm(vm_id).with_context(|| format!("start VM[{vm_id}]"))
+        AxvmRuntime::start_vm(vm_id).with_context(|| format!("start VM[{vm_id}]"))?;
+        crate::guest_console::mark_running(vm_id);
+        Ok(())
     }
 
     /// Stop a VM by ID.
+    ///
+    /// The console mux stops treating the guest as running as soon as the
+    /// shutdown request is accepted, so bytes typed during the transition are
+    /// not queued for a guest that is already leaving.
     pub fn stop_vm(vm_id: VMId) -> Result<()> {
-        AxvmRuntime::stop_vm(vm_id).with_context(|| format!("stop VM[{vm_id}]"))
+        AxvmRuntime::stop_vm(vm_id).with_context(|| format!("stop VM[{vm_id}]"))?;
+        crate::guest_console::mark_stopped(vm_id);
+        Ok(())
     }
 
     /// Pause a VM by ID.
@@ -108,13 +129,22 @@ impl AxvmManager {
     }
 
     /// Resume a VM by ID.
+    ///
+    /// See [`Self::start_vm`] for why a resume republishes the console state.
     pub fn resume_vm(vm_id: VMId) -> Result<()> {
-        AxvmRuntime::resume_vm(vm_id).with_context(|| format!("resume VM[{vm_id}]"))
+        AxvmRuntime::resume_vm(vm_id).with_context(|| format!("resume VM[{vm_id}]"))?;
+        crate::guest_console::mark_running(vm_id);
+        Ok(())
     }
 
     /// Reset a VM by ID.
+    ///
+    /// A reset reboots the guest, so it re-enters the same running state as a
+    /// start and has to be published the same way.
     pub fn reset_vm(vm_id: VMId) -> Result<()> {
-        AxvmRuntime::reset_vm(vm_id).with_context(|| format!("reset VM[{vm_id}]"))
+        AxvmRuntime::reset_vm(vm_id).with_context(|| format!("reset VM[{vm_id}]"))?;
+        crate::guest_console::mark_running(vm_id);
+        Ok(())
     }
 
     /// Wake the primary vCPU so it can consume newly queued console input.

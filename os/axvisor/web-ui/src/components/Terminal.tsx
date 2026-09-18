@@ -17,7 +17,6 @@ import { cn } from '@/lib/utils'
 const STATUS_TEXT: Record<SocketStatus, string> = {
   connecting: '连接中…',
   open: '已连接',
-  busy: '已被占用',
   closed: '已断开',
 }
 
@@ -28,15 +27,34 @@ export interface TerminalViewProps {
   title: string
   /** Extra description next to the title (the console's display name). */
   subtitle?: string
+  /**
+   * `GET /api/consoles` says a session holds this lane, and it is not this
+   * view's own connection (the panel releases what it owns). The lanes are
+   * exclusive, so the socket below will simply fail; naming both possible
+   * holders — another page or another panel here — is the difference between
+   * "input does nothing" and "close the page that holds it".
+   */
+  occupied?: boolean
+  /**
+   * Called when the socket closed without ever opening. A browser WebSocket
+   * reports every refused handshake the same way, so the caller — which has the
+   * lane table — decides whether this was a lost race or a backend that went
+   * away, and moves to another lane if it was the former.
+   */
+  onClosed?: () => void
   className?: string
 }
 
-export function TerminalView({ path, title, subtitle, className }: TerminalViewProps) {
+export function TerminalView({ path, title, subtitle, occupied, onClosed, className }: TerminalViewProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const [status, setStatus] = useState<SocketStatus>('connecting')
   const [detail, setDetail] = useState<string | null>(null)
   const [generation, setGeneration] = useState(0)
   const [counters, setCounters] = useState({ up: 0, down: 0 })
+  // The socket effect is keyed on the lane, not on the callback, so the latest
+  // handler is read through a ref instead of closing over a stale one.
+  const onClosedRef = useRef(onClosed)
+  onClosedRef.current = onClosed
 
   const reconnect = useCallback(() => setGeneration((value) => value + 1), [])
 
@@ -49,6 +67,13 @@ export function TerminalView({ path, title, subtitle, className }: TerminalViewP
       fontSize: 13,
       lineHeight: 1.1,
       scrollback: 4000,
+      // Every console producer on the host side writes CRLF for its own text, but
+      // bytes that came from a *file* — the output of `cat`, a config dumped by
+      // `vm show` — are plain LF. A terminal that only moves the cursor down on
+      // LF renders those as a staircase walking right, so LF is treated as
+      // "return and go down" here, at the one layer that owns rendering. Real
+      // CRLF output is unaffected.
+      convertEol: true,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       theme: { background: '#0b1021', foreground: '#c8d3f5', cursor: '#c8d3f5' },
     })
@@ -69,6 +94,7 @@ export function TerminalView({ path, title, subtitle, className }: TerminalViewP
         setStatus(next)
         setDetail(reason ?? null)
         if (next === 'open') terminal.focus()
+        else if (next === 'closed') onClosedRef.current?.()
       },
     })
 
@@ -130,9 +156,10 @@ export function TerminalView({ path, title, subtitle, className }: TerminalViewP
         </div>
       </div>
 
-      {status === 'busy' && (
-        <p className="bg-red-950/60 px-2 py-1 text-xs text-red-300">
-          {detail ?? '该终端已被占用（独占订阅）'}
+      {occupied && status !== 'open' && (
+        <p className="bg-amber-950/60 px-2 py-1 text-xs text-amber-300">
+          该通道已被一个活动会话占用（通道为独占订阅）：可能是本页另一个终端面板，也可能是另一个
+          浏览器页面。关掉占用它的那处后点「重连」。
         </p>
       )}
       {status === 'closed' && detail && (
