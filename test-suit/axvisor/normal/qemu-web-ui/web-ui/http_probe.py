@@ -32,6 +32,8 @@ contract a browser depends on, not a browser:
     /ws/vm-1                      -> rejected input while the guest is stopped
     POST   /api/vms/1/start       -> 200   (guest really enters: guest_entry_count)
     /ws/vm-1                      -> guest shell runs a typed command
+    POST   /api/vms/1/stop        -> 200   (guest settles, console lane kept,
+                                            input rejected again)
     DELETE /api/vms/1             -> 204   (registry, lane and event frame follow)
     POST   /api/vms/create        -> 200   (recreate from the fixture TOML)
     DELETE /api/vms/1             -> 204   (cleanup)
@@ -334,6 +336,26 @@ def expect_event(websocket, expected_type, vm_id, deadline, label):
             return frame
 
 
+def receive_until_prompt(websocket, timeout=REQUEST_TIMEOUT):
+    """Wait for the management shell prompt, whatever cwd it reports.
+
+    The shell prints `axvisor:<cwd>$ `, and the cwd is empty when the build has
+    no root filesystem, so a fixed marker would only match one of the two builds.
+    """
+    output = b""
+    deadline = time.monotonic() + timeout
+    while not re.search(rb"axvisor:[^\r\n]*\$ ", output):
+        if time.monotonic() >= deadline:
+            raise AssertionError("management shell prompt never arrived: %r" % (output[-200:],))
+        opcode, payload = websocket.recv_frame()
+        if opcode in (1, 2):
+            output += payload
+            continue
+        if opcode == 8:
+            raise AssertionError("WebSocket closed before the shell prompt")
+    return output
+
+
 def receive_until(websocket, marker, timeout=REQUEST_TIMEOUT):
     output = b""
     deadline = time.monotonic() + timeout
@@ -582,7 +604,7 @@ def check_terminals():
     # interpreter as the board console, and its table must show the same VM the
     # REST list reports.
     shell.send_binary(b"vm list\r")
-    output = receive_until(shell, b"axvisor:$ ")
+    output = receive_until_prompt(shell)
     for marker in (b"VM ID", b"linux-web-ui"):
         if marker not in output:
             raise AssertionError("`vm list` output is missing %r: %r" % (marker, output))
@@ -696,7 +718,7 @@ def check_lifecycle(events):
     # reads one must never see the other's traffic. Both are attached at once
     # here, which is the only way that claim can fail if routing is wrong.
     shell = expect_upgrade("/ws/axvisor", 101)
-    receive_until(shell, b"axvisor:$ ")
+    receive_until_prompt(shell)
     guest.send_binary(GUEST_ISOLATION_COMMAND)
     receive_output_until(
         guest,
@@ -716,6 +738,29 @@ def check_lifecycle(events):
         raise AssertionError("management output leaked into the guest lane: %r" % (stray[-200:],))
     shell.close()
     print("  web-ui probe: management and guest lanes carry separate streams")
+
+    # `stop` settles the guest but keeps it registered, so its console lane stays
+    # in place and input is still routed -- and still rejected. This is also the
+    # second proof of the rejection notice: it has to be re-armed by the
+    # successful input above, or the browser would hear nothing this time.
+    status, body = request("POST", "/api/vms/%d/stop" % DEFAULT_VM_ID)
+    expect_status("POST /api/vms/1/stop", status, 200)
+    deadline = time.monotonic() + POLL_DEADLINE
+    while True:
+        detail = vm_detail(DEFAULT_VM_ID, "GET /api/vms/1 (waiting for stop)")
+        if detail.get("status") == "stopped":
+            print("  web-ui probe: VM[1] stopped, console lane kept")
+            break
+        if time.monotonic() >= deadline:
+            raise AssertionError("VM[1] never stopped: %r" % (detail,))
+        time.sleep(POLL_INTERVAL)
+    guest.send_binary(b"x")
+    receive_output_until(
+        guest,
+        GUEST_INPUT_REJECTED,
+        time.monotonic() + REQUEST_TIMEOUT * 3,
+        "input rejected again after the guest stopped",
+    )
 
     guest.close()
     poll_lane_attached(
