@@ -1,18 +1,17 @@
 # No default guest is configured for this case, so the shell starts with an
 # empty VM registry and `/pool` as the only candidate list. The steps below
 # provision that list the way a console user would — copy a guest image next to
-# it and write pool configs — then check listing, issue reporting and
-# start-on-demand through the management shell.
+# it, copy a config in, write configs — then check listing, issue reporting and
+# the start/close/start cycle through the management shell.
 #
 # The shell line buffer holds 256 bytes and TOML needs one key-value pair per
-# line, so a config written with `echo` carries a single root table. A bootable
-# guest needs `base` (its vCPU list) and `kernel` together, which only a host
-# writer can produce; `vm start` therefore reaches the VM pool entry and stops
-# in AxVM's own boot validation, and the assertion below pins exactly that
-# hand-off. The full start/stop cycle of a pool entry is exercised where the
-# config comes from the control plane, which writes real multi-line TOML.
+# line, so a config written with `echo` carries a single root table. `echo` can
+# therefore only produce the incomplete entries used for the listing, issue and
+# hand-off assertions below; the bootable entry (`sh/vm-pool-entry.toml`) is
+# delivered by the `sh/` asset pipeline into `/usr/bin/`, which is how a real
+# deployment provisions the directory.
 #
-# The guest image is the one the IVC case already boots, so this case adds no
+# The guest kernel is the one the IVC case already boots, so this case adds no
 # new dependency on the managed rootfs image.
 args = [
     "-nographic",
@@ -37,7 +36,7 @@ fail_regex = [
     "(?i)login incorrect",
     "(?i)permission denied",
 ]
-timeout = 300
+timeout = 420
 to_bin = true
 uefi = false
 
@@ -134,14 +133,58 @@ success_regex = [
     "(?m)^✗ create VM\\[0\\] from VM pool entry `/pool/boot\\.toml`: .+$",
 ]
 
-# A failed create leaves the registry empty, so the entry is still a candidate.
+# The asset pipeline put a complete config into the guest filesystem. Copy it
+# into the pool directory: this is the provisioning step a deployment does
+# before starting guests, and it is the only way to get a multi-line config into
+# a directory the console itself cannot write.
 [[shell_check_steps]]
-shell_cmd = "vm list"
-success_regex = ["(?m)^No virtual machines found\\.\\s*$"]
+shell_cmd = "ls -l /usr/bin/vm-pool-entry.toml"
+success_regex = ["(?m)^-r\\S+\\s+\\d+\\s+/usr/bin/vm-pool-entry\\.toml\\s*$"]
+
+[[shell_check_steps]]
+shell_cmd = "cp /usr/bin/vm-pool-entry.toml /pool/pool-guest.toml"
 
 [[shell_check_steps]]
 shell_cmd = "vm pool"
-success_regex = ["(?m)^0\\s+not-created\\s+/pool/boot\\.toml\\s*$"]
+success_regex = ["(?m)^5\\s+pool-guest\\s+not-created\\s+/pool/pool-guest\\.toml\\s*$"]
+
+# Start it: the id is not registered yet, so the shell has to create the VM from
+# the pool entry and boot it. Nothing here asserts guest output — the pool
+# contract is what this case owns; the run fails anyway when a vCPU faults
+# (the runner appends `VM[\d+] run VCpu[\d+] get error` to `fail_regex` for
+# every case).
+[[shell_check_steps]]
+shell_cmd = "vm start 5"
+success_regex = ["(?m)^✓ VM\\[5\\] started successfully\\s*$"]
+timeout = 120
+
+[[shell_check_steps]]
+shell_cmd = "vm pool"
+success_regex = ["(?m)^5\\s+pool-guest\\s+running\\s+/pool/pool-guest\\.toml\\s*$"]
+
+# Closing a guest is a delete, so the running VM is removed through the forced
+# path (the bare `vm delete` refuses a running VM). The pool entry survives,
+# which is what makes the next start possible.
+[[shell_check_steps]]
+shell_cmd = "vm delete --force 5"
+success_regex = ["(?m)^✓ VM\\[5\\] deletion completed\\s*$"]
+timeout = 120
+
+[[shell_check_steps]]
+shell_cmd = "vm pool"
+success_regex = ["(?m)^5\\s+pool-guest\\s+not-created\\s+/pool/pool-guest\\.toml\\s*$"]
+
+# Start the same id again from the same entry: this is the repeated
+# start/close cycle the pool exists for, and it fails if the previous delete
+# left the id or its vCPUs unusable.
+[[shell_check_steps]]
+shell_cmd = "vm start 5"
+success_regex = ["(?m)^✓ VM\\[5\\] started successfully\\s*$"]
+timeout = 120
+
+[[shell_check_steps]]
+shell_cmd = "vm pool"
+success_regex = ["(?m)^5\\s+pool-guest\\s+running\\s+/pool/pool-guest\\.toml\\s*$"]
 
 [[shell_check_steps]]
 shell_cmd = "echo AXVISOR_VM_POOL_PASSED"
