@@ -11,6 +11,10 @@
 
 extern crate alloc;
 
+// The production pool module under test reports through the host log.
+#[macro_use]
+extern crate log;
+
 use ax_hal as _;
 use ax_std as _;
 use axvm as _;
@@ -31,6 +35,8 @@ mod guest_console_harness;
 mod host_terminal;
 mod manager;
 mod network_console;
+#[path = "../src/vm_pool.rs"]
+mod vm_pool;
 
 // These cases exercise the mux-to-network boundary through the stub above and
 // therefore must live beside the harness assembly instead of `mux/tests.rs`
@@ -459,6 +465,125 @@ mod tests {
                 .map(|guest| guest.lane.index()),
             Some(MAX_GUEST_CONSOLES)
         );
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn vm_pool_scan_lists_only_configs_that_can_become_a_vm() {
+        use crate::vm_pool::scan_dir;
+
+        let root = "/tmp/axvisor-vm-pool-scan";
+        reset_test_dir(root);
+        let kernel = format!("{root}/kernel.bin");
+        fs::write(&kernel, b"guest kernel").expect("write kernel image fixture");
+
+        let entry_toml = |id: usize, name: &str, source: &str| {
+            format!(
+                "[base]\nid = {id}\nname = \"{name}\"\n\n[kernel]\nimage_location = \"{source}\"\nkernel_path = \"{kernel}\"\n"
+            )
+        };
+        fs::write(format!("{root}/named.toml"), entry_toml(7, "named", "fs"))
+            .expect("write filesystem entry");
+        // A memory-backed entry reads no guest path at runtime: its build-time
+        // kernel path is allowed to be absent from the guest filesystem.
+        fs::write(
+            format!("{root}/embedded.toml"),
+            format!(
+                "[base]\nid = 6\nname = \"embedded\"\n\n[kernel]\nimage_location = \"memory\"\nkernel_path = \"/no/such/embedded-image\"\n"
+            ),
+        )
+        .expect("write memory entry");
+        // Only the `.toml` suffix makes a file a pool candidate.
+        fs::write(format!("{root}/notes.txt"), b"[base]\nid = 9\n").expect("write note");
+        fs::write(format!("{root}/empty.toml"), b"").expect("write empty file");
+        fs::write(format!("{root}/broken.toml"), b"base = { id = 1,").expect("write broken file");
+        fs::write(format!("{root}/binary.toml"), [0xff, 0xfe, 0xfd]).expect("write binary file");
+        let absent = format!("{root}/absent.bin");
+        fs::write(
+            format!("{root}/missing.toml"),
+            format!(
+                "[base]\nid = 8\nname = \"missing\"\n\n[kernel]\nimage_location = \"fs\"\nkernel_path = \"{absent}\"\n"
+            ),
+        )
+        .expect("write missing-image entry");
+
+        let pool = scan_dir(root);
+
+        ax_assert_eq!(pool.directory(), root);
+        let mut ids: alloc::vec::Vec<usize> =
+            pool.entries().iter().map(|entry| entry.id()).collect();
+        ids.sort();
+        ax_assert_eq!(ids, [6, 7]);
+        let named = pool
+            .entries()
+            .iter()
+            .find(|entry| entry.id() == 7)
+            .expect("the filesystem entry must be listed");
+        ax_assert!(named.path().ends_with("named.toml"));
+        ax_assert!(named.toml().contains("id = 7"));
+
+        let mut reported: alloc::vec::Vec<_> = pool
+            .issues()
+            .iter()
+            .map(|issue| format!("{} {}", issue.kind().as_str(), issue.path()))
+            .collect();
+        reported.sort();
+        let mut expected = [
+            format!("empty {root}/empty.toml"),
+            format!("invalid-toml {root}/broken.toml"),
+            format!("missing-image {root}/missing.toml"),
+            format!("unreadable {root}/binary.toml"),
+        ];
+        expected.sort();
+        ax_assert_eq!(reported, expected);
+        // The reported reason names the file that is missing, not just the
+        // config that asked for it.
+        let missing = pool
+            .issues()
+            .iter()
+            .find(|issue| issue.path().ends_with("missing.toml"))
+            .expect("the missing image must be reported");
+        ax_assert!(format!("{missing}").contains(absent.as_str()));
+
+        // Two configs claiming one id: the first one listed wins and the other
+        // is reported, whichever the filesystem enumerates first.
+        let dupes = format!("{root}/dupes");
+        fs::create_dir(&dupes).expect("create duplicate fixture directory");
+        fs::write(format!("{dupes}/a.toml"), entry_toml(5, "a", "fs")).expect("write a.toml");
+        fs::write(format!("{dupes}/b.toml"), entry_toml(5, "b", "fs")).expect("write b.toml");
+        let dupe_pool = scan_dir(&dupes);
+        ax_assert_eq!(dupe_pool.entries().len(), 1);
+        ax_assert_eq!(dupe_pool.issues().len(), 1);
+        ax_assert_eq!(dupe_pool.issues()[0].kind().as_str(), "duplicate-id");
+        ax_assert_eq!(dupe_pool.entries()[0].id(), 5);
+        ax_assert!(dupe_pool.entries()[0].path() != dupe_pool.issues()[0].path());
+
+        // A directory that is not there yields no entries and one reason.
+        let absent_dir = "/tmp/axvisor-vm-pool-absent";
+        let _ = remove_path(
+            absent_dir,
+            RemoveOptions {
+                recursive: true,
+                force: true,
+                ..RemoveOptions::default()
+            },
+        );
+        let absent_pool = scan_dir(absent_dir);
+        ax_assert_eq!(absent_pool.entries().len(), 0);
+        ax_assert_eq!(absent_pool.issues().len(), 1);
+        ax_assert_eq!(
+            absent_pool.issues()[0].kind().as_str(),
+            "directory-unavailable"
+        );
+
+        remove_path(
+            root,
+            RemoveOptions {
+                recursive: true,
+                ..RemoveOptions::default()
+            },
+        )
+        .expect("remove pool fixture");
     }
 
     #[cfg(feature = "fs")]

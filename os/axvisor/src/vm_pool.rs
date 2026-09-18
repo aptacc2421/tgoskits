@@ -27,6 +27,8 @@
 //! replaces or repairs is visible to the next query without a reboot. Files
 //! that cannot be used become [`Issue`] values instead of disappearing, so the
 //! shell and the control plane can report why a file in the pool does nothing.
+//! A config that parses but names a guest image the filesystem does not have is
+//! one of those values: it is a pool file that cannot become a VM.
 
 use alloc::{
     format,
@@ -92,6 +94,9 @@ pub enum IssueKind {
     /// An earlier file in the same scan already claims this `base.id`, so this
     /// config cannot be registered while that one is in the pool.
     DuplicateId { id: usize, claimed_by: String },
+    /// The config reads its guest images from the filesystem and names one that
+    /// does not exist, so creating it would fail partway through.
+    MissingImage(String),
 }
 
 impl IssueKind {
@@ -105,6 +110,7 @@ impl IssueKind {
             Self::Empty => "empty",
             Self::InvalidToml(_) => "invalid-toml",
             Self::DuplicateId { .. } => "duplicate-id",
+            Self::MissingImage(_) => "missing-image",
         }
     }
 }
@@ -122,6 +128,9 @@ impl core::fmt::Display for IssueKind {
                 formatter,
                 "asks for VM id {id}, which `{claimed_by}` already claims in this pool"
             ),
+            Self::MissingImage(path) => {
+                write!(formatter, "names an image that does not exist: {path}")
+            }
         }
     }
 }
@@ -297,10 +306,39 @@ fn parse_entry(path: &str) -> Result<Entry, IssueKind> {
 
     let config = GuestConfig::from_toml(&toml)
         .map_err(|error| IssueKind::InvalidToml(format!("{error}")))?;
+    // A config that names an image which is not there cannot become a VM, so it
+    // is reported instead of listed as startable. The file may be provisioned
+    // later; the next scan picks it up because nothing is cached.
+    if let Some(missing) = missing_image(&config) {
+        return Err(IssueKind::MissingImage(missing));
+    }
     Ok(Entry {
         path: path.to_string(),
         id: config.base.id,
         name: config.base.name.clone(),
         toml,
     })
+}
+
+/// The first guest image a filesystem-backed config names but that is missing.
+///
+/// Only `image_location = "fs"` reads these paths at runtime: with `"memory"`
+/// the kernel, its ramdisk and its DTB are embedded at build time, where the
+/// same fields are build-time inputs resolved by the build script and are not
+/// expected to exist in the guest filesystem.
+fn missing_image(config: &GuestConfig) -> Option<String> {
+    if config.kernel.image_location.as_deref() != Some("fs") {
+        return None;
+    }
+
+    [
+        Some(config.kernel.kernel_path.as_str()),
+        config.kernel.ramdisk_path.as_deref(),
+        config.kernel.dtb_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|path| !path.is_empty())
+    .find(|path| ax_std::fs::metadata(path).is_err())
+    .map(String::from)
 }
