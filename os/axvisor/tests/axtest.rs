@@ -414,12 +414,18 @@ mod tests {
 
     #[test]
     fn console_layout_allocates_guest_lanes_in_order_and_frees_them() {
-        use crate::browser_console_layout::{Layout, MAX_GUEST_CONSOLES};
+        use crate::browser_console_layout::{LaneAllocation, Layout, MAX_GUEST_CONSOLES};
 
         let mut layout = Layout::new();
-        layout
-            .allocate(2, "zephyr")
-            .expect("a free lane must accept a guest");
+        // The outcome tells the caller whether it may give a lane back later: a
+        // lane reported as reused belongs to a VM that already existed, so a
+        // creation that is rejected afterwards must not release it.
+        ax_assert_eq!(
+            layout
+                .allocate(2, "zephyr")
+                .expect("a free lane must accept a guest"),
+            LaneAllocation::Allocated,
+        );
         layout
             .allocate(1, "")
             .expect("a free lane must accept a guest");
@@ -436,15 +442,21 @@ mod tests {
         ax_assert_eq!(endpoints[2].route, "vm-1");
 
         // Re-registering a VM keeps its lane, and only a free slot is reused.
-        layout
-            .allocate(2, "zephyr")
-            .expect("re-registering a VM is idempotent");
+        ax_assert_eq!(
+            layout
+                .allocate(2, "zephyr")
+                .expect("re-registering a VM is idempotent"),
+            LaneAllocation::Reused,
+        );
         ax_assert_eq!(layout.endpoints().len(), 3);
         ax_assert_eq!(layout.guest(2).map(|guest| guest.lane.index()), Some(1));
         ax_assert_eq!(layout.release(2).map(|guest| guest.lane.index()), Some(1));
-        layout
-            .allocate(3, "linux")
-            .expect("the freed lane must be reusable");
+        ax_assert_eq!(
+            layout
+                .allocate(3, "linux")
+                .expect("the freed lane must be reusable"),
+            LaneAllocation::Allocated,
+        );
         ax_assert_eq!(layout.guest(3).map(|guest| guest.lane.index()), Some(1));
         ax_assert_eq!(layout.release(3).map(|guest| guest.lane.index()), Some(1));
         ax_assert_eq!(layout.release(3).map(|guest| guest.lane.index()), None);
@@ -584,6 +596,162 @@ mod tests {
             },
         )
         .expect("remove pool fixture");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn vm_pool_reads_several_directories_in_precedence_order() {
+        use crate::vm_pool::{browse, scan_dirs, sources};
+
+        // The drop-in directory comes first, so a config an operator drops in
+        // shadows a same-id config from a directory that is only read.
+        ax_assert_eq!(sources().first(), Some(&"/guest/vm_pool".to_string()));
+
+        let root = "/tmp/axvisor-vm-pool-multi";
+        reset_test_dir(root);
+        let kernel = format!("{root}/kernel.bin");
+        fs::write(&kernel, b"guest kernel").expect("write kernel image fixture");
+        let entry_toml = |id: usize, name: &str| {
+            format!(
+                "[base]\nid = {id}\nname = \"{name}\"\n\n[kernel]\nimage_location = \"fs\"\nkernel_path = \"{kernel}\"\n"
+            )
+        };
+
+        let first = format!("{root}/first");
+        let second = format!("{root}/second");
+        fs::create_dir(&first).expect("create first fixture directory");
+        fs::create_dir(&second).expect("create second fixture directory");
+        fs::write(format!("{first}/only.toml"), entry_toml(1, "only-first"))
+            .expect("write first-only entry");
+        fs::write(format!("{second}/other.toml"), entry_toml(2, "only-second"))
+            .expect("write second-only entry");
+        fs::write(format!("{first}/shadow.toml"), entry_toml(3, "from-first"))
+            .expect("write shadowing entry");
+        fs::write(
+            format!("{second}/shadow.toml"),
+            entry_toml(3, "from-second"),
+        )
+        .expect("write shadowed entry");
+
+        let pool = scan_dirs(&[first.clone(), second.clone()]);
+
+        ax_assert_eq!(pool.directory(), first.as_str());
+        ax_assert_eq!(pool.sources(), [first.clone(), second.clone()].as_slice());
+        let mut names: alloc::vec::Vec<&str> =
+            pool.entries().iter().map(|entry| entry.name()).collect();
+        names.sort();
+        ax_assert_eq!(names, ["from-first", "only-first", "only-second"]);
+        // Every entry says which folder it came from, which is what makes a
+        // duplicate id traceable to two files.
+        let from_second = pool
+            .entries()
+            .iter()
+            .find(|entry| entry.name() == "only-second")
+            .expect("the second directory must contribute entries");
+        ax_assert_eq!(from_second.source(), second.as_str());
+        let shadow = pool
+            .issues()
+            .iter()
+            .find(|issue| issue.path().ends_with("second/shadow.toml"))
+            .expect("the shadowed file must be reported");
+        ax_assert_eq!(shadow.kind().as_str(), "duplicate-id");
+
+        // Browsing walks one directory: folders are listed as folders to enter
+        // rather than as unreadable files, and only `.toml` files are entries.
+        fs::write(format!("{first}/notes.txt"), b"not a config").expect("write note");
+        let folder = browse(&first);
+        ax_assert_eq!(folder.path(), first.as_str());
+        ax_assert_eq!(folder.parent(), Some(root));
+        ax_assert!(folder.directories().is_empty());
+        ax_assert_eq!(folder.entries().len(), 2);
+        ax_assert!(folder.issues().is_empty());
+
+        let nested = browse(root);
+        let mut subdirectories: alloc::vec::Vec<&str> = nested
+            .directories()
+            .iter()
+            .map(|directory| directory.name())
+            .collect();
+        subdirectories.sort();
+        ax_assert_eq!(subdirectories, ["first", "second"]);
+        // `kernel.bin` is neither a directory nor a `.toml`, so it is not
+        // reported as a problem: browsing must not turn a normal file into noise.
+        ax_assert!(nested.issues().is_empty());
+
+        remove_path(
+            root,
+            RemoveOptions {
+                recursive: true,
+                ..RemoveOptions::default()
+            },
+        )
+        .expect("remove multi-directory fixture");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn vm_pool_save_only_writes_validated_configs_inside_the_directory() {
+        use crate::vm_pool::{SaveError, save_in, scan_dir};
+
+        let root = "/tmp/axvisor-vm-pool-save";
+        reset_test_dir(root);
+        let kernel = format!("{root}/kernel.bin");
+        fs::write(&kernel, b"guest kernel").expect("write kernel image fixture");
+        let valid = format!(
+            "[base]\nid = 4\nname = \"saved\"\n\n[kernel]\nimage_location = \"fs\"\nkernel_path = \"{kernel}\"\n"
+        );
+
+        // A name that could escape the directory is refused before any write,
+        // so a request cannot place a file anywhere it likes.
+        for name in [
+            "",
+            "  ",
+            "guest",
+            "guest.toml.bak",
+            "../escape.toml",
+            ".hidden.toml",
+        ] {
+            ax_assert!(matches!(
+                save_in(root, name, &valid),
+                Err(SaveError::InvalidName(_))
+            ));
+        }
+        ax_assert!(fs::metadata(&format!("{root}/../escape.toml")).is_err());
+
+        // Text that is not a guest config is refused too: the pool only ever
+        // holds files that can become a VM.
+        ax_assert!(matches!(
+            save_in(root, "broken.toml", "base = { id = 1,"),
+            Err(SaveError::InvalidToml(_))
+        ));
+        ax_assert!(fs::metadata(&format!("{root}/broken.toml")).is_err());
+
+        // The happy path is observable: the file lands where it was asked to
+        // and the next scan lists it as a candidate.
+        let path = save_in(root, "saved.toml", &valid).expect("save a valid config");
+        ax_assert_eq!(path, format!("{root}/saved.toml"));
+        ax_assert_eq!(
+            fs::read_to_string(&path).expect("read the saved config"),
+            valid
+        );
+        let pool = scan_dir(root);
+        ax_assert_eq!(pool.entries().len(), 1);
+        ax_assert_eq!(pool.entries()[0].id(), 4);
+        ax_assert_eq!(pool.entries()[0].name(), "saved");
+
+        // Writing again replaces the file instead of appending to it.
+        save_in(root, "saved.toml", &valid).expect("save a second time");
+        let rewritten = scan_dir(root);
+        ax_assert_eq!(rewritten.entries().len(), 1);
+
+        remove_path(
+            root,
+            RemoveOptions {
+                recursive: true,
+                ..RemoveOptions::default()
+            },
+        )
+        .expect("remove save fixture");
     }
 
     #[cfg(feature = "fs")]

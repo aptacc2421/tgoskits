@@ -24,6 +24,7 @@ mod layout;
 mod delivery;
 
 use delivery::{DeliveryFrame, DeliveryQueue};
+pub(crate) use layout::LaneAllocation;
 use layout::{ConsoleLane, Endpoint, Layout, LayoutFull, MAX_GUEST_CONSOLES};
 
 const CONSOLE_LANE_COUNT: usize = ConsoleLane::COUNT;
@@ -291,7 +292,10 @@ impl Drop for ActiveSession {
 /// no browser can attach to. The failure is reported as
 /// [`AxVmError::ResourceUnavailable`], which the HTTP control plane maps to 503
 /// like any other exhausted host resource.
-pub(crate) fn register_guest(vm_id: VMId, name: &str) -> Result<()> {
+///
+/// The result says whether this call took a lane or the VM already had one, so
+/// a caller that has to undo the registration gives back only its own lane.
+pub(crate) fn register_guest(vm_id: VMId, name: &str) -> Result<LaneAllocation> {
     LAYOUT.lock().allocate(vm_id, name).map_err(|LayoutFull| {
         anyhow::anyhow!(AxVmError::ResourceUnavailable {
             resource: "browser console lane",

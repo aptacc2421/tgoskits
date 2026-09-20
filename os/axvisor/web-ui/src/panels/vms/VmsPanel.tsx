@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import {
   Card,
   CardContent,
@@ -32,6 +33,7 @@ import {
   describeError,
   describeStatus,
   type ActionResult,
+  type BrowseInfo,
   type PanelProps,
   type PoolInfo,
   type VmDetail,
@@ -62,6 +64,12 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
   const [createOpen, setCreateOpen] = useState(false)
   const [createToml, setCreateToml] = useState('')
   const [createError, setCreateError] = useState<string | null>(null)
+  // Name the pasted config is stored under when it is dropped into the pool.
+  const [createName, setCreateName] = useState('')
+  const [browseOpen, setBrowseOpen] = useState(false)
+  const [browsePath, setBrowsePath] = useState('')
+  const [browseInfo, setBrowseInfo] = useState<BrowseInfo | null>(null)
+  const [browseError, setBrowseError] = useState<string | null>(null)
 
   const refreshRegistry = useCallback(async () => {
     try {
@@ -179,6 +187,76 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
     } catch (e: unknown) {
       // The failure stays inside the dialog: the input is wrong, not the page.
       setCreateError(describeError(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /**
+   * Stores the pasted text as a pool file instead of creating a VM from it.
+   *
+   * The pool is what the hypervisor itself owns, so this is how a config becomes
+   * part of the machine: after it is written it is listed here and can be
+   * started on demand like any other candidate.
+   */
+  const saveToPool = async () => {
+    setCreateError(null)
+    setBusy('save-pool')
+    try {
+      const saved = await api.post<{ path: string }>(endpoints.poolSave, {
+        name: createName.trim(),
+        toml: createToml,
+      })
+      setCreateOpen(false)
+      setNote(`配置已存入配置池：${saved.path}`)
+      await refreshPool()
+    } catch (e: unknown) {
+      setCreateError(describeError(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** Reads one directory of the guest filesystem for the folder picker. */
+  const loadBrowse = useCallback(
+    async (path: string) => {
+      setBusy('browse')
+      try {
+        const info = await api.get<BrowseInfo>(endpoints.browse(path))
+        setBrowseInfo(info)
+        setBrowsePath(info.path)
+        setBrowseError(null)
+      } catch (e: unknown) {
+        setBrowseInfo(null)
+        setBrowseError(describeError(e))
+      } finally {
+        setBusy(null)
+      }
+    },
+    [api],
+  )
+
+  const openBrowse = (initial: string) => {
+    setBrowseOpen(true)
+    setBrowseInfo(null)
+    setBrowseError(null)
+    void loadBrowse(initial)
+  }
+
+  /** Creates a VM from a config file the browser picked, by path. */
+  const createFromPath = async (path: string) => {
+    setBusy('create-path')
+    setBrowseError(null)
+    setNote(`从 ${path} 创建客户机…`)
+    try {
+      const created = await api.post<{ id: number }>(endpoints.create, { path })
+      setBrowseOpen(false)
+      setNote(`已创建 VM[${created.id}]，可用「启动」进入 guest`)
+      await refreshRegistry()
+      await refreshPool()
+    } catch (e: unknown) {
+      // Keep the dialog open on the failure: the picked file is the problem.
+      setBrowseError(describeError(e))
     } finally {
       setBusy(null)
     }
@@ -304,12 +382,20 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
       )}
 
       <Card>
-        <CardHeader>
-          <CardTitle>客户机配置池</CardTitle>
-          <CardDescription>
-            `GET /api/vms/pool` 列出目录里所有能变成客户机的配置，以及不能变成客户机的原因；
-            条目只是候选，`start` 时才会真正创建。
-          </CardDescription>
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle>客户机配置池</CardTitle>
+            <CardDescription>
+              `GET /api/vms/pool` 按优先级读取**多个目录**：丢进去的配置目录优先，其次
+              `AXVISOR_VM_DIRS` 列出的目录。条目只是候选，`start` 时才会真正创建；
+              `issues` 会说明目录里哪些文件不能变成客户机。
+            </CardDescription>
+          </div>
+          {pool && (
+            <Button size="sm" variant="outline" onClick={() => openBrowse(pool.directory)}>
+              浏览目录…
+            </Button>
+          )}
         </CardHeader>
         <CardContent className="flex flex-col gap-3 text-sm">
           {poolError && <Banner tone="error">读取配置池失败：{poolError}</Banner>}
@@ -321,7 +407,12 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
           {pool && (
             <>
               <p className="text-muted-foreground">
-                目录 <span className="font-mono">{pool.directory}</span>
+                读取目录：
+                {pool.sources.map((source) => (
+                  <span key={source} className="ml-1 font-mono text-xs">
+                    {source}
+                  </span>
+                ))}
               </p>
               <ul className="flex flex-col gap-2">
                 {pool.entries.map((entry) => (
@@ -344,7 +435,9 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
                   </li>
                 ))}
                 {pool.entries.length === 0 && (
-                  <li className="text-muted-foreground">目录里还没有可启动的配置。</li>
+                  <li className="text-muted-foreground">
+                    目录里还没有可启动的配置，用「粘贴配置创建」里的「存入配置池」放一份进去。
+                  </li>
                 )}
               </ul>
               <ul className="flex flex-col gap-1">
@@ -359,12 +452,104 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
         </CardContent>
       </Card>
 
+      <Dialog open={browseOpen} onOpenChange={setBrowseOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>从目录里选配置创建客户机</DialogTitle>
+            <DialogDescription>
+              `GET /api/vms/browse` 逐层列目录；每个 `.toml` 已经解析过，能启动的才给「创建」，
+              不能启动的在下面写明原因。创建走 `POST /api/vms/create` 的 `path` 形式。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-2 text-sm">
+            <div className="flex items-center gap-2">
+              <Input
+                value={browsePath}
+                onChange={(event) => setBrowsePath(event.target.value)}
+                spellCheck={false}
+                className="font-mono text-xs"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy !== null || browsePath.trim().length === 0}
+                onClick={() => void loadBrowse(browsePath.trim())}
+              >
+                打开
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy !== null || !browseInfo?.parent}
+                onClick={() => browseInfo?.parent && void loadBrowse(browseInfo.parent)}
+              >
+                上级
+              </Button>
+            </div>
+            {browseError && <Banner tone="error">{browseError}</Banner>}
+            {browseInfo && (
+              <>
+                <ul className="flex flex-col gap-1">
+                  {browseInfo.directories.map((directory) => (
+                    <li key={directory.path}>
+                      <button
+                        type="button"
+                        className="font-mono text-xs text-left hover:underline"
+                        onClick={() => void loadBrowse(directory.path)}
+                      >
+                        [dir] {directory.path}
+                      </button>
+                    </li>
+                  ))}
+                  {browseInfo.entries.map((entry) => (
+                    <li
+                      key={entry.path}
+                      className="flex items-center justify-between gap-2 rounded border p-2"
+                    >
+                      <span className="font-mono text-xs">{entry.path}</span>
+                      <span className="flex items-center gap-2">
+                        <span className="text-xs text-muted-foreground">
+                          VM[{entry.id}] {entry.name}
+                        </span>
+                        <Button
+                          size="sm"
+                          disabled={busy !== null}
+                          onClick={() => void createFromPath(entry.path)}
+                        >
+                          创建
+                        </Button>
+                      </span>
+                    </li>
+                  ))}
+                  {browseInfo.directories.length === 0 && browseInfo.entries.length === 0 && (
+                    <li className="text-muted-foreground">这个目录里没有子目录，也没有可用的配置。</li>
+                  )}
+                </ul>
+                <ul className="flex flex-col gap-1">
+                  {browseInfo.issues.map((issue) => (
+                    <li key={`${issue.kind}-${issue.path}`} className="text-xs text-amber-600">
+                      无法使用 <span className="font-mono">{issue.path}</span>（{issue.kind}）：{issue.detail}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBrowseOpen(false)}>
+              关闭
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>粘贴客户机配置</DialogTitle>
             <DialogDescription>
-              内容是 TOML 文本，交给 `POST /api/vms/create`，与配置池里的文件走同一条创建路径。
+              「创建」把 TOML 交给 `POST /api/vms/create`；「存入配置池」把它写成
+              `POST /api/vms/pool` 的一份池文件，之后它就是这个 hypervisor 自己的候选。
             </DialogDescription>
           </DialogHeader>
           <textarea
@@ -374,11 +559,29 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
             placeholder={'[base]\nid = 9\nname = "guest"\n\n[kernel]\nimage_location = "memory"\n...'}
             onChange={(event) => setCreateToml(event.target.value)}
           />
+          {pool && (
+            <Input
+              value={createName}
+              onChange={(event) => setCreateName(event.target.value)}
+              spellCheck={false}
+              className="font-mono text-xs"
+              placeholder="池文件名，如 guest.toml"
+            />
+          )}
           {createError && <Banner tone="error">{createError}</Banner>}
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               取消
             </Button>
+            {pool && (
+              <Button
+                variant="outline"
+                disabled={busy !== null || createToml.trim().length === 0 || createName.trim().length === 0}
+                onClick={() => void saveToPool()}
+              >
+                存入配置池
+              </Button>
+            )}
             <Button disabled={busy !== null || createToml.trim().length === 0} onClick={() => void create()}>
               创建
             </Button>

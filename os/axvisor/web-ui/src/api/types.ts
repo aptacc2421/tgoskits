@@ -179,14 +179,16 @@ export interface PoolEntry {
   id: number
   name: string
   path: string
+  /** Directory this entry was read from, which is what a conflict is between. */
+  source: string
   /** The raw TOML of the entry, so a client can show or prefill it. */
   toml: string
 }
 
 /**
- * One file in the pool directory that cannot become a VM, with the reason the
- * scanner rejected it (`empty`, `invalid-toml`, `unreadable`, `duplicate-id`,
- * `missing-image`, `directory-unavailable`).
+ * One file in the pool or browse listing that cannot become a VM, with the
+ * reason the scanner rejected it (`empty`, `invalid-toml`, `unreadable`,
+ * `duplicate-id`, `missing-image`, `directory-unavailable`).
  */
 export interface PoolIssue {
   kind: string
@@ -197,7 +199,27 @@ export interface PoolIssue {
 /** `GET /api/vms/pool` (`fs` builds only). */
 export interface PoolInfo {
   directory: string
+  /** Every directory the pool reads, in precedence order. */
+  sources: string[]
   entries: PoolEntry[]
+  issues: PoolIssue[]
+}
+
+/** One subdirectory of `GET /api/vms/browse`. */
+export interface BrowseDirectory {
+  name: string
+  path: string
+}
+
+/** `GET /api/vms/browse?path=...` (`fs` builds only). */
+export interface BrowseInfo {
+  path: string
+  /** Parent directory, or `null` at the filesystem root. */
+  parent: string | null
+  directories: BrowseDirectory[]
+  /** Startable `.toml` files in this directory. */
+  entries: PoolEntry[]
+  /** `.toml` files here that cannot become a VM, and unreadable directories. */
   issues: PoolIssue[]
 }
 

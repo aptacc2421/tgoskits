@@ -36,6 +36,7 @@ use alloc::{
     vec::Vec,
 };
 
+use ax_std::fs::FileTypeExt;
 use axvmconfig::GuestConfig;
 
 /// Directory the pool is read from when the build config does not override it.
@@ -49,10 +50,34 @@ pub fn directory() -> &'static str {
     option_env!("AXVISOR_VM_POOL").unwrap_or(DEFAULT_POOL_DIR)
 }
 
+/// Every directory the pool is read from, in precedence order.
+///
+/// The drop-in directory comes first, so a config the operator puts there wins
+/// over one of the same id from an extra directory; `AXVISOR_VM_DIRS` appends
+/// `:`-separated directories for a host that keeps its configs elsewhere. The
+/// startup directory is deliberately *not* part of this list: its configs are
+/// already registered as the default guest set, so listing them again would
+/// offer every default guest as a candidate for an id that is taken.
+pub fn sources() -> Vec<String> {
+    let mut sources: Vec<String> = Vec::new();
+    let mut push = |directory: &str| {
+        let directory = directory.trim();
+        if !directory.is_empty() && !sources.iter().any(|known| known == directory) {
+            sources.push(directory.to_string());
+        }
+    };
+    push(directory());
+    for extra in option_env!("AXVISOR_VM_DIRS").unwrap_or("").split(':') {
+        push(extra);
+    }
+    sources
+}
+
 /// One pool config that a start request can turn into a running VM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     path: String,
+    source: String,
     id: usize,
     name: String,
     toml: String,
@@ -62,6 +87,11 @@ impl Entry {
     /// Path of the config file, as reported by the filesystem.
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Directory this entry was read from.
+    pub fn source(&self) -> &str {
+        &self.source
     }
 
     /// `base.id` the config asks for, which is also the runtime VM id.
@@ -97,6 +127,9 @@ pub enum IssueKind {
     /// The config reads its guest images from the filesystem and names one that
     /// does not exist, so creating it would fail partway through.
     MissingImage(String),
+    /// The config asks for a guest image source the hypervisor no longer builds.
+    /// It is listed instead of hidden: the operator has to change the file.
+    UnsupportedImageLocation(String),
 }
 
 impl IssueKind {
@@ -111,6 +144,7 @@ impl IssueKind {
             Self::InvalidToml(_) => "invalid-toml",
             Self::DuplicateId { .. } => "duplicate-id",
             Self::MissingImage(_) => "missing-image",
+            Self::UnsupportedImageLocation(_) => "unsupported-image-location",
         }
     }
 }
@@ -131,6 +165,12 @@ impl core::fmt::Display for IssueKind {
             Self::MissingImage(path) => {
                 write!(formatter, "names an image that does not exist: {path}")
             }
+            Self::UnsupportedImageLocation(location) => write!(
+                formatter,
+                "asks for image_location = {location:?}, which is no longer supported: \
+                 set image_location = \"fs\" and point kernel_path at a file inside the \
+                 guest root filesystem"
+            ),
         }
     }
 }
@@ -164,14 +204,20 @@ impl core::fmt::Display for Issue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pool {
     directory: String,
+    sources: Vec<String>,
     entries: Vec<Entry>,
     issues: Vec<Issue>,
 }
 
 impl Pool {
-    /// Directory this scan read.
+    /// First directory this scan read, the one a new config is written to.
     pub fn directory(&self) -> &str {
         &self.directory
+    }
+
+    /// Every directory this scan read, in precedence order.
+    pub fn sources(&self) -> &[String] {
+        &self.sources
     }
 
     /// Startable configs, in the order the filesystem reported them.
@@ -191,9 +237,9 @@ impl Pool {
     }
 }
 
-/// Scan the pool directory reported by [`directory`].
+/// Scan every directory reported by [`sources`].
 pub fn scan() -> Pool {
-    scan_dir(directory())
+    scan_dirs(&sources())
 }
 
 /// Scan one directory of guest configs.
@@ -202,60 +248,70 @@ pub fn scan() -> Pool {
 /// [`IssueKind::DirectoryUnavailable`] issue rather than an error, so callers
 /// can render "no pool provisioned" without special-casing failures.
 pub fn scan_dir(directory: &str) -> Pool {
-    let mut entries = Vec::new();
+    scan_dirs(&[directory.to_string()])
+}
+
+/// Scan `directories` in order.
+///
+/// The first directory that offers a given `base.id` wins and later copies are
+/// reported as [`IssueKind::DuplicateId`], so a precedence order (see
+/// [`sources`]) decides which of two files with the same id is startable.
+/// Nothing is cached: a config the host adds, replaces or removes is visible to
+/// the next scan.
+pub fn scan_dirs(directories: &[String]) -> Pool {
+    let mut entries: Vec<Entry> = Vec::new();
     let mut issues = Vec::new();
 
-    let read_dir = match ax_std::fs::read_dir(directory) {
-        Ok(read_dir) => read_dir,
-        Err(error) => {
-            issues.push(Issue {
-                path: directory.to_string(),
-                kind: IssueKind::DirectoryUnavailable(error.to_string()),
-            });
-            return Pool {
-                directory: directory.to_string(),
-                entries,
-                issues,
-            };
-        }
-    };
-
-    for dir_entry in read_dir {
-        let path = match dir_entry {
-            Ok(dir_entry) => dir_entry.path(),
+    for directory in directories {
+        let read_dir = match ax_std::fs::read_dir(directory) {
+            Ok(read_dir) => read_dir,
             Err(error) => {
                 issues.push(Issue {
-                    path: directory.to_string(),
-                    kind: IssueKind::Unreadable(format!("directory entry: {error}")),
+                    path: directory.clone(),
+                    kind: IssueKind::DirectoryUnavailable(error.to_string()),
                 });
                 continue;
             }
         };
-        if !path.ends_with(".toml") {
-            continue;
-        }
 
-        let entry = match parse_entry(&path) {
-            Ok(entry) => entry,
-            Err(kind) => {
-                issues.push(Issue { path, kind });
+        for dir_entry in read_dir {
+            let path = match dir_entry {
+                Ok(dir_entry) => dir_entry.path(),
+                Err(error) => {
+                    issues.push(Issue {
+                        path: directory.clone(),
+                        kind: IssueKind::Unreadable(format!("directory entry: {error}")),
+                    });
+                    continue;
+                }
+            };
+            if !path.ends_with(".toml") {
                 continue;
             }
-        };
-        match entries.iter().find(|known| known.id == entry.id) {
-            Some(known) => issues.push(Issue {
-                path: entry.path,
-                kind: IssueKind::DuplicateId {
-                    id: entry.id,
-                    claimed_by: known.path.clone(),
-                },
-            }),
-            None => entries.push(entry),
+
+            let entry = match parse_entry(&path, directory) {
+                Ok(entry) => entry,
+                Err(kind) => {
+                    issues.push(Issue { path, kind });
+                    continue;
+                }
+            };
+            match entries.iter().find(|known| known.id == entry.id) {
+                Some(known) => issues.push(Issue {
+                    path: entry.path,
+                    kind: IssueKind::DuplicateId {
+                        id: entry.id,
+                        claimed_by: known.path.clone(),
+                    },
+                }),
+                None => entries.push(entry),
+            }
         }
     }
 
     Pool {
-        directory: directory.to_string(),
+        directory: directories.first().cloned().unwrap_or_default(),
+        sources: directories.to_vec(),
         entries,
         issues,
     }
@@ -267,7 +323,13 @@ pub fn scan_dir(directory: &str) -> Pool {
 /// request's job. Reporting here makes a broken pool visible in the serial log
 /// before anything asks for it.
 pub fn log_startup_state() {
+    ensure_directories();
     let pool = scan();
+    info!(
+        "VM pool: {} folder(s): {}",
+        pool.sources().len(),
+        pool.sources().join(", ")
+    );
     info!(
         "VM pool `{}`: {} config(s)",
         pool.directory(),
@@ -297,7 +359,7 @@ pub fn log_issues(pool: &Pool) {
     }
 }
 
-fn parse_entry(path: &str) -> Result<Entry, IssueKind> {
+fn parse_entry(path: &str, source: &str) -> Result<Entry, IssueKind> {
     let toml = ax_std::fs::read_to_string(path)
         .map_err(|error| IssueKind::Unreadable(error.to_string()))?;
     if toml.trim().is_empty() {
@@ -309,26 +371,256 @@ fn parse_entry(path: &str) -> Result<Entry, IssueKind> {
     // A config that names an image which is not there cannot become a VM, so it
     // is reported instead of listed as startable. The file may be provisioned
     // later; the next scan picks it up because nothing is cached.
-    if let Some(missing) = missing_image(&config) {
-        return Err(IssueKind::MissingImage(missing));
+    if let Some(issue) = unusable_image(&config) {
+        return Err(issue);
     }
     Ok(Entry {
         path: path.to_string(),
+        source: source.to_string(),
         id: config.base.id,
         name: config.base.name.clone(),
         toml,
     })
 }
 
-/// The first guest image a filesystem-backed config names but that is missing.
+/// One entry of a browsed folder: a subdirectory or a config file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Folder {
+    path: String,
+    parent: Option<String>,
+    directories: Vec<Directory>,
+    entries: Vec<Entry>,
+    issues: Vec<Issue>,
+}
+
+/// One subdirectory that can be browsed into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Directory {
+    name: String,
+    path: String,
+}
+
+impl Directory {
+    /// Last component of the path.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Path to browse into.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+impl Folder {
+    /// Directory that was read.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Directory one level up, unless this is the filesystem root.
+    pub fn parent(&self) -> Option<&str> {
+        self.parent.as_deref()
+    }
+
+    /// Subdirectories, by name.
+    pub fn directories(&self) -> &[Directory] {
+        &self.directories
+    }
+
+    /// Startable configs in this folder, by name.
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    /// `.toml` files that cannot be started, plus the folder itself when it
+    /// could not be read.
+    pub fn issues(&self) -> &[Issue] {
+        &self.issues
+    }
+}
+
+/// Browse one directory of the guest filesystem.
 ///
-/// Only `image_location = "fs"` reads these paths at runtime: with `"memory"`
-/// the kernel, its ramdisk and its DTB are embedded at build time, where the
-/// same fields are build-time inputs resolved by the build script and are not
-/// expected to exist in the guest filesystem.
-fn missing_image(config: &GuestConfig) -> Option<String> {
-    if config.kernel.image_location.as_deref() != Some("fs") {
-        return None;
+/// This is what lets the operator pick a config from anywhere instead of only
+/// from the pool: every `.toml` is parsed on the spot, so the result already
+/// says which files are startable and why the others are not. A directory that
+/// cannot be read comes back as an empty [`Folder`] with a
+/// [`IssueKind::DirectoryUnavailable`] issue, the same shape a pool scan uses.
+pub fn browse(path: &str) -> Folder {
+    let mut directories = Vec::new();
+    let mut entries = Vec::new();
+    let mut issues = Vec::new();
+
+    match ax_std::fs::read_dir(path) {
+        Ok(read_dir) => {
+            for dir_entry in read_dir {
+                let (entry_path, is_directory) = match dir_entry {
+                    Ok(dir_entry) => (dir_entry.path(), dir_entry.file_type().is_dir()),
+                    Err(error) => {
+                        issues.push(Issue {
+                            path: path.to_string(),
+                            kind: IssueKind::Unreadable(format!("directory entry: {error}")),
+                        });
+                        continue;
+                    }
+                };
+                let name = entry_path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&entry_path)
+                    .to_string();
+                // `ax_std::fs::metadata` opens the path, which fails on a
+                // directory, so the entry's own type is what decides whether
+                // this is a folder to walk into or a file to try to parse.
+                if is_directory {
+                    directories.push(Directory {
+                        name,
+                        path: entry_path,
+                    });
+                } else if entry_path.ends_with(".toml") {
+                    match parse_entry(&entry_path, path) {
+                        Ok(entry) => entries.push(entry),
+                        Err(kind) => issues.push(Issue {
+                            path: entry_path,
+                            kind,
+                        }),
+                    }
+                }
+            }
+        }
+        Err(error) => issues.push(Issue {
+            path: path.to_string(),
+            kind: IssueKind::DirectoryUnavailable(error.to_string()),
+        }),
+    }
+
+    directories.sort_by(|left, right| left.name.cmp(&right.name));
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    issues.sort_by(|left, right| left.path.cmp(&right.path));
+
+    let parent = {
+        let trimmed = path.trim_end_matches('/');
+        match trimmed.rsplit_once('/') {
+            // `/guest` and `/guest/` both sit directly under the root.
+            Some(("", _)) => Some("/".to_string()),
+            Some((parent, _)) => Some(parent.to_string()),
+            // No separator at all: a relative single component, or the root.
+            None => None,
+        }
+    };
+
+    Folder {
+        path: path.to_string(),
+        parent,
+        directories,
+        entries,
+        issues,
+    }
+}
+
+/// Why a config could not be stored in the pool directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveError {
+    /// The name is not a plain `*.toml` file name.
+    InvalidName(String),
+    /// The text is not a guest config TOML document.
+    InvalidToml(String),
+    /// The pool directory or the file could not be written.
+    Unwritable(String),
+}
+
+impl core::fmt::Display for SaveError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidName(name) => write!(
+                formatter,
+                "`{name}` is not a file name (a plain name ending in .toml is required)"
+            ),
+            Self::InvalidToml(error) => write!(formatter, "not a guest config: {error}"),
+            Self::Unwritable(error) => write!(formatter, "cannot be written: {error}"),
+        }
+    }
+}
+
+/// Create a directory if it is not there yet, reporting the failure as text.
+///
+/// `ax_std::fs::create_dir_all` is not usable on the guest filesystem (it
+/// reports "recursive directory creation is not supported"), so the pool only
+/// ever ensures one level. An existing directory is left untouched, which is
+/// what makes this callable on every start and on every save.
+fn ensure_directory(directory: &str) -> Result<(), String> {
+    if ax_std::fs::read_dir(directory).is_ok() {
+        return Ok(());
+    }
+    ax_std::fs::create_dir(directory).map_err(|error| error.to_string())
+}
+
+/// Create every pool directory that can be created, logging what cannot.
+///
+/// Called on start so the drop-in folder exists and is visible in a browse, and
+/// so an unprovisioned pool reads as "empty folder" rather than "missing
+/// folder". A failure is not fatal: the pool is allowed to be absent, and a
+/// read-only filesystem simply keeps it that way.
+pub fn ensure_directories() {
+    for directory in sources() {
+        if let Err(error) = ensure_directory(&directory) {
+            info!("VM pool: cannot create `{directory}`: {error}");
+        }
+    }
+}
+
+/// Store a guest config in the drop-in pool directory, returning its path.
+///
+/// This is how a config reaches the pool on a machine whose shell cannot write
+/// a multi-line file: the control plane validates the text and writes it as a
+/// pool file, after which it is a candidate like any other. The name is
+/// restricted to a plain `*.toml` file name so the request cannot write outside
+/// the pool directory.
+pub fn save(name: &str, toml: &str) -> Result<String, SaveError> {
+    save_in(&directory(), name, toml)
+}
+
+/// Store a guest config in a specific directory, returning its path.
+///
+/// [`save`] passes the drop-in pool directory; taking the directory as an
+/// argument is what makes the write path testable against a temporary fixture
+/// instead of the deployed pool. Validation is identical in both cases: the name
+/// must be a plain `*.toml` file name (no separators, no leading dot) and the
+/// text must parse as a guest config before anything is written.
+pub fn save_in(directory: &str, name: &str, toml: &str) -> Result<String, SaveError> {
+    let name = name.trim();
+    if name.is_empty() || !name.ends_with(".toml") || name.contains('/') || name.starts_with('.') {
+        return Err(SaveError::InvalidName(name.to_string()));
+    }
+    GuestConfig::from_toml(toml).map_err(|error| SaveError::InvalidToml(format!("{error}")))?;
+
+    // The guest filesystem cannot create parent directories — `create_dir_all`
+    // reports "recursive directory creation is not supported" — so an absent
+    // drop-in folder is created one level deep, which is all the pool needs.
+    ensure_directory(directory).map_err(SaveError::Unwritable)?;
+    let path = format!("{directory}/{name}");
+    ax_std::fs::write(&path, toml).map_err(|error| SaveError::Unwritable(error.to_string()))?;
+    Ok(path)
+}
+///
+/// The first guest image a config names but that is missing from the guest
+/// filesystem, and the `image_location` value when the config asks for a source
+/// the hypervisor no longer builds.
+///
+/// Guest images are read from the guest filesystem and nowhere else, so a
+/// filesystem config that names an absent kernel, ramdisk or DTB cannot become a
+/// VM. A config that asks for a removed source is reported the same way, because
+/// silently listing it would let the operator pick a config that fails on start.
+fn unusable_image(config: &GuestConfig) -> Option<IssueKind> {
+    if !config.kernel.uses_filesystem_images() {
+        return Some(IssueKind::UnsupportedImageLocation(
+            config
+                .kernel
+                .image_location
+                .clone()
+                .unwrap_or_else(|| "<absent>".to_string()),
+        ));
     }
 
     [
@@ -340,5 +632,5 @@ fn missing_image(config: &GuestConfig) -> Option<String> {
     .flatten()
     .filter(|path| !path.is_empty())
     .find(|path| ax_std::fs::metadata(path).is_err())
-    .map(String::from)
+    .map(|path| IssueKind::MissingImage(path.to_string()))
 }

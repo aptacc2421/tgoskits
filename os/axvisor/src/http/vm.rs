@@ -4,8 +4,11 @@
 //! handlers are dispatched by the TCP serving path in [`super::server`].
 
 #[cfg(feature = "fs")]
+use alloc::collections::BTreeMap;
 use alloc::string::ToString;
 
+#[cfg(feature = "fs")]
+use axum::extract::Query;
 use axum::{Json, extract::Path, http::StatusCode};
 use axvm::{AxVMRef, AxVmError, VmStatus, VmVcpuState};
 use axvmconfig::GuestConfig;
@@ -30,22 +33,32 @@ pub async fn vm_detail(Path(id_str): Path<String>) -> Result<Json<Value>, Status
     }
 }
 
-/// `POST /api/vms/create` — create a VM from a TOML config in the JSON body.
+/// `POST /api/vms/create` — create a VM from a TOML config.
 ///
-/// Body: `{"toml": "<完整 TOML 配置>"}`. The guest kernel must be a build-time
-/// embedded image (`image_location = "memory"`) whose id matches the config's
-/// `base.id`, and that id must not currently be registered. Because embedded
-/// images are matched by id (`memory_images_for_vm`), a config whose id has no
-/// embedded image fails with 500 — the runtime can only realize guest images
-/// that were baked into the hypervisor at build time. An exhausted host resource
-/// (memory, or the browser console lane table of a `browser-console` build) is a
-/// 503, so a caller can tell "try later" from "this config is wrong".
+/// Body: `{"toml": "<完整 TOML 配置>"}` or `{"path": "<guest 文件系统中的 .toml>"}`.
+/// The path form is what the folder browser uses: the file is read on the host
+/// and the VM is created from exactly the bytes that are there, so a config can
+/// live in any directory instead of being pasted. The guest kernel is read from
+/// the guest filesystem (`image_location = "fs"`, the only supported source), and
+/// the config's `base.id` must not currently be registered. An exhausted host
+/// resource (memory, or the browser console lane table of a `browser-console`
+/// build) is a 503, so a caller can tell "try later" from "this config is wrong".
 pub async fn vm_create(Json(payload): Json<Value>) -> Result<Json<Value>, StatusCode> {
-    let toml = payload
-        .get("toml")
-        .and_then(Value::as_str)
-        .ok_or(StatusCode::BAD_REQUEST)?;
-    let config = GuestConfig::from_toml(toml).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let toml = match (
+        payload.get("toml").and_then(Value::as_str),
+        payload.get("path").and_then(Value::as_str),
+    ) {
+        (Some(toml), _) => toml.to_string(),
+        // Reading a config from the guest filesystem needs the filesystem
+        // feature; a build without it only accepts the pasted form.
+        #[cfg(feature = "fs")]
+        (None, Some(path)) => ax_std::fs::read_to_string(path).map_err(|error| {
+            warn!("HTTP: cannot read config `{path}`: {error}");
+            StatusCode::BAD_REQUEST
+        })?,
+        (None, _) => return Err(StatusCode::BAD_REQUEST),
+    };
+    let config = GuestConfig::from_toml(&toml).map_err(|_| StatusCode::BAD_REQUEST)?;
     let id = config.base.id;
     // Explicit duplicate check: `create_vm_from_toml` fails on a re-registered id
     // with a plain anyhow string, so surface the conflict as a contract error
@@ -53,7 +66,7 @@ pub async fn vm_create(Json(payload): Json<Value>) -> Result<Json<Value>, Status
     if AxvmManager::vm_by_id(id).is_some() {
         return Err(StatusCode::CONFLICT);
     }
-    match AxvmManager::create_vm_from_toml(toml) {
+    match AxvmManager::create_vm_from_toml(&toml) {
         Ok(id) => {
             info!("HTTP: VM[{id}] created via control API");
             Ok(Json(json!({ "id": id })))
@@ -95,31 +108,114 @@ pub async fn vm_delete(Path(id_str): Path<String>) -> Result<StatusCode, StatusC
 
 /// `GET /api/vms/pool` — the configs a start request can create on demand.
 ///
-/// The pool is the guest config directory named by the build config
-/// (`AXVISOR_VM_POOL`, see [`crate::vm_pool`]). It is not the VM registry: a
-/// pool entry is only a candidate and is created when a start request names its
-/// id. `entries` carries the raw TOML so a client can show or prefill a config,
-/// and `issues` reports every file in the directory that cannot become an entry
-/// (unreadable, empty, not a guest config, id claimed twice) instead of hiding
-/// it. `directory` is echoed so the client can tell "nothing provisioned" from
+/// The pool is every guest config directory named by the build config (the
+/// drop-in `AXVISOR_VM_POOL` directory first, then any `AXVISOR_VM_DIRS`
+/// entries; see [`crate::vm_pool`]), so "a few folders" is the normal setup: the
+/// default folder and the folder the operator drops configs into. It is not the
+/// VM registry: a pool entry is only a candidate and is created when a start
+/// request names its id. `entries` carries the raw TOML so a client can show or
+/// prefill a config, each entry says which `source` folder it came from, and
+/// `issues` reports every file that cannot become an entry (unreadable, empty,
+/// not a guest config, id claimed twice) instead of hiding it. `directory` and
+/// `sources` are echoed so the client can tell "nothing provisioned" from
 /// "wrong directory".
 #[cfg(feature = "fs")]
 pub async fn vm_pool() -> Json<Value> {
     let pool = crate::vm_pool::scan();
-    let entries: Vec<Value> = pool
-        .entries()
+    let entries = entries_json(pool.entries());
+    let issues = issues_json(pool.issues());
+    Json(json!({
+        "directory": pool.directory(),
+        "sources": pool.sources(),
+        "entries": entries,
+        "issues": issues,
+    }))
+}
+
+/// `GET /api/vms/browse?path=...` — list one directory of the guest filesystem.
+///
+/// Where [`vm_pool`] answers "what can be started without a create call", this
+/// answers "what is in this folder": the subdirectories to walk into and every
+/// `.toml` in it, already parsed, so a client can offer the startable ones and
+/// say why the others are not. Together with the `path` form of
+/// [`vm_create`] this is what lets an operator create a VM from a config in any
+/// folder instead of only from the pool. A directory that cannot be read comes
+/// back as an empty listing plus an issue, never an error, so browsing to a
+/// missing folder is a visible state rather than a failed request.
+#[cfg(feature = "fs")]
+pub async fn vm_browse(Query(query): Query<BTreeMap<String, String>>) -> Json<Value> {
+    let path = query
+        .get("path")
+        .map(String::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| crate::vm_pool::directory().to_string());
+    let folder = crate::vm_pool::browse(&path);
+    let directories: Vec<Value> = folder
+        .directories()
+        .iter()
+        .map(|directory| json!({ "name": directory.name(), "path": directory.path() }))
+        .collect();
+    Json(json!({
+        "path": folder.path(),
+        "parent": folder.parent(),
+        "directories": directories,
+        "entries": entries_json(folder.entries()),
+        "issues": issues_json(folder.issues()),
+    }))
+}
+
+/// `POST /api/vms/pool` — store a pasted config in the drop-in pool directory.
+///
+/// Body: `{"name": "guest.toml", "toml": "<完整 TOML 配置>"}`. This is how a
+/// config reaches the pool on a machine whose shell cannot write a multi-line
+/// file: the control plane validates the text and writes it as a pool file,
+/// after which it is a candidate like any other. The name must be a plain
+/// `*.toml` file name, so a request cannot write outside the pool directory.
+#[cfg(feature = "fs")]
+pub async fn vm_pool_save(Json(payload): Json<Value>) -> Result<Json<Value>, StatusCode> {
+    let name = payload.get("name").and_then(Value::as_str).unwrap_or("");
+    let toml = payload
+        .get("toml")
+        .and_then(Value::as_str)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    match crate::vm_pool::save(name, toml) {
+        Ok(path) => {
+            info!("HTTP: config saved to pool as `{path}`");
+            Ok(Json(json!({ "path": path })))
+        }
+        Err(error @ crate::vm_pool::SaveError::Unwritable(_)) => {
+            error!("HTTP: cannot save pool config: {error}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+        Err(error) => {
+            warn!("HTTP: rejected pool config: {error}");
+            Err(StatusCode::BAD_REQUEST)
+        }
+    }
+}
+
+/// Render pool entries for JSON, raw TOML included.
+#[cfg(feature = "fs")]
+fn entries_json(entries: &[crate::vm_pool::Entry]) -> Vec<Value> {
+    entries
         .iter()
         .map(|entry| {
             json!({
                 "id": entry.id(),
                 "name": entry.name(),
                 "path": entry.path(),
+                "source": entry.source(),
                 "toml": entry.toml(),
             })
         })
-        .collect();
-    let issues: Vec<Value> = pool
-        .issues()
+        .collect()
+}
+
+/// Render pool or browse issues for JSON.
+#[cfg(feature = "fs")]
+fn issues_json(issues: &[crate::vm_pool::Issue]) -> Vec<Value> {
+    issues
         .iter()
         .map(|issue| {
             json!({
@@ -128,12 +224,7 @@ pub async fn vm_pool() -> Json<Value> {
                 "detail": issue.kind().to_string(),
             })
         })
-        .collect();
-    Json(json!({
-        "directory": pool.directory(),
-        "entries": entries,
-        "issues": issues,
-    }))
+        .collect()
 }
 
 /// `POST /api/vms/{id}/start` — start a VM.
