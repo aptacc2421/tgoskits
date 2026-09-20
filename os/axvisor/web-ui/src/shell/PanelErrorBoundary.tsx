@@ -7,9 +7,14 @@
 //! `phys_cpu_set` type mismatch presented itself. The boundary keeps the failure
 //! inside the tab that caused it: the navigation, the other tabs and the event
 //! feed keep working, and the tab explains itself.
+//!
+//! The explanation is classified instead of assumed: a panel also fails when the
+//! hypervisor is simply not there any more, and a chunk load is not a contract
+//! violation. See `@/lib/panel-error`.
 
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
+import { classifyPanelFailure, describePanelFailure } from '@/lib/panel-error'
 
 interface PanelErrorBoundaryProps {
   /** Panel title, so the message names what broke. */
@@ -48,9 +53,7 @@ export class PanelErrorBoundary extends Component<
           面板「{this.props.title}」渲染失败，其余界面仍可用。
         </p>
         <p className="mt-1 font-mono text-xs text-muted-foreground">{String(error.message)}</p>
-        <p className="mt-2 text-muted-foreground">
-          多半是后端某个字段的类型与前端契约不一致（后端 JSON 与 `src/api/types.ts`）。串口日志里有完整堆栈。
-        </p>
+        <p className="mt-2 text-muted-foreground">{describePanelFailure(classifyPanelFailure(error))}</p>
         <Button className="mt-3" size="sm" variant="outline" onClick={this.retry}>
           重试渲染
         </Button>

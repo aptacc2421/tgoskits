@@ -186,7 +186,12 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
 
   return (
     <div className="flex flex-col gap-4">
-      {error && <Banner tone="error">读取 VM 列表失败：{error}</Banner>}
+      {error && (
+        <Banner tone="error">
+          读取 VM 列表失败：{error}
+          {registry.length > 0 && ' 下表是最后一次成功读取的结果，不代表当前状态。'}
+        </Banner>
+      )}
       {note && <Banner tone="info">{busy ? `${note}（等待真实状态收敛）` : note}</Banner>}
 
       <Card>

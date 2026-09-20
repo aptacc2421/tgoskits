@@ -61,7 +61,7 @@ export class ApiError extends Error {
   readonly detail: string
 
   constructor(status: number, detail: string) {
-    super(`HTTP ${status} · ${detail}`)
+    super(status === 0 ? detail : `HTTP ${status} · ${detail}`)
     this.name = 'ApiError'
     this.status = status
     this.detail = detail
@@ -70,6 +70,15 @@ export class ApiError extends Error {
 
 export function describeError(e: unknown): string {
   if (e instanceof ApiError) {
+    // Status 0 is the client's own marker for "the request never reached the
+    // hypervisor", which is a different situation from any HTTP rejection: the
+    // reader is not being told what the backend thinks, they are being told
+    // there is no backend to ask. That is what a stopped or restarted instance
+    // looks like from the dashboard, so say it instead of showing the browser's
+    // `Failed to fetch`.
+    if (e.status === 0) {
+      return '没有连上后端：连接中断，或后端已退出/正在重启。刷新页面；仍失败就重启实例。'
+    }
     // A body the backend did not fill in still has to read as a sentence: the
     // status code alone already identifies the failure class on this API.
     const detail = e.detail.length > 0 ? e.detail : STATUS_HINTS[e.status] ?? ''
