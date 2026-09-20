@@ -19,7 +19,11 @@ the default guest stays `Ready` until the probe starts it. The probe covers the
 contract a browser depends on, not a browser:
 
     GET    /                      -> 200   (dashboard shell; CSP + no-cache + nosniff)
-    GET    /assets/{hashed}       -> 200   (every asset the shell references; immutable)
+    GET    /assets/{hashed}       -> 200   (every asset the shell references and
+                                            every chunk + stylesheet those refer
+                                            to, all immutable; the graph has to
+                                            hold the lazy panel chunks and a
+                                            stylesheet)
     GET    /no-such-page          -> 404   (no SPA catch-all)
     GET    /assets/no-such.js     -> 404   (asset table is exact)
     <bundle>                      -> holds every endpoint the UI calls
@@ -551,10 +555,22 @@ def check_dashboard():
         for reference in asset_references(payload):
             if reference not in fetched:
                 pending.add(reference)
-    scripts = [path for path in fetched if path.endswith(".js")]
-    if not scripts:
-        raise AssertionError("the shell references no script")
+    scripts = sorted(path for path in fetched if path.endswith(".js"))
+    stylesheets = sorted(path for path in fetched if path.endswith(".css"))
+    # The panels are lazily imported chunks, so the graph always holds more than
+    # the shell script, and it always holds the stylesheet that comes with the
+    # terminal chunk. A graph without them means the crawl stopped following the
+    # bundle's references: the check would keep passing while covering almost
+    # nothing, which is worse than failing.
+    if len(scripts) < 2:
+        raise AssertionError(
+            "the shell is the only script in the asset graph: %r" % (scripts,)
+        )
+    if not stylesheets:
+        raise AssertionError("the asset graph carries no stylesheet")
     print("  web-ui probe: asset graph resolved -> %d files" % len(fetched))
+    for path in sorted(fetched):
+        print("  web-ui probe:   asset %s" % path)
 
     # No SPA catch-all: an unknown path keeps the router's 404, and the asset
     # table is exact rather than a directory listing.
