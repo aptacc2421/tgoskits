@@ -140,7 +140,7 @@ fn with_config_remains_available_without_machine_resources() {
     let states = [
         Machine::Destroying,
         Machine::Destroyed,
-        Machine::Failed(String::from("test failure")),
+        Machine::Failed(String::from("test failure"), None),
     ];
 
     for (index, machine) in states.into_iter().enumerate() {
