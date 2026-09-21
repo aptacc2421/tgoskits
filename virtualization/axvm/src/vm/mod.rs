@@ -1416,6 +1416,17 @@ pub struct AxVM {
     config: StdMutex<AxVMConfig>,
     /// Lifecycle and runtime state reached from both task and interrupt context.
     machine: IrqSafeMutex<Machine<AxVMResources, Arc<VmRuntimeHandle>>>,
+    /// Serializes [`AxVM::destroy`] for the whole operation.
+    ///
+    /// `destroy` commits `Destroyed` while holding the machine guard but runs
+    /// `cleanup_resource_set` after releasing it, and that cleanup mutates state
+    /// keyed by the VM id (global IVC channel teardown). Without this gate a
+    /// concurrent caller would observe `Destroyed` and return `Ok`, letting the
+    /// registry reuse the id while the first cleanup is still running, so the
+    /// old cleanup could tear down the replacement VM's bindings. Holding the
+    /// gate makes the documented synchronous completion contract true for every
+    /// caller: a successful `destroy` returns only after cleanup finished.
+    destroy_gate: StdMutex<()>,
     #[cfg(not(target_arch = "aarch64"))]
     translations: translation::TranslationGate,
     fw_cfg_payload: Arc<FwCfgPayloadSlot>,
@@ -1445,6 +1456,7 @@ impl AxVM {
             name,
             config: StdMutex::new(config),
             machine: IrqSafeMutex::new(Machine::Ready(resources)),
+            destroy_gate: StdMutex::new(()),
             #[cfg(not(target_arch = "aarch64"))]
             translations: translation::TranslationGate::new(),
             fw_cfg_payload,
@@ -1967,10 +1979,16 @@ impl AxVM {
 
     /// Resets the VM by discarding runtime-only state, rebuilding vCPUs/devices,
     /// and starting from a fresh `Running` state.
+    ///
+    /// A failed rebuild commits `Failed` and keeps the resource set attached to
+    /// it, so the VM is unreusable until `destroy()` retires that set outside the
+    /// machine guard.
     pub fn reset(self: &Arc<Self>) -> AxVmResult {
         info!("Resetting VM[{}]", self.id());
         self.stop_and_join_runtime(StopReason::Forced)?;
 
+        // On failure `reset_with` leaves the VM `Failed` with the resource set
+        // retained, and the `?` below returns before `prepare`/`start`.
         let retired_devices = {
             let mut machine = self.machine.lock();
             machine.reset_with(|resources| {
@@ -2469,10 +2487,14 @@ impl AxVM {
     /// Destroys the VM and releases all lifecycle-owned resources.
     ///
     /// The `Destroyed` state is committed while the machine guard is held, but
-    /// the resource cleanup below runs after it is released. A second caller
-    /// that observes `Destroyed` therefore returns `Ok(())` without waiting for
-    /// an in-flight cleanup to finish.
+    /// the resource cleanup below runs after it is released: a device teardown
+    /// may join a worker thread, which needs a scheduler safe point. The whole
+    /// operation holds [`Self::destroy_gate`], so a concurrent caller cannot
+    /// return before that cleanup finished.
     pub fn destroy(&self) -> AxVmResult {
+        // Hold the gate for the whole operation, including the resource cleanup
+        // below that runs after the machine guard is released.
+        let _gate = self.destroy_gate.lock_unpoisoned();
         let vm_id = self.id();
         match self.status() {
             VmStatus::Running | VmStatus::Paused | VmStatus::Stopping => {
