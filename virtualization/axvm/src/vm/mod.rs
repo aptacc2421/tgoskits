@@ -1024,16 +1024,17 @@ impl AxVMResources {
             .ok_or_else(|| ax_err_type!(BadState, "VM interrupt controller is not prepared"))
     }
 
-    fn reset_transient_resources(&mut self) -> AxVmResult {
+    /// Resets transient resources and returns the device set it detached.
+    ///
+    /// Callers run this under the IRQ-safe machine guard, so the returned
+    /// `Arc<DeviceRuntime>` must be dropped only after that guard is released:
+    /// dropping the last reference joins device worker threads (a file-backed
+    /// virtio-blk owns one), and joining blocks, which is not allowed with
+    /// interrupts disabled. On failure the device set stays attached to the
+    /// resource set so a later reset or destroy can retire it outside the
+    /// guard instead of dropping it here.
+    fn reset_transient_resources(&mut self) -> AxVmResult<Option<Arc<DeviceRuntime>>> {
         self.teardown_ivc_bindings()?;
-        // Callers run this under the IRQ-safe machine guard, so the devices are
-        // only reset here, never dropped: dropping the last `Arc<DeviceRuntime>`
-        // joins device worker threads, which cannot block with interrupts off.
-        if let Some(devices) = self.devices.take() {
-            devices
-                .reset_lifecycle_devices()
-                .map_err(|error| AxVmError::device("reset device lifecycle", error))?;
-        }
         let memory_regions = self.memory_regions.clone();
         self.address_space.clear();
         for region in &memory_regions {
@@ -1054,7 +1055,19 @@ impl AxVMResources {
         self.vcpu_list = None;
         self.interrupt_controller = None;
         self.address_layout = None;
-        Ok(())
+        // Detach the device set last: every step above can still fail, and an
+        // early return after the take would drop the set under the guard.
+        let devices = self.devices.take();
+        if let Some(Err(reset_error)) = devices
+            .as_ref()
+            .map(|devices| devices.reset_lifecycle_devices())
+        {
+            // Keep the set attached so it is retired by the next reset or by
+            // destroy rather than dropped here.
+            self.devices = devices;
+            return Err(AxVmError::device("reset device lifecycle", reset_error));
+        }
+        Ok(devices)
     }
 
     fn teardown_ivc_bindings(&mut self) -> AxVmResult {
@@ -1958,11 +1971,17 @@ impl AxVM {
         info!("Resetting VM[{}]", self.id());
         self.stop_and_join_runtime(StopReason::Forced)?;
 
-        self.machine.lock().reset_with(|resources| {
-            resources
-                .reset_transient_resources()
-                .map_err(|error| AxVmError::resource_unavailable("reset resources", error))
-        })?;
+        let retired_devices = {
+            let mut machine = self.machine.lock();
+            machine.reset_with(|resources| {
+                resources
+                    .reset_transient_resources()
+                    .map_err(|error| AxVmError::resource_unavailable("reset resources", error))
+            })?
+        };
+        // The machine guard is released: retiring the detached device set can
+        // now join its worker threads.
+        drop(retired_devices);
         self.prepare()?;
         self.start()
     }
@@ -2448,6 +2467,11 @@ impl AxVM {
     }
 
     /// Destroys the VM and releases all lifecycle-owned resources.
+    ///
+    /// The `Destroyed` state is committed while the machine guard is held, but
+    /// the resource cleanup below runs after it is released. A second caller
+    /// that observes `Destroyed` therefore returns `Ok(())` without waiting for
+    /// an in-flight cleanup to finish.
     pub fn destroy(&self) -> AxVmResult {
         let vm_id = self.id();
         match self.status() {

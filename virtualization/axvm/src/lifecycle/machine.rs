@@ -389,26 +389,45 @@ impl<R, H> Machine<R, H> {
         }
     }
 
-    pub fn reset_with<F>(&mut self, f: F) -> AxVmResult
+    /// Resets the resource set owned by `Ready`/`Stopped` and returns whatever
+    /// the closure produces.
+    ///
+    /// Returning the closure value lets the caller carry an owned resource out
+    /// of the guarded machine and retire it after the guard is released.
+    ///
+    /// The resource set stays owned by the machine on failure as well: the
+    /// caller may still need it to clean up (for example a later `destroy`),
+    /// and dropping it here would run device destructors while the caller's
+    /// IRQ-safe guard is held.
+    pub fn reset_with<T, F>(&mut self, f: F) -> AxVmResult<T>
     where
-        F: FnOnce(&mut R) -> AxVmResult,
+        F: FnOnce(&mut R) -> AxVmResult<T>,
     {
         let old = std::mem::replace(self, Machine::Switching);
         match old {
             Machine::Ready(mut resources) => {
-                f(&mut resources)?;
+                let result = f(&mut resources);
                 *self = Machine::Ready(resources);
-                Ok(())
+                result
             }
             Machine::Stopped {
                 resources: Some(mut resources),
                 runtime: None,
-                ..
-            } => {
-                f(&mut resources)?;
-                *self = Machine::Ready(resources);
-                Ok(())
-            }
+                reason,
+            } => match f(&mut resources) {
+                Ok(value) => {
+                    *self = Machine::Ready(resources);
+                    Ok(value)
+                }
+                Err(error) => {
+                    *self = Machine::Stopped {
+                        resources: Some(resources),
+                        runtime: None,
+                        reason,
+                    };
+                    Err(error)
+                }
+            },
             Machine::Stopping {
                 resources,
                 runtime,
@@ -635,6 +654,45 @@ mod tests {
 
         assert_eq!(machine.status(), VmStatus::Ready);
         assert_eq!(machine.resources(), Some(&17));
+        assert!(machine.runtime().is_none());
+    }
+
+    #[test]
+    fn lifecycle_reset_returns_the_closure_value_and_keeps_resources_on_failure() {
+        let mut machine = Machine::<usize>::Ready(7usize);
+
+        // A reset hands the closure value back to the caller; that is how a
+        // detached device set leaves the guarded machine.
+        assert_eq!(machine.reset_with(|resources| Ok(*resources)).unwrap(), 7);
+        assert_eq!(machine.status(), VmStatus::Ready);
+        assert_eq!(machine.resources(), Some(&7));
+
+        // A failed reset must keep owning the resource set: the closure runs
+        // under the caller's IRQ-safe guard, so the set (and any device set it
+        // detached) has to survive for a later retry or destroy.
+        let err = machine
+            .reset_with(|_| Err::<(), _>(AxVmError::invalid_state("reset", "boom")))
+            .unwrap_err();
+        assert!(matches!(err, AxVmError::InvalidState { .. }));
+        assert_eq!(machine.status(), VmStatus::Ready);
+        assert_eq!(machine.resources(), Some(&7));
+    }
+
+    #[test]
+    fn lifecycle_reset_restores_stopped_state_when_the_closure_fails() {
+        let mut machine = Machine::<usize>::Stopped {
+            resources: Some(7usize),
+            runtime: None,
+            reason: StopReason::Forced,
+        };
+
+        let err = machine
+            .reset_with(|_| Err::<(), _>(AxVmError::invalid_state("reset", "boom")))
+            .unwrap_err();
+
+        assert!(matches!(err, AxVmError::InvalidState { .. }));
+        assert_eq!(machine.status(), VmStatus::Stopped);
+        assert_eq!(machine.resources(), Some(&7));
         assert!(machine.runtime().is_none());
     }
 
