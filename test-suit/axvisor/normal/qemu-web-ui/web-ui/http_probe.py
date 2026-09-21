@@ -50,7 +50,7 @@ on the served asset, so they run without a browser.
 Environment (set by the generic runner):
 
     AXVISOR_HTTP_BASE            http://127.0.0.1:<host_port> (forwarded)
-    AXVISOR_HTTP_CASE_DIR        case directory holding `vm-memory.toml`
+    AXVISOR_HTTP_CASE_DIR        case directory holding `vm-linux-alpine.toml`
     AXVISOR_HTTP_CONNECT_TIMEOUT seconds for the initial reachability wait
     AXVISOR_HTTP_REQUEST_TIMEOUT seconds per HTTP request
 """
@@ -101,7 +101,7 @@ GUEST_INPUT_REJECTED = b"is not running; input was dropped"
 GUEST_ISOLATION_COMMAND = b"echo $((222*222))\r"
 GUEST_ISOLATION_RESULT = b"49284"
 
-# The default guest (`web-ui/vm-memory.toml`), kept `Ready` by `no-auto-start`.
+# The default guest (`web-ui/vm-linux-alpine.toml`), kept `Ready` by `no-auto-start`.
 DEFAULT_VM_ID = 1
 # Endpoints the dashboard bundle must contain: the UI is wired to them, so a
 # bundle that does not carry them cannot drive this build.
@@ -799,7 +799,7 @@ def check_lifecycle(events):
 
 def check_recreate(events):
     """Recreate the default guest from the fixture, the way the panel does."""
-    with open(os.path.join(CASE_DIR, "vm-memory.toml"), "r", encoding="utf-8") as handle:
+    with open(os.path.join(CASE_DIR, "vm-linux-alpine.toml"), "r", encoding="utf-8") as handle:
         vm_config = handle.read()
     status, body = request(
         "POST", "/api/vms/create", json.dumps({"toml": vm_config})

@@ -3,7 +3,7 @@
 
 Case asset for the `http-control-plane` test case
 (`test-suit/axvisor/normal/qemu-http-control-plane/`). It owns the *test
-content* — the concrete requests, the `vm-memory.toml` fixture, and the
+content* — the concrete requests, the `vm-linux-alpine.toml` fixture, and the
 assertions — and can evolve independently of the axbuild runner.
 
 The generic axbuild probe runner
@@ -16,7 +16,7 @@ networking hostfwd. Nothing in the hypervisor knows a test is running.
 Environment (set by the generic runner):
 
     AXVISOR_HTTP_BASE            http://127.0.0.1:<host_port> (forwarded)
-    AXVISOR_HTTP_CASE_DIR        case directory holding `vm-memory.toml`
+    AXVISOR_HTTP_CASE_DIR        case directory holding `vm-linux-alpine.toml`
                                  (default: this file's directory)
     AXVISOR_HTTP_CONNECT_TIMEOUT seconds for the initial reachability wait
     AXVISOR_HTTP_REQUEST_TIMEOUT seconds per HTTP request
@@ -90,11 +90,10 @@ deterministic regression for the failed-entry path as well.
 
 The last recreate -> start -> stop -> delete block is the resource re-acquire
 regression: it proves destroy freed guest memory, vCPUs, devices, and the
-registry entry so a fresh VM can be rebuilt from the same embedded image.
-`vm-memory.toml` is matched by `base.id` against the build-time embedded
-images, so the create body carries that file verbatim (the `kernel_path` /
-`ramdisk_path` `${workspace}` placeholders are unused at runtime for memory
-images).
+registry entry so a fresh VM can be rebuilt from the same filesystem images.
+`vm-linux-alpine.toml` is the config the build registers as the default VM, so
+the create body carries that file verbatim and the recreated VM reads the same
+kernel and the same guest disk image as the one the build created.
 """
 
 import json
@@ -367,7 +366,7 @@ def poll_vm_gone(vm_id):
 
 
 def main():
-    with open(os.path.join(CASE_DIR, "vm-memory.toml"), "r", encoding="utf-8") as f:
+    with open(os.path.join(CASE_DIR, "vm-linux-alpine.toml"), "r", encoding="utf-8") as f:
         vm_config = f.read()
     create_body = json.dumps({"toml": vm_config})
     bad_body = json.dumps({"toml": "this is not [[ valid toml {{{"})
