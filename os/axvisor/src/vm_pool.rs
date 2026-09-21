@@ -127,9 +127,6 @@ pub enum IssueKind {
     /// The config reads its guest images from the filesystem and names one that
     /// does not exist, so creating it would fail partway through.
     MissingImage(String),
-    /// The config asks for a guest image source the hypervisor no longer builds.
-    /// It is listed instead of hidden: the operator has to change the file.
-    UnsupportedImageLocation(String),
 }
 
 impl IssueKind {
@@ -144,7 +141,6 @@ impl IssueKind {
             Self::InvalidToml(_) => "invalid-toml",
             Self::DuplicateId { .. } => "duplicate-id",
             Self::MissingImage(_) => "missing-image",
-            Self::UnsupportedImageLocation(_) => "unsupported-image-location",
         }
     }
 }
@@ -165,12 +161,6 @@ impl core::fmt::Display for IssueKind {
             Self::MissingImage(path) => {
                 write!(formatter, "names an image that does not exist: {path}")
             }
-            Self::UnsupportedImageLocation(location) => write!(
-                formatter,
-                "asks for image_location = {location:?}, which is no longer supported: \
-                 set image_location = \"fs\" and point kernel_path at a file inside the \
-                 guest root filesystem"
-            ),
         }
     }
 }
@@ -605,22 +595,18 @@ pub fn save_in(directory: &str, name: &str, toml: &str) -> Result<String, SaveEr
 }
 ///
 /// The first guest image a config names but that is missing from the guest
-/// filesystem, and the `image_location` value when the config asks for a source
-/// the hypervisor no longer builds.
+/// filesystem.
 ///
-/// Guest images are read from the guest filesystem and nowhere else, so a
-/// filesystem config that names an absent kernel, ramdisk or DTB cannot become a
-/// VM. A config that asks for a removed source is reported the same way, because
-/// silently listing it would let the operator pick a config that fails on start.
+/// Only a config that reads its images from the guest filesystem names files
+/// this plane can look up: a config whose images are embedded in the hypervisor
+/// (`image_location = "memory"`) has nothing to check here, and its kernel path
+/// is allowed to be absent from the guest filesystem. A filesystem config that
+/// names an absent kernel, ramdisk or DTB cannot become a VM, so it is reported
+/// rather than listed: the operator would otherwise pick a config that fails on
+/// start.
 fn unusable_image(config: &GuestConfig) -> Option<IssueKind> {
-    if !config.kernel.uses_filesystem_images() {
-        return Some(IssueKind::UnsupportedImageLocation(
-            config
-                .kernel
-                .image_location
-                .clone()
-                .unwrap_or_else(|| "<absent>".to_string()),
-        ));
+    if config.kernel.image_location.as_deref() != Some("fs") {
+        return None;
     }
 
     [
