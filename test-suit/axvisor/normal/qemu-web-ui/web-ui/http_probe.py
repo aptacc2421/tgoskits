@@ -103,15 +103,38 @@ GUEST_ISOLATION_RESULT = b"49284"
 
 # The default guest (`web-ui/vm-linux-alpine.toml`), kept `Ready` by `no-auto-start`.
 DEFAULT_VM_ID = 1
-# Endpoints the dashboard bundle must contain: the UI is wired to them, so a
-# bundle that does not carry them cannot drive this build.
-BUNDLE_ENDPOINTS = (
-    b"/api/manifest",
-    b"/api/vms",
-    b"/api/vms/pool",
-    b"/api/consoles",
-    b"/ws/events",
-)
+# The one path the bundle has to carry: `GET /api/manifest` is the bootstrap, and
+# it cannot come from the manifest itself. Every other path the dashboard calls
+# is read out of that response, so this is the whole list by design — a bundle
+# that does not carry it cannot learn anything else.
+BUNDLE_ENDPOINTS = (b"/api/manifest",)
+
+# The operations each panel declares, as the dashboard relies on them: the shell
+# opens a panel per kind, the VM panel drives the whole lifecycle and the pool,
+# the console panel lists lanes and streams one, and the management panel streams
+# its own lane. Pinning the names here is what keeps the declaration and the UI
+# from drifting apart in either direction: a link the UI needs but nobody
+# declares fails the case, and a declared link that stops being served fails it
+# too (`check_manifest_links`).
+MANIFEST_LINKS = {
+    "vms": [
+        "browse",
+        "create",
+        "delete",
+        "detail",
+        "events",
+        "list",
+        "pause",
+        "pool",
+        "pool_save",
+        "resume",
+        "start",
+        "stop",
+    ],
+    "console": ["list", "stream"],
+    "shell": ["stream"],
+}
+MANIFEST_ROOTS = {"vms": "/api/vms", "console": "/api/consoles", "shell": "/ws"}
 IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
 
 # How the emitted bundle names the assets it needs. vite lists the chunks in the
@@ -579,9 +602,70 @@ def check_dashboard():
     status, _, _ = raw_get("/assets/no-such-asset.js")
     expect_status("GET /assets/no-such-asset.js", status, 404)
 
-    # The served bundle must be the one wired to this contract.
+    # The served bundle must be the one wired to this contract. What the UI is
+    # wired to is now the manifest, so the bundle only has to carry the bootstrap
+    # path; the operations themselves are checked against the declaration above,
+    # which is where they are actually read from. The path has to appear as a
+    # quoted literal: a substring match would also accept a longer path that
+    # happens to start with it, and the point is that this bundle carries it.
     union = b"".join(raw_get(path)[2] for path in scripts)
-    print("  web-ui probe: bundle carries every endpoint the UI calls")
+    missing = [
+        path
+        for path in BUNDLE_ENDPOINTS
+        if b'"%s"' % path not in union and b"'%s'" % path not in union
+    ]
+    if missing:
+        raise AssertionError("the served bundle is missing %r" % (missing,))
+    print("  web-ui probe: bundle carries the bootstrap path")
+
+
+def request_status(method, path):
+    """One request, returning only the status.
+
+    The link check asks whether a route answers the method it declares, so the
+    body is not parsed: an empty `POST` body is refused by the JSON extractor
+    with a plain-text 4xx, which is still a registered route answering. Transport
+    errors are retried while the guest server is busy.
+    """
+    deadline = time.monotonic() + POLL_DEADLINE
+    while True:
+        request = urllib.request.Request(BASE + path, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            return error.code
+        except (OSError, urllib.error.URLError) as error:
+            if time.monotonic() > deadline:
+                raise AssertionError("%s %s never answered: %s" % (method, path, error))
+            time.sleep(POLL_INTERVAL)
+
+
+def check_manifest_links(panels):
+    """Assert every declared link is served, not merely declared.
+
+    A link whose method its route does not implement answers 405, so calling
+    each declared link is what makes the declaration falsifiable. `{id}` is
+    filled with a VM id this probe never creates and `{endpoint}` with the
+    management lane, so every call stays side-effect free.
+    """
+    calls = 0
+    for panel in panels:
+        links = panel.get("links")
+        if not isinstance(links, list) or not links:
+            raise AssertionError("manifest panel %r declared no links" % (panel,))
+        for link in links:
+            if not link.get("name") or not link.get("verb"):
+                raise AssertionError("manifest link had no name/verb: %r" % (link,))
+            path = link["href"].replace("{id}", "4242").replace("{endpoint}", "axvisor")
+            status = request_status(link["method"], path)
+            if status == 405:
+                raise AssertionError(
+                    "%s link %s %s is declared but not served"
+                    % (panel.get("kind"), link["method"], path)
+                )
+            calls += 1
+    print("  web ui probe: manifest links all served (%d)" % calls)
 
 
 def check_manifest():
@@ -599,6 +683,20 @@ def check_manifest():
     check("vms panel verbs", declared["vms"], ["read", "write"])
     check("console panel verbs", declared["console"], ["read", "write", "stream"])
     check("shell panel verbs", declared["shell"], ["read", "write", "stream"])
+    for panel in panels:
+        if not isinstance(panel.get("root"), str) or not panel["root"]:
+            raise AssertionError("manifest panel had no root: %r" % (panel,))
+        check(
+            "%s panel root" % panel["kind"],
+            panel["root"],
+            MANIFEST_ROOTS[panel["kind"]],
+        )
+        check(
+            "%s panel links" % panel["kind"],
+            sorted(link.get("name") for link in panel.get("links", [])),
+            MANIFEST_LINKS[panel["kind"]],
+        )
+    check_manifest_links(panels)
 
 
 def check_terminals():

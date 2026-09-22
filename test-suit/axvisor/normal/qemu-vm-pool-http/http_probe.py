@@ -396,6 +396,56 @@ def console_routes(label):
     return routes
 
 
+def request_status(method, path):
+    """One request, returning only the status.
+
+    The link check asks whether a route answers the method it declares, so the
+    body is not parsed: an empty `POST` body is refused by the JSON extractor
+    with a plain-text 4xx, which is still a registered route answering. Transport
+    errors are retried while the guest server is busy.
+    """
+    deadline = time.monotonic() + POLL_DEADLINE
+    while True:
+        request = urllib.request.Request(BASE + path, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            return error.code
+        except (OSError, urllib.error.URLError) as error:
+            if time.monotonic() > deadline:
+                raise AssertionError("%s %s never answered: %s" % (method, path, error))
+            time.sleep(POLL_INTERVAL)
+
+
+def check_manifest_links(panels):
+    """Assert every declared link is served, not merely declared.
+
+    A link whose method its route does not implement answers 405, so calling
+    each declared link is what makes the declaration falsifiable: a table entry
+    whose method and route disagree cannot pass. `{id}` is filled with a VM id
+    this probe never creates and `{endpoint}` with the management lane, so every
+    call stays side-effect free.
+    """
+    calls = 0
+    for panel in panels:
+        links = panel.get("links")
+        if not isinstance(links, list) or not links:
+            raise AssertionError("manifest panel %r declared no links" % (panel,))
+        for link in links:
+            if not link.get("name") or not link.get("verb"):
+                raise AssertionError("manifest link had no name/verb: %r" % (link,))
+            path = link["href"].replace("{id}", "4242").replace("{endpoint}", "axvisor")
+            status = request_status(link["method"], path)
+            if status == 405:
+                raise AssertionError(
+                    "%s link %s %s is declared but not served"
+                    % (panel.get("kind"), link["method"], path)
+                )
+            calls += 1
+    print("  pool http probe: manifest links all served (%d)" % calls)
+
+
 def check_manifest():
     """Assert the capability declaration describes this build.
 
@@ -426,6 +476,9 @@ def check_manifest():
     for panel in panels:
         if not isinstance(panel.get("title"), str) or not panel["title"]:
             raise AssertionError("manifest panel had no title: %r" % (panel,))
+        if not isinstance(panel.get("root"), str) or not panel["root"]:
+            raise AssertionError("manifest panel had no root: %r" % (panel,))
+    check_manifest_links(panels)
 
 
 class WebSocket:
