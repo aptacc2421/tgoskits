@@ -18,12 +18,13 @@
 //! including validation of existing configurations and generation of new templates.
 use std::{env, error::Error, fs, path::Path};
 
-use clap::{Args, Parser, Subcommand};
-
-use crate::{
+// The library crate: the template module is shared, so the tool and the control
+// plane build the same `VmTemplateParams`, not one copy per target.
+use axvmconfig::{
     GuestConfig, GuestType,
     templates::{VmTemplateParams, get_vm_config_template},
 };
+use clap::{Args, Parser, Subcommand};
 
 /// Main CLI structure for the axvmconfig tool
 ///

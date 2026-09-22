@@ -17,6 +17,7 @@
 //! | --- | --- | --- | --- |
 //! | GET | `/api/manifest` | `descriptor::get_manifest` | (bootstrap, not a panel) |
 //! | GET | `/api/vms` | `vm::list_vms` | list |
+//! | GET | `/api/vms/schema` | `vm::vm_schema` | schema |
 //! | GET | `/api/vms/{id}` | `vm::vm_detail` | detail |
 //! | DELETE | `/api/vms/{id}` | `vm::vm_delete` | delete |
 //! | POST | `/api/vms/create` | `vm::vm_create` | create |
@@ -130,6 +131,16 @@ static VMS_ENDPOINTS: &[Endpoint] = &[
         method: Method::Get,
         path: "/api/vms",
         build: || get(vm::list_vms),
+    },
+    // The creation form's field set: a read of the configuration model, so it
+    // sits with the other reads of this panel rather than in a panel of its own —
+    // the panel that creates a VM is the one that asks for it.
+    Endpoint {
+        name: "schema",
+        verb: Verb::Read,
+        method: Method::Get,
+        path: "/api/vms/schema",
+        build: || get(vm::vm_schema),
     },
     Endpoint {
         name: "detail",

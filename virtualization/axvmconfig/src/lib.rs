@@ -32,6 +32,14 @@ pub use axvm_types::{
 
 mod error;
 
+/// Guest configuration templates built from parameters.
+///
+/// The field set a guest configuration is made of, shared so that any front end
+/// can offer it: the command line tool builds a config from these parameters,
+/// and so does the Axvisor control plane when a creation request carries form
+/// fields instead of TOML text. Pure data construction: no filesystem, no std.
+pub mod templates;
+
 pub use error::*;
 
 #[cfg_attr(all(feature = "std", any(windows, unix)), derive(schemars::JsonSchema))]

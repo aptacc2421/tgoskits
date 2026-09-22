@@ -12,7 +12,10 @@ use axum::extract::Query;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, extract::Path, http::StatusCode};
 use axvm::{AxVMRef, AxVmError, VmStatus, VmVcpuState};
-use axvmconfig::GuestConfig;
+use axvmconfig::{
+    GuestConfig, GuestType,
+    templates::{VmTemplateParams, get_vm_config_template},
+};
 use serde_json::{Value, json};
 
 use crate::manager::AxvmManager;
@@ -42,9 +45,133 @@ pub async fn vm_detail(Path(id_str): Path<String>) -> Result<Json<Value>, Status
 /// live in any directory instead of being pasted. The guest kernel is read from
 /// the guest filesystem (`image_location = "fs"`, the only supported source), and
 /// the config's `base.id` must not currently be registered. An exhausted host
+/// `GET /api/vms/schema` — the fields a creation request may carry.
+///
+/// The field set is the template's, not this interface's: `VmTemplateParams` is
+/// where a guest configuration is built from parameters — the `axvmconfig`
+/// command line tool calls the same function — so the dashboard never keeps a
+/// second copy of which fields a guest has. `required` is the difference between
+/// a field a request must carry and one the template fills; the addresses are
+/// required because they belong to the guest image, not to this platform.
+pub async fn vm_schema() -> Json<Value> {
+    Json(json!({
+        "fields": [
+            {"name": "id", "type": "integer", "required": true},
+            {"name": "name", "type": "string", "required": true},
+            {"name": "kernel_path", "type": "string", "required": true},
+            {"name": "image_location", "type": "enum", "required": true,
+             "options": ["fs", "memory"]},
+            {"name": "entry_point", "type": "address", "required": true},
+            {"name": "kernel_load_addr", "type": "address", "required": true},
+            {"name": "guest_type", "type": "enum", "required": false,
+             "default": "virtualized", "options": ["virtualized", "passthrough"]},
+            {"name": "cpu_num", "type": "integer", "required": false, "default": 1},
+            {"name": "cmdline", "type": "string", "required": false, "default": null},
+        ],
+    }))
+}
+
+/// Reads one creation request's `fields` into template parameters.
+///
+/// Addresses are accepted as a number or as text (`0x8020_0000`): a form field is
+/// a string, and the values an operator copies out of a guest configuration are
+/// written in hexadecimal.
+fn template_params(fields: &Value) -> Result<VmTemplateParams, String> {
+    Ok(VmTemplateParams {
+        id: fields
+            .get("id")
+            .and_then(Value::as_u64)
+            .ok_or("`id` is required")? as usize,
+        name: text_field(fields, "name")?,
+        guest_type: match fields.get("guest_type").and_then(Value::as_str) {
+            None | Some("virtualized") => GuestType::Virtualized,
+            Some("passthrough") => GuestType::Passthrough,
+            Some(other) => return Err(format!("`guest_type` has no `{other}` model")),
+        },
+        cpu_num: fields.get("cpu_num").and_then(Value::as_u64).unwrap_or(1) as usize,
+        entry_point: address_field(fields, "entry_point")?,
+        kernel_path: text_field(fields, "kernel_path")?,
+        kernel_load_addr: address_field(fields, "kernel_load_addr")?,
+        image_location: text_field(fields, "image_location")?,
+        cmdline: fields
+            .get("cmdline")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    })
+}
+
+fn text_field(fields: &Value, name: &str) -> Result<String, String> {
+    fields
+        .get(name)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("`{name}` is required"))
+}
+
+fn address_field(fields: &Value, name: &str) -> Result<usize, String> {
+    match fields.get(name) {
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .map(|value| value as usize)
+            .ok_or_else(|| format!("`{name}` must be an address")),
+        Some(Value::String(text)) => {
+            let trimmed = text.trim().replace('_', "");
+            let parsed = match trimmed
+                .strip_prefix("0x")
+                .or_else(|| trimmed.strip_prefix("0X"))
+            {
+                Some(hex) => usize::from_str_radix(hex, 16),
+                None => trimmed.parse::<usize>(),
+            };
+            parsed.map_err(|_| format!("`{name}` is not an address: `{text}`"))
+        }
+        _ => Err(format!("`{name}` is required")),
+    }
+}
+
 /// resource (memory, or the browser console lane table of a `browser-console`
 /// build) is a 503, so a caller can tell "try later" from "this config is wrong".
 pub async fn vm_create(Json(payload): Json<Value>) -> Response {
+    // The form's shape: the fields the schema advertises, and nothing else. It
+    // builds the same configuration the textual bodies produce, one step earlier,
+    // so the checks below and the creation path after them are shared.
+    if let Some(fields) = payload.get("fields") {
+        let params = match template_params(fields) {
+            Ok(params) => params,
+            Err(reason) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": reason }))).into_response();
+            }
+        };
+        let config = get_vm_config_template(params);
+        let id = config.base.id;
+        if AxvmManager::vm_by_id(id).is_some() {
+            return StatusCode::CONFLICT.into_response();
+        }
+        #[cfg(feature = "fs")]
+        if let Some(missing) = crate::control::domain::pool::missing_guest_image(&config) {
+            warn!("HTTP: create refused, `{missing}` is not in the guest filesystem");
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!("`{missing}` is not in the guest filesystem yet; transfer it first"),
+                    "missing": missing,
+                })),
+            )
+                .into_response();
+        }
+        return match AxvmManager::create_vm_from_config(config) {
+            Ok(id) => {
+                info!("HTTP: VM[{id}] created from form fields");
+                Json(json!({ "id": id })).into_response()
+            }
+            Err(error) => {
+                error!("HTTP: create VM[{id}] from fields failed: {error:#}");
+                map_axvm_error(error).into_response()
+            }
+        };
+    }
+
     let toml = match (
         payload.get("toml").and_then(Value::as_str),
         payload.get("path").and_then(Value::as_str),

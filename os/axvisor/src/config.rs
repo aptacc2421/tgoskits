@@ -101,9 +101,18 @@ pub fn init_guest_vms() {
 }
 
 pub fn init_guest_vm(raw_cfg: &str) -> Result<usize> {
+    let config = GuestConfig::from_toml(raw_cfg).context("parse VM TOML configuration")?;
+    init_guest_vm_from_config(config)
+}
+
+/// Create one VM from an already built configuration.
+///
+/// The dashboard's form sends fields rather than TOML text, so the configuration
+/// arrives here as a value instead of a string and joins the same path the
+/// textual bodies use: re-serializing it to TOML just to parse it again would be
+/// a step with nothing in it.
+pub fn init_guest_vm_from_config(vm_create_config: GuestConfig) -> Result<usize> {
     let image_provider = AxvisorBootImageProvider;
-    let vm_create_config =
-        GuestConfig::from_toml(raw_cfg).context("parse VM TOML configuration")?;
     let configured_vm_id = vm_create_config.base.id;
 
     #[cfg(all(

@@ -128,6 +128,7 @@ MANIFEST_LINKS = {
         "pool",
         "pool_save",
         "resume",
+        "schema",
         "start",
         "stop",
     ],

@@ -509,6 +509,52 @@ def check_create_gate(vm_config):
 
 
 
+def check_create_form():
+    """The form's field set comes from the backend, and its body shares the gate.
+
+    A creation request built from fields is a different *shape*, not a different
+    path: it has to reach the same "is the file there" check the textual bodies
+    reach, or the form would be a way around the transfer.
+    """
+    status, body = request("GET", "/api/vms/schema")
+    check("GET /api/vms/schema", status, 200)
+    fields = {field["name"]: field for field in body.get("fields", [])}
+    expected = {
+        "id", "name", "guest_type", "cpu_num", "entry_point", "kernel_path",
+        "kernel_load_addr", "image_location", "cmdline",
+    }
+    if set(fields) != expected:
+        raise AssertionError("schema fields are %r" % (sorted(fields),))
+    for required in ("id", "name", "kernel_path", "image_location", "entry_point", "kernel_load_addr"):
+        if not fields[required].get("required"):
+            raise AssertionError("schema does not require `%s`" % required)
+    print("  http probe: schema advertises %d fields" % len(fields))
+
+    absent = "/guest/probe-gate/absent-kernel"
+    status, body = request(
+        "POST",
+        "/api/vms/create",
+        json.dumps(
+            {
+                "fields": {
+                    "id": 4243,
+                    "name": "probe-fields",
+                    "kernel_path": absent,
+                    "image_location": "fs",
+                    # Hexadecimal text, the way a guest configuration writes it.
+                    "entry_point": "0x8020_0000",
+                    "kernel_load_addr": "0x8020_0000",
+                }
+            }
+        ),
+    )
+    check("POST /api/vms/create (fields, file not transferred)", status, 409)
+    if absent not in json.dumps(body):
+        raise AssertionError("the fields body is not gated: %r" % (body,))
+    print("  http probe: fields body reaches the same gate")
+
+
+
 def check(label, actual, expected):
     """Assert a status code, printing a progress line."""
     if actual != expected:
@@ -752,6 +798,7 @@ def main():
     check_manifest_links(panels)
     check_file_transfer()
     check_create_gate(vm_config)
+    check_create_form()
     status, _ = request("GET", "/api/consoles")
     check("GET /api/consoles without browser-console", status, 404)
 
