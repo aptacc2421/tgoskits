@@ -7,12 +7,59 @@
 import type { ComponentType } from 'react'
 import type { ApiClient } from './client'
 
+/**
+ * One operation of a panel, as declared by `GET /api/manifest`.
+ *
+ * `href` is a template: `{id}` and `{endpoint}` are filled in by the caller. A
+ * panel reaches the backend through this and never through a path of its own, so
+ * the hypervisor's route table and its declaration cannot drift apart without
+ * the manifest changing first.
+ */
+export interface CapLink {
+  name: string
+  /** What the operation does to the resource: `read`, `write` or `stream`. */
+  verb: string
+  /** HTTP method of this one operation, as a string (`GET`, `POST`, `DELETE`). */
+  method: string
+  href: string
+}
+
 /** One panel node of `GET /api/manifest`. */
 export interface PanelMeta {
   kind: string
   title: string
-  /** Operations the panel may use: `read`, `write`, `stream`. */
+  /** URL namespace of this resource, e.g. `/api/vms`. Informational. */
+  root: string
+  /** The operations this build serves for this resource: the panel's only paths. */
+  links: CapLink[]
+  /**
+   * Operations the panel may use, as a summary: `read`, `write`, `stream`.
+   *
+   * This is what the navigation shows; unlike [`CapLink`] it names no operation,
+   * so the two are related but neither is derived from the other.
+   */
   verbs: string[]
+}
+
+/** Values substituted into a link template. */
+export type LinkParams = Record<string, string | number>
+
+/**
+ * A panel's own operations, bound by the shell.
+ *
+ * The shell hands each panel an accessor for its own resource only: a panel
+ * cannot name another panel's operations, and it cannot spell a path itself.
+ */
+export interface PanelLink {
+  /** URL of a declared operation. Throws when this build does not declare it. */
+  url(name: string, params?: LinkParams): string
+  /**
+   * URL of an operation this build may legitimately lack, `null` when absent.
+   * Use it for the optional halves of a resource (`fs`-only operations).
+   */
+  maybeUrl(name: string, params?: LinkParams): string | null
+  /** Whether this build declares the operation at all. */
+  declared(name: string): boolean
 }
 
 /**
@@ -32,6 +79,8 @@ export interface Manifest {
 export interface PanelProps {
   meta: PanelMeta
   api: ApiClient
+  /** This panel's declared operations (`meta.links`), bound to the panel. */
+  link: PanelLink
   /** Live VM registry snapshot (see `api/events.ts`); panels that do not care ignore it. */
   resources?: VmSummary[]
   /** VM the navigation asked the panel to focus, set by clicking a resource entry. */
@@ -144,7 +193,8 @@ export interface VcpuState {
    * CPU affinity as a **bitmask**, `null` when the vCPU is not pinned.
    *
    * The control plane reports AxVisor's `phys_cpu_set: Option<usize>` verbatim
-   * (`http/vm.rs`), so `0b10` means "Core 1" and nothing here is a list of ids.
+   * (`control/transport/api/vm.rs`), so `0b10` means "Core 1" and nothing here is
+   * a list of ids.
    * Decode it with `lib/vcpu.ts`; a `number[]` reading is a contract bug that
    * throws at render time (`.join` on a number).
    */
@@ -171,8 +221,6 @@ export interface ActionResult {
    */
   async: boolean
 }
-
-export type VmAction = 'start' | 'stop' | 'pause' | 'resume'
 
 /** One element of `GET /api/vms/pool`'s `entries`. */
 export interface PoolEntry {

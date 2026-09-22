@@ -41,7 +41,6 @@ import {
   type VmSummary,
 } from '@/api/types'
 import { describeCpuAffinity } from '@/lib/vcpu'
-import { endpoints } from '@/api/endpoints'
 import {
   countersOf,
   settleToTerminalState,
@@ -53,7 +52,7 @@ import { cn } from '@/lib/utils'
 /** How long the registry is polled while no event socket is available. */
 const REGISTRY_REFRESH_MS = 2000
 
-export default function VmsPanel({ api, resources = [], focusVm = null }: PanelProps) {
+export default function VmsPanel({ api, link, resources = [], focusVm = null }: PanelProps) {
   const [registry, setRegistry] = useState<VmSummary[]>(resources)
   const [pool, setPool] = useState<PoolInfo | null>(null)
   const [poolError, setPoolError] = useState<string | null>(null)
@@ -73,25 +72,32 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
 
   const refreshRegistry = useCallback(async () => {
     try {
-      const list = await api.get<VmSummary[]>(endpoints.vms)
+      const list = await api.get<VmSummary[]>(link.url('list'))
       setRegistry(list)
       setError(null)
     } catch (e: unknown) {
       setError(describeError(e))
     }
-  }, [api])
+  }, [api, link])
 
   const refreshPool = useCallback(async () => {
+    // A build without the `fs` feature declares no pool operation at all: that
+    // is a property of this hypervisor, not a failure of a request, so it is
+    // asked for by name and no request is sent when it is absent.
+    const url = link.maybeUrl('pool')
+    if (url === null) {
+      setPool(null)
+      setPoolError(null)
+      return
+    }
     try {
-      setPool(await api.get<PoolInfo>(endpoints.pool))
+      setPool(await api.get<PoolInfo>(url))
       setPoolError(null)
     } catch (e: unknown) {
-      // A build without the `fs` feature has no pool route at all; that is a
-      // property of this hypervisor, not a failure of the request.
       setPool(null)
       setPoolError(e instanceof ApiError && e.status === 404 ? null : describeError(e))
     }
-  }, [api])
+  }, [api, link])
 
   // The registry the shell injects comes from the event socket; polling is only
   // a fallback for builds whose manifest has no feed (the socket is optional).
@@ -113,13 +119,13 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
   const showDetail = useCallback(
     async (id: number) => {
       try {
-        setDetail(await api.get<VmDetail>(endpoints.vm(id)))
+        setDetail(await api.get<VmDetail>(link.url('detail', { id })))
       } catch (e: unknown) {
         setNote(describeError(e))
         setDetail(null)
       }
     },
-    [api],
+    [api, link],
   )
 
   useEffect(() => {
@@ -137,14 +143,15 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
     async (key: string, op: LifecycleOp, id: number, action: () => Promise<unknown>, hint: string) => {
       setBusy(key)
       setNote(hint)
+      const detailUrl = link.url('detail', { id })
       try {
         const before = await api
-          .get<VmDetail>(endpoints.vm(id))
+          .get<VmDetail>(detailUrl)
           .then(countersOf)
           .catch(() => ({ guest_entry_count: 0, guest_park_count: 0 }))
         await action()
         const result = await settleToTerminalState(op, before, (signal) =>
-          api.get<VmDetail>(endpoints.vm(id), signal),
+          api.get<VmDetail>(detailUrl, signal),
         )
         setNote(result.ok ? `${op} 完成` : result.message)
         if (result.detail) setDetail(result.detail)
@@ -156,29 +163,47 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
         setBusy(null)
       }
     },
-    [api, refreshRegistry, refreshPool],
+    [api, link, refreshRegistry, refreshPool],
   )
 
   const start = (id: number) =>
-    run(`start-${id}`, 'start', id, () => api.post<ActionResult>(endpoints.action(id, 'start')), `启动 VM[${id}]…`)
+    run(
+      `start-${id}`,
+      'start',
+      id,
+      () => api.post<ActionResult>(link.url('start', { id })),
+      `启动 VM[${id}]…`,
+    )
 
   const stop = (id: number) =>
-    run(`stop-${id}`, 'stop', id, () => api.post<ActionResult>(endpoints.action(id, 'stop')), `停止 VM[${id}]…`)
+    run(`stop-${id}`, 'stop', id, () => api.post<ActionResult>(link.url('stop', { id })), `停止 VM[${id}]…`)
 
   const pause = (id: number) =>
-    run(`pause-${id}`, 'pause', id, () => api.post<ActionResult>(endpoints.action(id, 'pause')), `暂停 VM[${id}]…`)
+    run(
+      `pause-${id}`,
+      'pause',
+      id,
+      () => api.post<ActionResult>(link.url('pause', { id })),
+      `暂停 VM[${id}]…`,
+    )
 
   const resume = (id: number) =>
-    run(`resume-${id}`, 'resume', id, () => api.post<ActionResult>(endpoints.action(id, 'resume')), `恢复 VM[${id}]…`)
+    run(
+      `resume-${id}`,
+      'resume',
+      id,
+      () => api.post<ActionResult>(link.url('resume', { id })),
+      `恢复 VM[${id}]…`,
+    )
 
   const close = (id: number) =>
-    run(`close-${id}`, 'delete', id, () => api.del(endpoints.vm(id)), `关闭 VM[${id}]…`)
+    run(`close-${id}`, 'delete', id, () => api.del(link.url('delete', { id })), `关闭 VM[${id}]…`)
 
   const create = async () => {
     setCreateError(null)
     setBusy('create')
     try {
-      const created = await api.post<{ id: number }>(endpoints.create, { toml: createToml })
+      const created = await api.post<{ id: number }>(link.url('create'), { toml: createToml })
       setCreateOpen(false)
       setCreateToml('')
       setNote(`已创建 VM[${created.id}]，可用「启动」进入 guest`)
@@ -203,7 +228,7 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
     setCreateError(null)
     setBusy('save-pool')
     try {
-      const saved = await api.post<{ path: string }>(endpoints.poolSave, {
+      const saved = await api.post<{ path: string }>(link.url('pool_save'), {
         name: createName.trim(),
         toml: createToml,
       })
@@ -222,7 +247,11 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
     async (path: string) => {
       setBusy('browse')
       try {
-        const info = await api.get<BrowseInfo>(endpoints.browse(path))
+        // The path being browsed is a query parameter, which the manifest does
+        // not declare yet: the operation's href covers the route, the panel
+        // supplies the argument. A declared query shape would remove this join.
+        const url = `${link.url('browse')}?path=${encodeURIComponent(path)}`
+        const info = await api.get<BrowseInfo>(url)
         setBrowseInfo(info)
         setBrowsePath(info.path)
         setBrowseError(null)
@@ -233,7 +262,7 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
         setBusy(null)
       }
     },
-    [api],
+    [api, link],
   )
 
   const openBrowse = (initial: string) => {
@@ -249,7 +278,7 @@ export default function VmsPanel({ api, resources = [], focusVm = null }: PanelP
     setBrowseError(null)
     setNote(`从 ${path} 创建客户机…`)
     try {
-      const created = await api.post<{ id: number }>(endpoints.create, { path })
+      const created = await api.post<{ id: number }>(link.url('create'), { path })
       setBrowseOpen(false)
       setNote(`已创建 VM[${created.id}]，可用「启动」进入 guest`)
       await refreshRegistry()

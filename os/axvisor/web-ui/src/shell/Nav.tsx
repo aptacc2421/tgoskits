@@ -60,7 +60,7 @@ export function Nav({ panels, resources, live, activeKind, onOpen, onOpenVm }: N
             'rounded-full px-1.5 py-0.5 text-[10px]',
             live ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700',
           )}
-          title="事件通道连接状态（/ws/events）"
+          title="事件通道连接状态"
         >
           {live ? '已连接' : '未连接'}
         </span>
