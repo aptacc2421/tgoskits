@@ -1987,16 +1987,20 @@ impl AxVM {
         info!("Resetting VM[{}]", self.id());
         self.stop_and_join_runtime(StopReason::Forced)?;
 
-        // On failure `reset_with` leaves the VM `Failed` with the resource set
-        // retained, and the `?` below returns before `prepare`/`start`.
-        let retired_devices = {
+        // The closure reports the detached device set through `retired_devices`
+        // instead of a return value, which keeps `reset_with`'s released
+        // signature. On failure it returns early: the VM is left `Failed` with
+        // the resource set retained and the `?` below skips `prepare`/`start`.
+        let mut retired_devices = None;
+        {
             let mut machine = self.machine.lock();
             machine.reset_with(|resources| {
-                resources
+                retired_devices = resources
                     .reset_transient_resources()
-                    .map_err(|error| AxVmError::resource_unavailable("reset resources", error))
-            })?
-        };
+                    .map_err(|error| AxVmError::resource_unavailable("reset resources", error))?;
+                Ok(())
+            })?;
+        }
         // The machine guard is released: retiring the detached device set can
         // now join its worker threads.
         drop(retired_devices);

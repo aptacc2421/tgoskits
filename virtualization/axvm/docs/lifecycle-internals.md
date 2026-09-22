@@ -269,7 +269,7 @@ resources 也已交出并随局部变量 drop。重试 `destroy()` 命中 `Destr
 `Stopped { resources: Some, runtime: None }`（:428）；`Running`/`Paused`/`Stopping`/
 `Stopped { runtime: Some }` 一律 `InvalidTransition`（:442-489）。`Stopped { resources: None }`
 属类型级预留形态，落 `other` 兜底 → `InvalidTransition`（:490-498）。vm 层 `reset`
-（vm/mod.rs:1986-2005）对运行态先强制静默到 `Stopped`，再走 `reset_with` → `Ready` 内部瞬态 →
+（vm/mod.rs:1986-2009）对运行态先强制静默到 `Stopped`，再走 `reset_with` → `Ready` 内部瞬态 →
 prepare → `start`，所以外部视角 `reset()` 的终态是 `Running`（`Ready` 只是不可观测的中间态）。
 
 **start 与 reset（从 `Stopped` 出发）的实现层差别：** 两者都经 `AxVM::prepare()` →
@@ -290,9 +290,11 @@ crate 内部的 `AxVM::prepare_resources_with()` 重建 vCPU/设备/中断结构
 **设备集必须带出锁外回收：** `reset_transient_resources`（vm/mod.rs:1036）**返回**它从资源集摘下
 的 `Arc<DeviceRuntime>`，而不是在 machine 锁内 drop。设备集此时通常已是最后一个引用，drop 会 join
 设备 worker 线程（文件后端 virtio-blk 持有一个），而 machine 锁是 IRQ-safe、持锁即关中断，临界区内
-join 会以 `TaskError::UnsafeContext` 失败并最终 abort。`AxVM::reset`（vm/mod.rs:1992-2002）与
-`AxVM::prepare_resources_with`（vm/prepare.rs:54-99）都把摘下的设备集带出锁作用域后再 drop；锁内
-只做 `reset_lifecycle_devices()`，失败时把设备集重新挂回资源集，留给后续 reset/destroy 在锁外回收。
+join 会以 `TaskError::UnsafeContext` 失败并最终 abort。`AxVM::reset`（vm/mod.rs:1994-2006）把设备集
+放进闭包捕获的局部变量、在锁作用域结束后 drop，这样 `reset_with` 的公开签名仍保持
+`FnOnce(&mut R) -> AxVmResult`；`AxVM::prepare_resources_with`（vm/prepare.rs:54-99）则用同样的
+捕获写法把摘下的设备集带出锁作用域后再 drop；锁内只做 `reset_lifecycle_devices()`，失败时把设备集
+重新挂回资源集，留给后续 reset/destroy 在锁外回收。
 
 ## 4. 不可观测状态与锁语义
 
