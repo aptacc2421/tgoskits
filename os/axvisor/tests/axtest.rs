@@ -35,8 +35,8 @@ mod guest_console_harness;
 mod host_terminal;
 mod manager;
 mod network_console;
-#[path = "../src/vm_pool.rs"]
-mod vm_pool;
+#[path = "../src/control/domain/pool.rs"]
+mod pool;
 // The pool suites clean their fixtures through the production filesystem
 // helpers, so the harness compiles that module for its in-file suite too.
 #[allow(dead_code)]
@@ -505,7 +505,7 @@ mod tests {
     #[cfg(feature = "fs")]
     #[test]
     fn vm_pool_scan_lists_only_configs_that_can_become_a_vm() {
-        use crate::vm_pool::scan_dir;
+        use crate::pool::scan_dir;
 
         let root = "/tmp/axvisor-vm-pool-scan";
         reset_test_dir(root);
@@ -624,7 +624,7 @@ mod tests {
     #[cfg(feature = "fs")]
     #[test]
     fn vm_pool_reads_several_directories_in_precedence_order() {
-        use crate::vm_pool::{browse, scan_dirs, sources};
+        use crate::pool::{browse, scan_dirs, sources};
 
         // The drop-in directory comes first, so a config an operator drops in
         // shadows a same-id config from a directory that is only read.
@@ -717,7 +717,7 @@ mod tests {
     #[cfg(feature = "fs")]
     #[test]
     fn vm_pool_save_only_writes_validated_configs_inside_the_directory() {
-        use crate::vm_pool::{SaveError, save_in, scan_dir};
+        use crate::pool::{SaveError, save_in, scan_dir};
 
         let root = "/tmp/axvisor-vm-pool-save";
         reset_test_dir(root);
