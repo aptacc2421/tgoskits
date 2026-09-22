@@ -302,7 +302,7 @@ fn ensure_registered(vm_id: usize) -> anyhow::Result<()> {
 /// List the configs the VM pool offers, with the runtime state of each id.
 #[cfg(feature = "fs")]
 fn vm_pool(_cmd: &ParsedCommand) {
-    let pool = crate::vm_pool::scan();
+    let pool = crate::control::domain::pool::scan();
     println!("VM pool directory: {}", pool.directory());
 
     if pool.entries().is_empty() {

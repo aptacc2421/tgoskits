@@ -73,6 +73,11 @@ impl AxvmManager {
         crate::config::init_guest_vm(raw_cfg).context("create VM from TOML configuration")
     }
 
+    /// Create one VM from a configuration the control plane already built.
+    pub fn create_vm_from_config(config: axvmconfig::GuestConfig) -> Result<VMId> {
+        crate::config::init_guest_vm_from_config(config).context("create VM from form fields")
+    }
+
     /// Make sure `vm_id` is registered, creating it from the VM pool if needed.
     ///
     /// A start request names a VM, not a config file: when the id has no
@@ -86,9 +91,9 @@ impl AxvmManager {
             return Ok(true);
         }
 
-        let pool = crate::vm_pool::scan();
+        let pool = crate::control::domain::pool::scan();
         let Some(entry) = pool.entry(vm_id) else {
-            crate::vm_pool::log_issues(&pool);
+            crate::control::domain::pool::log_issues(&pool);
             return Ok(false);
         };
 

@@ -33,6 +33,11 @@ resource re-acquire regression — mirroring
     DELETE /api/vms/999        -> 404            (no auth header)
     POST   /api/vms/create {}  -> 400            (missing toml)
     POST   /api/vms/create <bad toml> -> 400     (invalid TOML)
+    POST   /api/vms/create <fields>   -> 409     (a file the config names is not in place)
+    GET    /api/vms/browse            -> 200     (a file candidate for a `file` field, with length)
+    POST   /api/vms/create <toml>     -> 409     (a device's backing file is not in place)
+    POST   /api/vms/4245/start        -> 409     (same, via a pool config's start)
+    POST   /api/vms/create <fields>   -> 200     (file in place: created, config written to the guest tree, then removed)
     POST   /api/vms/999/start  -> 404            (unknown VM)
     POST   /api/vms/999/stop   -> 404            (unknown VM)
     POST   /api/vms/999/pause  -> 404            (unknown VM)
@@ -97,6 +102,7 @@ kernel and the same guest disk image as the one the build created.
 """
 
 import json
+import re
 import os
 import sys
 import time
@@ -153,6 +159,564 @@ def request(method, path, body=None):
     if not raw:
         return status, None
     return status, json.loads(raw.decode("utf-8"))
+
+
+def request_status(method, path):
+    """One request, returning only the status.
+
+    The link check asks whether a route answers the method it declares, so the
+    body is not parsed: an empty `POST` body is refused by the JSON extractor
+    with a plain-text 4xx, which is still a registered route answering. Transport
+    errors are retried while the guest server is busy.
+    """
+    deadline = time.monotonic() + POLL_DEADLINE
+    while True:
+        request = urllib.request.Request(BASE + path, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            return error.code
+        except (OSError, urllib.error.URLError) as error:
+            if time.monotonic() > deadline:
+                raise AssertionError("%s %s never answered: %s" % (method, path, error))
+            time.sleep(POLL_INTERVAL)
+
+
+def check_manifest_links(panels):
+    """Assert every declared link is served, not merely declared.
+
+    A link whose method its route does not implement answers 405, so calling
+    each declared link is what makes the declaration falsifiable: a table entry
+    whose method and route disagree cannot pass. `{id}` is filled with a VM id
+    this probe never creates, so every call stays side-effect free.
+    """
+    calls = 0
+    for panel in panels:
+        links = panel.get("links")
+        if not isinstance(links, list) or not links:
+            raise AssertionError("manifest panel %r declared no links" % (panel,))
+        for link in links:
+            if not link.get("name") or not link.get("verb"):
+                raise AssertionError("manifest link had no name/verb: %r" % (link,))
+            path = link["href"].replace("{id}", "4242").replace("{endpoint}", "axvisor")
+            status = request_status(link["method"], path)
+            if status == 405:
+                raise AssertionError(
+                    "%s link %s %s is declared but not served"
+                    % (panel.get("kind"), link["method"], path)
+                )
+            calls += 1
+    print("  http probe: manifest links all served (%d)" % calls)
+
+
+def request_raw(method, path, headers=None, body=None):
+    """One request with explicit headers, returning (status, headers, payload).
+
+    The chunk endpoint is the only place where the media type and the range
+    header are part of the contract, so the probe has to be able to send them —
+    and has to be able to send the *wrong* ones, which is how the refusal before
+    the body is read gets asserted.
+    """
+    req = urllib.request.Request(
+        BASE + path, data=body, headers=headers or {}, method=method
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            # The header object, not a dict: HTTP/1 lowercases header names on
+            # the wire, and the offset header has to be found either way.
+            return resp.status, resp.headers, resp.read()
+    except urllib.error.HTTPError as err:
+        return err.code, err.headers or {}, err.read()
+    except (OSError, urllib.error.URLError) as err:
+        raise RuntimeError("request %s %s failed: %s" % (method, path, err))
+
+
+def check_file_transfer():
+    """Drive one real transfer: stage it, interrupt it, resume it, place it.
+
+    The transfer is the one capability whose contract is a *sequence*, so the
+    probe walks the sequence rather than poking one endpoint: a chunk that
+    arrives out of order has to be refused with the offset it should have used,
+    and a body whose frame shape is wrong has to be refused before it is read.
+
+    The file it places is not cleaned up, and does not need to be: QEMU boots the
+    root filesystem with `snapshot=on`, so nothing this probe writes survives the
+    run. The assertions below therefore hold whether the image carries a file of
+    that name or not — and the one that always holds is the second placement,
+    which is refused precisely because the bytes are already at the final path.
+    """
+    parent = "/guest"
+    folder = "probe-transfer"
+    name = "probe-transfer.bin"
+    payload = b"axvisor-transfer-probe\n" * 64
+    total = len(payload)
+    session = "probe-transfer"
+    second = "probe-transfer-second"
+
+    # An unknown session is a 404, not a guess: that is what a client which lost
+    # its id has to see.
+    status, _, _ = request_raw("HEAD", "/api/files/%s-absent" % session)
+    check("HEAD /api/files (unknown session)", status, 404)
+
+    # The target folder is *chosen*: a transfer into a directory that is not
+    # there is refused instead of quietly creating it, because what the operator
+    # picked and what the bytes landed in have to be the same directory.
+    status, _, body = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {"id": "probe-missing-dir", "directory": parent + "/not-there", "total": total}
+        ).encode("utf-8"),
+    )
+    check("POST /api/files (missing directory)", status, 404)
+    if "not-there" not in body.decode("utf-8", "replace"):
+        raise AssertionError("the refusal does not name the missing directory")
+
+    # Making one is its own operation, one level at a time: the second call is a
+    # conflict, so the plane never invents a different name either.
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files/dirs",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"parent": parent, "name": folder}).encode("utf-8"),
+    )
+    check("POST /api/files/dirs", status, 200)
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files/dirs",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"parent": parent, "name": folder}).encode("utf-8"),
+    )
+    check("POST /api/files/dirs (already there)", status, 409)
+    directory = parent + "/" + folder
+
+    status, headers, body = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {"id": session, "directory": directory, "total": total}
+        ).encode("utf-8"),
+    )
+    check("POST /api/files", status, 200)
+    opened = json.loads(body.decode("utf-8"))
+    check("POST /api/files state", opened.get("state"), "uploading")
+    check("POST /api/files offset header", headers.get("Upload-Offset"), "0")
+
+    # The frame shape is checked before the body is read, so both of these are
+    # refused without a chunk reaching the staging area.
+    status, _, _ = request_raw(
+        "PATCH",
+        "/api/files/%s" % session,
+        headers={"Content-Type": "text/plain", "Content-Range": "bytes 0-1/%d" % total},
+        body=b"xx",
+    )
+    check("PATCH /api/files (wrong media type)", status, 400)
+    status, _, _ = request_raw(
+        "PATCH",
+        "/api/files/%s" % session,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "0-1/%d" % total,
+        },
+        body=b"xx",
+    )
+    check("PATCH /api/files (malformed range)", status, 400)
+
+    # A chunk that starts where the disk is not: the offset in the answer is the
+    # one the client continues from, which is why the offset is read from the
+    # file rather than from a counter.
+    status, headers, _ = request_raw(
+        "PATCH",
+        "/api/files/%s" % session,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "bytes 4-%d/%d" % (3 + len(payload), total),
+        },
+        body=payload,
+    )
+    check("PATCH /api/files (offset mismatch)", status, 409)
+    check("PATCH /api/files conflict offset", headers.get("Upload-Offset"), "0")
+
+    split = total // 2
+    status, headers, body = request_raw(
+        "PATCH",
+        "/api/files/%s" % session,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "bytes 0-%d/%d" % (split - 1, total),
+        },
+        body=payload[:split],
+    )
+    if status != 200:
+        raise AssertionError(
+            "PATCH /api/files (first chunk) returned %s: %s"
+            % (status, body.decode("utf-8", "replace"))
+        )
+    check("PATCH /api/files (first chunk)", status, 200)
+    check("PATCH /api/files first offset", headers.get("Upload-Offset"), str(split))
+
+    status, headers, _ = request_raw("HEAD", "/api/files/%s" % session)
+    check("HEAD /api/files (interrupted)", status, 200)
+    check("HEAD /api/files offset", headers.get("Upload-Offset"), str(split))
+
+    status, headers, _ = request_raw(
+        "PATCH",
+        "/api/files/%s" % session,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "bytes %d-%d/%d" % (split, total - 1, total),
+        },
+        body=payload[split:],
+    )
+    check("PATCH /api/files (second chunk)", status, 200)
+    check("PATCH /api/files final offset", headers.get("Upload-Offset"), str(total))
+
+    status, body = request("GET", "/api/files")
+    check("GET /api/files", status, 200)
+    listed = [entry for entry in body["files"] if entry.get("id") == session]
+    if not listed:
+        raise AssertionError("the completed session is missing from GET /api/files")
+    check("GET /api/files state", listed[0].get("state"), "uploaded")
+    check("GET /api/files written", listed[0].get("written"), total)
+
+    # The placement step. A previous run on a cached image already put the file
+    # there, which is the conflict the plane is supposed to report, so both
+    # outcomes are correct — and the *second* placement below is the assertion
+    # that holds either way: it is refused because the bytes are at the final
+    # path, which is a real lookup in the guest filesystem.
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files/%s/place" % session,
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"name": name}).encode("utf-8"),
+    )
+    if status not in (200, 409):
+        raise AssertionError("POST /api/files/place returned %s" % status)
+    print("  http probe: place -> %d" % status)
+
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"id": second, "directory": directory, "total": total}).encode(
+            "utf-8"
+        ),
+    )
+    check("POST /api/files (second session)", status, 200)
+    status, headers, _ = request_raw(
+        "PATCH",
+        "/api/files/%s" % second,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "bytes 0-%d/%d" % (total - 1, total),
+        },
+        body=payload,
+    )
+    check("PATCH /api/files (second session)", status, 200)
+    status, _, body = request_raw(
+        "POST",
+        "/api/files/%s/place" % second,
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"name": name}).encode("utf-8"),
+    )
+    check("POST /api/files/place (target exists)", status, 409)
+    if name not in body.decode("utf-8", "replace"):
+        raise AssertionError("the conflict does not name the existing target: %r" % body)
+
+    # A placed file is not undone by forgetting its session: those bytes are the
+    # file a guest config points at.
+    status, _, _ = request_raw("DELETE", "/api/files/%s" % session)
+    check("DELETE /api/files (placed)", status, 409)
+
+    # The second session still only has staged bytes, so it is cleaned up here.
+    status, _, _ = request_raw("DELETE", "/api/files/%s" % second)
+    check("DELETE /api/files (staged)", status, 204)
+    status, body = request("GET", "/api/files")
+    check("GET /api/files (after drop)", status, 200)
+    if any(entry.get("id") == second for entry in body["files"]):
+        raise AssertionError("a dropped session is still listed")
+    print("  http probe: transfer staged, interrupted, resumed and placed")
+
+
+
+def check_create_gate(vm_config):
+    """A config naming a file nobody transferred is refused, and the file is named.
+
+    This refusal is what the transfer is *for*: "it is not there yet" is an answer
+    an operator can act on, unlike the device error that appears when creation is
+    allowed to proceed and a backing file turns out to be missing.
+    """
+    # A `.toml` name on purpose: the directory listing shows a config that cannot
+    # be parsed as an issue, which is how this probe observes that the file really
+    # is in the guest filesystem at that path.
+    missing = "/guest/probe-gate/linux-missing.toml"
+    # Anchored replacements: the fixture's own comments quote `id = 1`, so an
+    # unanchored substitution would edit the prose instead of the field.
+    target = re.sub(r'(?m)^id = \d+', "id = 4242", vm_config, count=1)
+    target = re.sub(r'(?m)^kernel_path = ".*"$', 'kernel_path = "%s"' % missing, target, count=1)
+    if missing not in target or "id = 4242" not in target:
+        raise AssertionError("the fixture no longer has the fields this check rewrites")
+
+    status, body = request("POST", "/api/vms/create", json.dumps({"toml": target}))
+    check("POST /api/vms/create (kernel not transferred)", status, 409)
+    if missing not in json.dumps(body):
+        raise AssertionError("the refusal does not name the missing file: %r" % (body,))
+    print("  http probe: create refused and named `%s`" % missing)
+
+    # And the transfer is what turns the answer around: once a file is placed at
+    # that path, the predicate the gate uses is satisfied. The probe stops short
+    # of a second creation request on purpose — a creation that gets past the
+    # gate loads the "kernel" it names, and this payload is not one — so what is
+    # asserted here is the fact the gate reads: the file is at that path.
+    directory = "/guest/probe-gate"
+    payload = b"not-a-kernel\n"
+    request(
+        "POST",
+        "/api/files/dirs",
+        json.dumps({"parent": "/guest", "name": "probe-gate"}),
+    )
+    status, _, body = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {"id": "probe-gate", "directory": directory, "total": len(payload)}
+        ).encode("utf-8"),
+    )
+    check("POST /api/files (gate session)", status, 200)
+    status, _, body = request_raw(
+        "PATCH",
+        "/api/files/probe-gate",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "bytes 0-%d/%d" % (len(payload) - 1, len(payload)),
+        },
+        body=payload,
+    )
+    check("PATCH /api/files (gate session)", status, 200)
+    status, _, body = request_raw(
+        "POST",
+        "/api/files/probe-gate/place",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"name": missing.rsplit("/", 1)[1]}).encode("utf-8"),
+    )
+    check("POST /api/files/place (gate session)", status, 200)
+
+    status, body = request("GET", "/api/vms/browse?path=" + directory)
+    check("GET /api/vms/browse (placed file)", status, 200)
+    listed = json.dumps(body)
+    if missing not in listed:
+        raise AssertionError("the placed file is not in %s: %r" % (directory, body))
+    print("  http probe: the placed file is at `%s`" % missing)
+
+
+def check_create_backing_file_gate(vm_config):
+    """A config whose *disk* nobody transferred is refused the same way.
+
+    The kernel gate is decided by the plane reading the config; a device backing
+    file is named by the device model that owns the option, so this refusal can
+    only come from the failure that would otherwise interrupt creation inside
+    device setup. It has to stay the same answer an operator can act on — 409,
+    with the file named — because one precondition should read as one answer,
+    whichever file the config is about.
+    """
+    absent = "/guest/probe-gate/absent-disk.img"
+    # Anchored replacements: only the device's own `path` line starts with it,
+    # so the fixture's prose and its `kernel_path` stay untouched.
+    target = re.sub(r'(?m)^id = \d+', "id = 4244", vm_config, count=1)
+    target = re.sub(r'(?m)^path = ".*"$', 'path = "%s"' % absent, target, count=1)
+    if absent not in target or "id = 4244" not in target:
+        raise AssertionError("the fixture no longer has the fields this check rewrites")
+
+    status, body = request("POST", "/api/vms/create", json.dumps({"toml": target}))
+    check("POST /api/vms/create (backing file not transferred)", status, 409)
+    if absent not in json.dumps(body):
+        raise AssertionError(
+            "the refusal does not name the missing backing file: %r" % (body,)
+        )
+    print("  http probe: create refused and named `%s`" % absent)
+
+
+def check_start_backing_file_gate(vm_config):
+    """A start of a pool config whose disk nobody transferred is refused too.
+
+    An id that is still only a pool candidate is created before it is started,
+    so `start` reaches the same device setup a create does. The answer has to be
+    the same 409: one precondition should read as one answer whichever route the
+    operator takes to it.
+    """
+    disk = "/guest/probe-gate/absent-pool-disk.img"
+    config = "/guest/probe-gate/pool-disk-missing.toml"
+    target = re.sub(r'(?m)^id = \d+', "id = 4245", vm_config, count=1)
+    target = re.sub(r'(?m)^path = ".*"$', 'path = "%s"' % disk, target, count=1)
+    if disk not in target or "id = 4245" not in target:
+        raise AssertionError("the fixture no longer has the fields this check rewrites")
+
+    # The config reaches the pool the way an operator puts one there: through
+    # the transfer contract, into the folder the pool is read from.
+    payload = target.encode("utf-8")
+    request(
+        "POST",
+        "/api/files/dirs",
+        json.dumps({"parent": "/guest", "name": "probe-gate"}),
+    )
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {"id": "pool-disk", "directory": "/guest/probe-gate", "total": len(payload)}
+        ).encode("utf-8"),
+    )
+    check("POST /api/files (pool config)", status, 200)
+    status, _, _ = request_raw(
+        "PATCH",
+        "/api/files/pool-disk",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "bytes 0-%d/%d" % (len(payload) - 1, len(payload)),
+        },
+        body=payload,
+    )
+    check("PATCH /api/files (pool config)", status, 200)
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files/pool-disk/place",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"name": config.rsplit("/", 1)[1]}).encode("utf-8"),
+    )
+    check("POST /api/files/place (pool config)", status, 200)
+
+    status, _ = request("POST", "/api/vms/4245/start")
+    check("POST /api/vms/4245/start (pool disk not transferred)", status, 409)
+    print("  http probe: starting a pool config with a missing disk is refused")
+
+
+def check_create_form():
+    """The form's field set comes from the backend, and its body shares the gate.
+
+    A creation request built from fields is a different *shape*, not a different
+    path: it has to reach the same "is the file there" check the textual bodies
+    reach, or the form would be a way around the transfer.
+
+    A `file` field is the one a client cannot fill by hand: its candidates are
+    the files that are already in the guest filesystem, so the probe checks that
+    the declaration says which field that is and that the folder listing through
+    the *same* resource (`/api/vms/browse`) shows a file to offer.
+    """
+    status, body = request("GET", "/api/vms/schema")
+    check("GET /api/vms/schema", status, 200)
+    fields = {field["name"]: field for field in body.get("fields", [])}
+    expected = {
+        "id", "name", "guest_type", "cpu_num", "entry_point", "kernel_path",
+        "kernel_load_addr", "image_location", "cmdline", "memory_base", "memory_mb",
+    }
+    if set(fields) != expected:
+        raise AssertionError("schema fields are %r" % (sorted(fields),))
+    for required in (
+        "id", "name", "kernel_path", "entry_point",
+        "kernel_load_addr", "memory_base", "memory_mb",
+    ):
+        if not fields[required].get("required"):
+            raise AssertionError("schema does not require `%s`" % required)
+    if fields["kernel_path"].get("type") != "file":
+        raise AssertionError(
+            "`kernel_path` is not declared as a file field: %r" % (fields["kernel_path"],)
+        )
+    # A form-made guest reads its kernel from the guest filesystem; an embedded
+    # (`memory`) kernel is a build-time fact no form can provide, so the
+    # declaration must not offer it.
+    if fields["image_location"].get("options") != ["fs"]:
+        raise AssertionError(
+            "`image_location` offers more than the filesystem source: %r"
+            % (fields["image_location"],)
+        )
+    print("  http probe: schema advertises %d fields" % len(fields))
+
+    status, body = request("GET", "/api/vms/browse?path=/guest/linux")
+    check("GET /api/vms/browse (file candidates)", status, 200)
+    listed = {entry["path"]: entry for entry in body.get("files", [])}
+    kernel = listed.get("/guest/linux/linux-qemu")
+    if kernel is None:
+        raise AssertionError("the kernel is not offered as a file candidate: %r" % (body,))
+    if not isinstance(kernel.get("size"), int) or kernel["size"] <= 0:
+        raise AssertionError("a file candidate has no length: %r" % (kernel,))
+    print("  http probe: browse offers `%s` (%d bytes) as a file candidate" % (
+        kernel["path"],
+        kernel["size"],
+    ))
+
+    absent = "/guest/probe-gate/absent-kernel"
+    status, body = request(
+        "POST",
+        "/api/vms/create",
+        json.dumps(
+            {
+                "fields": {
+                    "id": 4243,
+                    "name": "probe-fields",
+                    "kernel_path": absent,
+                    "image_location": "fs",
+                    # Hexadecimal text, the way a guest configuration writes it.
+                    "entry_point": "0x8020_0000",
+                    "kernel_load_addr": "0x8020_0000",
+                    "memory_base": "0x8000_0000",
+                    "memory_mb": 256,
+                }
+            }
+        ),
+    )
+    check("POST /api/vms/create (fields, file not transferred)", status, 409)
+    if absent not in json.dumps(body):
+        raise AssertionError("the fields body is not gated: %r" % (body,))
+    print("  http probe: fields body reaches the same gate")
+
+    # The same body, with the file it names actually there, has to become a
+    # guest: that is the form's whole contract. The field set is the template's,
+    # so a request can carry every declared field and still be refused by the
+    # plane's own model — in which case the form offers a way of asking for
+    # something that cannot exist, and saying so here is the point.
+    status, body = request(
+        "POST",
+        "/api/vms/create",
+        json.dumps(
+            {
+                "fields": {
+                    "id": 4243,
+                    "name": "probe-fields",
+                    "kernel_path": "/guest/linux/linux-qemu",
+                    "image_location": "fs",
+                    "entry_point": "0x8020_0000",
+                    "kernel_load_addr": "0x8020_0000",
+                    "memory_base": "0x8000_0000",
+                    "memory_mb": 256,
+                    "cpu_num": 1,
+                    "guest_type": "virtualized",
+                }
+            }
+        ),
+    )
+    check("POST /api/vms/create (fields, file in place)", status, 200)
+    check("created VM id", body.get("id"), 4243)
+    # The form's guest is also a file on the guest tree: the same configuration
+    # the registry holds is what the candidate scan reads, so it survives a
+    # reboot. The response names the file; the pool is what proves it is there.
+    saved = body.get("config")
+    if saved != "/guest/probe-fields.toml":
+        raise AssertionError("the form's config was not written to the guest tree: %r" % (body,))
+    status, body = request("GET", "/api/vms/pool")
+    check("GET /api/vms/pool (form config persisted)", status, 200)
+    entries = {entry["id"]: entry for entry in body.get("entries", [])}
+    if 4243 not in entries or entries[4243].get("path") != saved:
+        raise AssertionError("the persisted form config is not a candidate: %r" % (body,))
+    print("  http probe: the form's config is a candidate at `%s`" % saved)
+    status, _ = request("DELETE", "/api/vms/4243")
+    check("DELETE /api/vms/4243", status, 204)
+    print("  http probe: a form body created and removed VM[4243]")
+
 
 
 def check(label, actual, expected):
@@ -387,8 +951,20 @@ def main():
     if not isinstance(panels, list):
         raise AssertionError("GET /api/manifest panels was not a list: %r" % (body,))
     kinds = [panel.get("kind") for panel in panels]
-    check("GET /api/manifest panel kinds", kinds, ["vms"])
+    # `fs` is enabled for this case, so the file-transfer panel is declared too:
+    # the transfer routes exist exactly where the guest filesystem does.
+    # Declaration order: the VM panel first (it is what an operator lands on),
+    # then the transfer panel that `fs` adds.
+    check("GET /api/manifest panel kinds", kinds, ["vms", "files"])
     check("GET /api/manifest vms verbs", panels[0].get("verbs"), ["read", "write"])
+    if not panels[0].get("root"):
+        raise AssertionError("GET /api/manifest vms panel had no root: %r" % (panels[0],))
+    check_manifest_links(panels)
+    check_file_transfer()
+    check_create_gate(vm_config)
+    check_create_backing_file_gate(vm_config)
+    check_start_backing_file_gate(vm_config)
+    check_create_form()
     status, _ = request("GET", "/api/consoles")
     check("GET /api/consoles without browser-console", status, 404)
 

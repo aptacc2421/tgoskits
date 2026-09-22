@@ -23,7 +23,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { TerminalView } from '@/components/Terminal'
 import { describeError, describeStatus, type ConsoleInfo, type PanelProps } from '@/api/types'
-import { endpoints } from '@/api/endpoints'
 import {
   guestRoute,
   laneRefused,
@@ -38,7 +37,7 @@ import {
 } from '@/lib/lanes'
 import { cn } from '@/lib/utils'
 
-export default function ConsolePanel({ api, resources = [], focusVm = null }: PanelProps) {
+export default function ConsolePanel({ api, link, resources = [], focusVm = null }: PanelProps) {
   const [consoles, setConsoles] = useState<ConsoleInfo[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   /** Lanes this page holds, which is the active tab's lanes. */
@@ -55,7 +54,7 @@ export default function ConsolePanel({ api, resources = [], focusVm = null }: Pa
   const load = useCallback(() => {
     let cancelled = false
     api
-      .get<ConsoleInfo[]>(endpoints.consoles)
+      .get<ConsoleInfo[]>(link.url('list'))
       .then((list) => {
         if (cancelled) return
         setConsoles(list)
@@ -69,7 +68,7 @@ export default function ConsolePanel({ api, resources = [], focusVm = null }: Pa
     return () => {
       cancelled = true
     }
-  }, [api])
+  }, [api, link])
 
   // `resources` changes identity on every registry event, so this is a fetch per
   // change and nothing more: no timer, no polling.
@@ -148,7 +147,7 @@ export default function ConsolePanel({ api, resources = [], focusVm = null }: Pa
   const attempt = useCallback(
     (route: string) => {
       api
-        .get<ConsoleInfo[]>(endpoints.consoles)
+        .get<ConsoleInfo[]>(link.url('list'))
         .then((list) => {
           setConsoles(list)
           setError(null)
@@ -170,7 +169,7 @@ export default function ConsolePanel({ api, resources = [], focusVm = null }: Pa
         // the terminal itself already reports the lost connection.
         .catch(() => undefined)
     },
-    [api],
+    [api, link],
   )
 
   const retry = () => {
@@ -258,9 +257,9 @@ export default function ConsolePanel({ api, resources = [], focusVm = null }: Pa
         )}
         {held ? (
           <TerminalView
-            path={endpoints.terminal(route)}
+            path={link.url('stream', { endpoint: route })}
             title={label}
-            subtitle={endpoints.terminal(route)}
+            subtitle={link.url('stream', { endpoint: route })}
             occupied={console?.attached}
             onClosed={() => attempt(route)}
             className="min-h-0 flex-1"

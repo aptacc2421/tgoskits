@@ -35,8 +35,8 @@ mod guest_console_harness;
 mod host_terminal;
 mod manager;
 mod network_console;
-#[path = "../src/vm_pool.rs"]
-mod vm_pool;
+#[path = "../src/control/domain/pool.rs"]
+mod pool;
 // The pool suites clean their fixtures through the production filesystem
 // helpers, so the harness compiles that module for its in-file suite too.
 #[allow(dead_code)]
@@ -505,7 +505,7 @@ mod tests {
     #[cfg(feature = "fs")]
     #[test]
     fn vm_pool_scan_lists_only_configs_that_can_become_a_vm() {
-        use crate::vm_pool::scan_dir;
+        use crate::pool::scan_dir;
 
         let root = "/tmp/axvisor-vm-pool-scan";
         reset_test_dir(root);
@@ -623,12 +623,98 @@ mod tests {
 
     #[cfg(feature = "fs")]
     #[test]
-    fn vm_pool_reads_several_directories_in_precedence_order() {
-        use crate::vm_pool::{browse, scan_dirs, sources};
+    fn vm_pool_scan_walks_subdirectories_and_ignores_documents_that_are_no_config() {
+        use crate::pool::{MAX_SCAN_DEPTH, scan_dir, scan_dirs, sources};
 
-        // The drop-in directory comes first, so a config an operator drops in
-        // shadows a same-id config from a directory that is only read.
-        ax_assert_eq!(sources().first(), Some(&"/guest/vm_pool".to_string()));
+        let root = "/tmp/axvisor-vm-pool-walk";
+        reset_test_dir(root);
+        let kernel = format!("{root}/kernel.bin");
+        fs::write(&kernel, b"guest kernel").expect("write kernel image fixture");
+        let entry_toml = |id: usize, name: &str| {
+            format!(
+                "[base]\nid = {id}\nname = \"{name}\"\n\n[kernel]\nimage_location = \"fs\"\nkernel_path = \"{kernel}\"\n"
+            )
+        };
+
+        // The guest filesystem cannot create directories recursively, so each
+        // level of a fixture tree is created on its own.
+        let nested = format!("{root}/a/b");
+        fs::create_dir(&format!("{root}/a")).expect("create fixture directory a");
+        fs::create_dir(&nested).expect("create fixture directory b");
+        fs::write(&format!("{nested}/deep.toml"), entry_toml(11, "deep"))
+            .expect("write nested entry");
+        // A `.toml` that is no guest config. The scan walks a whole filesystem
+        // and meets other tools' documents there; reporting them as broken
+        // configs would bury the files that really are broken.
+        fs::write(
+            &format!("{nested}/manifest.toml"),
+            b"[workspace]\nmembers = [\"crates/a\"]\n",
+        )
+        .expect("write unrelated document");
+        // A config attempt that does not parse is reported wherever it sits:
+        // that is the difference the unrelated document must not blur.
+        fs::write(&format!("{nested}/damaged.toml"), b"[base]\nid = 12,\n")
+            .expect("write damaged entry");
+
+        let pool = scan_dir(root);
+        let ids: alloc::vec::Vec<usize> = pool.entries().iter().map(|entry| entry.id()).collect();
+        ax_assert_eq!(ids, [11]);
+        // `Entry.source` is the folder the file is in, not the folder the scan
+        // started from, so a nested config is traceable to where it lives.
+        ax_assert_eq!(pool.entries()[0].source(), nested.as_str());
+        let reported: alloc::vec::Vec<_> = pool
+            .issues()
+            .iter()
+            .map(|issue| format!("{} {}", issue.kind().as_str(), issue.path()))
+            .collect();
+        ax_assert_eq!(reported, [format!("invalid-toml {nested}/damaged.toml")]);
+
+        // The guest tree is a source as well, read last so the narrower ones
+        // keep precedence; a file reached through two sources is one candidate
+        // rather than a duplicate of itself.
+        ax_assert_eq!(sources().last(), Some(&"/guest".to_string()));
+        let overlap = scan_dirs(&[nested.clone(), root.to_string()]);
+        let ids: alloc::vec::Vec<usize> =
+            overlap.entries().iter().map(|entry| entry.id()).collect();
+        ax_assert_eq!(ids, [11]);
+        ax_assert!(
+            overlap
+                .issues()
+                .iter()
+                .all(|issue| issue.kind().as_str() != "duplicate-id")
+        );
+
+        // The walk stops at the depth cap instead of following a pathological
+        // tree for as long as it takes to read it.
+        let mut too_deep = root.to_string();
+        for level in 0..=MAX_SCAN_DEPTH {
+            too_deep = format!("{too_deep}/level{level}");
+            fs::create_dir(&too_deep).expect("create deep fixture directory");
+        }
+        fs::write(&format!("{too_deep}/buried.toml"), entry_toml(13, "buried"))
+            .expect("write buried entry");
+        let capped = scan_dir(root);
+        let ids: alloc::vec::Vec<usize> = capped.entries().iter().map(|entry| entry.id()).collect();
+        ax_assert_eq!(ids, [11]);
+
+        remove_path(
+            root,
+            RemoveOptions {
+                recursive: true,
+                ..RemoveOptions::default()
+            },
+        )
+        .expect("remove walk fixture");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn vm_pool_reads_several_directories_in_precedence_order() {
+        use crate::pool::{browse, scan_dirs, sources};
+
+        // The directory a new config is written to comes first, so a config the
+        // operator saves there shadows a same-id config found elsewhere.
+        ax_assert_eq!(sources().first(), Some(&"/guest".to_string()));
 
         let root = "/tmp/axvisor-vm-pool-multi";
         reset_test_dir(root);
@@ -703,6 +789,14 @@ mod tests {
         // `kernel.bin` is neither a directory nor a `.toml`, so it is not
         // reported as a problem: browsing must not turn a normal file into noise.
         ax_assert!(nested.issues().is_empty());
+        // It is still a file, though: a folder view lists what is there, and the
+        // length is what the filesystem knows about it.
+        let listed: alloc::vec::Vec<(&str, usize)> = nested
+            .files()
+            .iter()
+            .map(|file| (file.name(), file.size()))
+            .collect();
+        ax_assert_eq!(listed, [("kernel.bin", 12)]);
 
         remove_path(
             root,
@@ -717,7 +811,7 @@ mod tests {
     #[cfg(feature = "fs")]
     #[test]
     fn vm_pool_save_only_writes_validated_configs_inside_the_directory() {
-        use crate::vm_pool::{SaveError, save_in, scan_dir};
+        use crate::pool::{SaveError, save_in, scan_dir};
 
         let root = "/tmp/axvisor-vm-pool-save";
         reset_test_dir(root);
