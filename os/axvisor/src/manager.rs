@@ -86,9 +86,9 @@ impl AxvmManager {
             return Ok(true);
         }
 
-        let pool = crate::vm_pool::scan();
+        let pool = crate::control::domain::pool::scan();
         let Some(entry) = pool.entry(vm_id) else {
-            crate::vm_pool::log_issues(&pool);
+            crate::control::domain::pool::log_issues(&pool);
             return Ok(false);
         };
 

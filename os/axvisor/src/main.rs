@@ -31,9 +31,8 @@ use ax_std as _;
 
 mod banner;
 mod config;
+mod control;
 mod guest_console;
-#[cfg(any(feature = "browser-console", feature = "http-axum"))]
-mod http;
 mod manager;
 #[cfg(feature = "browser-console")]
 mod network_console;
@@ -44,12 +43,6 @@ mod perf_load;
 mod shell;
 #[cfg(feature = "test-virq-delivery")]
 mod virq_regression;
-#[cfg(feature = "browser-console")]
-mod vm_events;
-#[cfg(feature = "fs")]
-mod vm_pool;
-#[cfg(feature = "web-ui")]
-mod web;
 
 /// Axvisor kernel entry point.
 ///
@@ -82,14 +75,15 @@ fn main() {
     // found: a config in it becomes a VM only when the shell or the control
     // plane asks for it.
     #[cfg(feature = "fs")]
-    vm_pool::log_startup_state();
+    control::domain::pool::log_startup_state();
 
     // Browser consoles follow the VM registry: a VM allocates its console lane
     // while it is created, so there is no startup layout to freeze here. The
     // registry watcher behind `/ws/events` is started before HTTP so the first
-    // subscriber cannot miss a change.
-    #[cfg(feature = "browser-console")]
-    vm_events::start();
+    // subscriber cannot miss a change; without the VM management API the
+    // watcher has no subscriber and is not started.
+    #[cfg(all(feature = "browser-console", feature = "http-axum"))]
+    control::domain::events::start();
 
     // The optional HTTP server accepts connections in a loop and needs its
     // own task so neither the shell nor the VMM blocks it. The server's bind
@@ -98,10 +92,10 @@ fn main() {
     std::thread::Builder::new()
         .name("axvisor-http".into())
         .spawn(|| {
-            if let Err(error) = http::serve() {
+            if let Err(error) = control::serve() {
                 let message = format!(
                     "\r\nAxvisor web console unavailable:\r\n  bind = {}\r\n  error = {error:#}\r\n",
-                    http::bind_addr()
+                    control::bind_addr()
                 );
                 guest_console::submit_host_bytes(message.as_bytes());
             }
@@ -112,7 +106,8 @@ fn main() {
     std::thread::Builder::new()
         .name("axvisor-http".into())
         .spawn(|| {
-            http::serve().unwrap_or_else(|error| panic!("Axvisor HTTP server failed: {error:#}"));
+            control::serve()
+                .unwrap_or_else(|error| panic!("Axvisor HTTP server failed: {error:#}"));
         })
         .unwrap_or_else(|error| panic!("failed to start Axvisor HTTP server: {error}"));
 

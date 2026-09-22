@@ -1,7 +1,7 @@
 //! VM status, lifecycle, and create/delete axum handlers.
 //!
 //! JSON is built with `serde_json::json!()` (no hand-written escaping). These
-//! handlers are dispatched by the TCP serving path in [`super::server`].
+//! handlers are dispatched by the TCP serving path in [`crate::control::transport::server`].
 
 #[cfg(feature = "fs")]
 use alloc::collections::BTreeMap;
@@ -110,7 +110,7 @@ pub async fn vm_delete(Path(id_str): Path<String>) -> Result<StatusCode, StatusC
 ///
 /// The pool is every guest config directory named by the build config (the
 /// drop-in `AXVISOR_VM_POOL` directory first, then any `AXVISOR_VM_DIRS`
-/// entries; see [`crate::vm_pool`]), so "a few folders" is the normal setup: the
+/// entries; see [`crate::control::domain::pool`]), so "a few folders" is the normal setup: the
 /// default folder and the folder the operator drops configs into. It is not the
 /// VM registry: a pool entry is only a candidate and is created when a start
 /// request names its id. `entries` carries the raw TOML so a client can show or
@@ -121,7 +121,7 @@ pub async fn vm_delete(Path(id_str): Path<String>) -> Result<StatusCode, StatusC
 /// "wrong directory".
 #[cfg(feature = "fs")]
 pub async fn vm_pool() -> Json<Value> {
-    let pool = crate::vm_pool::scan();
+    let pool = crate::control::domain::pool::scan();
     let entries = entries_json(pool.entries());
     let issues = issues_json(pool.issues());
     Json(json!({
@@ -149,8 +149,8 @@ pub async fn vm_browse(Query(query): Query<BTreeMap<String, String>>) -> Json<Va
         .map(String::as_str)
         .filter(|path| !path.trim().is_empty())
         .map(ToString::to_string)
-        .unwrap_or_else(|| crate::vm_pool::directory().to_string());
-    let folder = crate::vm_pool::browse(&path);
+        .unwrap_or_else(|| crate::control::domain::pool::directory().to_string());
+    let folder = crate::control::domain::pool::browse(&path);
     let directories: Vec<Value> = folder
         .directories()
         .iter()
@@ -179,12 +179,12 @@ pub async fn vm_pool_save(Json(payload): Json<Value>) -> Result<Json<Value>, Sta
         .get("toml")
         .and_then(Value::as_str)
         .ok_or(StatusCode::BAD_REQUEST)?;
-    match crate::vm_pool::save(name, toml) {
+    match crate::control::domain::pool::save(name, toml) {
         Ok(path) => {
             info!("HTTP: config saved to pool as `{path}`");
             Ok(Json(json!({ "path": path })))
         }
-        Err(error @ crate::vm_pool::SaveError::Unwritable(_)) => {
+        Err(error @ crate::control::domain::pool::SaveError::Unwritable(_)) => {
             error!("HTTP: cannot save pool config: {error}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
@@ -197,7 +197,7 @@ pub async fn vm_pool_save(Json(payload): Json<Value>) -> Result<Json<Value>, Sta
 
 /// Render pool entries for JSON, raw TOML included.
 #[cfg(feature = "fs")]
-fn entries_json(entries: &[crate::vm_pool::Entry]) -> Vec<Value> {
+fn entries_json(entries: &[crate::control::domain::pool::Entry]) -> Vec<Value> {
     entries
         .iter()
         .map(|entry| {
@@ -214,7 +214,7 @@ fn entries_json(entries: &[crate::vm_pool::Entry]) -> Vec<Value> {
 
 /// Render pool or browse issues for JSON.
 #[cfg(feature = "fs")]
-fn issues_json(issues: &[crate::vm_pool::Issue]) -> Vec<Value> {
+fn issues_json(issues: &[crate::control::domain::pool::Issue]) -> Vec<Value> {
     issues
         .iter()
         .map(|issue| {
