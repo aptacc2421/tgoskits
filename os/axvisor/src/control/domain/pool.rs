@@ -14,23 +14,30 @@
 
 //! Candidate guest configs that a start request may create on demand.
 //!
-//! The pool is an Axvisor-owned directory of guest config TOML files, read from
-//! the build-config variable `AXVISOR_VM_POOL` when it is set and from
-//! [`DEFAULT_POOL_DIR`] otherwise. A pool entry is only a candidate: nothing in
-//! this directory is created at startup, so an idle pool costs no guest memory
-//! and may list more guests than the machine can run at once. This is the
-//! difference from [`DEFAULT_VM_CONFIG_DIR`], whose configs the startup path
-//! creates immediately as the default guest set.
+//! A candidate is any guest config on the guest filesystem: [`scan`] reads the
+//! drop-in directory ([`directory`], `AXVISOR_VM_POOL` when set and
+//! [`DEFAULT_POOL_DIR`] otherwise), then every `AXVISOR_VM_DIRS` entry, then the
+//! filesystem root itself, each of them recursively to [`MAX_SCAN_DEPTH`]. An
+//! entry is only a candidate: nothing in those directories is created at
+//! startup, so an idle pool costs no guest memory and may list more guests than
+//! the machine can run at once. This is the difference from
+//! [`DEFAULT_VM_CONFIG_DIR`], whose configs the startup path creates immediately
+//! as the default guest set.
 //!
-//! The directory is the single authority for the candidate set: [`scan`] reads
-//! it on every call and keeps no cache, so a config that the host adds,
-//! replaces or repairs is visible to the next query without a reboot. Files
-//! that cannot be used become [`Issue`] values instead of disappearing, so the
-//! shell and the control plane can report why a file in the pool does nothing.
-//! A config that parses but names a guest image the filesystem does not have is
-//! one of those values: it is a pool file that cannot become a VM.
+//! The filesystem is the single authority for the candidate set: the scan reads
+//! it on every call and keeps no cache, so a config that the host adds, replaces
+//! or repairs is visible to the next query without a reboot. Reading a whole
+//! filesystem also means meeting documents that are no guest config at all —
+//! manifests, metadata, editor settings. Those are skipped, because "unusable
+//! config" is a report an operator can act on and "some other tool's file" is
+//! not. A file that *is* a config attempt and cannot be used becomes an [`Issue`]
+//! instead of disappearing, so the shell and the control plane can say why it
+//! does nothing; a config that parses but names a guest image the filesystem
+//! does not have is one of those values, because it is a pool file that cannot
+//! become a VM.
 
 use alloc::{
+    collections::BTreeSet,
     format,
     string::{String, ToString},
     vec::Vec,
@@ -45,6 +52,17 @@ pub const DEFAULT_POOL_DIR: &str = "/guest/vm_pool";
 /// Directory of configs that the startup path creates as the default guest set.
 pub const DEFAULT_VM_CONFIG_DIR: &str = "/guest/vm_default";
 
+/// The guest filesystem root, read as the last and widest pool source.
+pub const FILESYSTEM_ROOT: &str = "/";
+
+/// How many directory levels below a source a scan descends.
+///
+/// The scan reads a whole filesystem, so it needs a floor: an operator's
+/// pathological tree (a deep package cache, say) must not hold the control
+/// plane for as long as it takes to walk it. Configs deeper than this are not
+/// candidates.
+pub const MAX_SCAN_DEPTH: usize = 8;
+
 /// Pool directory: `[env] AXVISOR_VM_POOL` wins over [`DEFAULT_POOL_DIR`].
 pub fn directory() -> &'static str {
     option_env!("AXVISOR_VM_POOL").unwrap_or(DEFAULT_POOL_DIR)
@@ -54,10 +72,14 @@ pub fn directory() -> &'static str {
 ///
 /// The drop-in directory comes first, so a config the operator puts there wins
 /// over one of the same id from an extra directory; `AXVISOR_VM_DIRS` appends
-/// `:`-separated directories for a host that keeps its configs elsewhere. The
-/// startup directory is deliberately *not* part of this list: its configs are
-/// already registered as the default guest set, so listing them again would
-/// offer every default guest as a candidate for an id that is taken.
+/// `:`-separated directories for a host that keeps its configs elsewhere; the
+/// guest filesystem root comes last, so a config in any other folder is a
+/// candidate as well. Every source is read recursively, to [`MAX_SCAN_DEPTH`].
+///
+/// The startup directory is not listed separately: the filesystem root covers
+/// it. A config there is listed by that scan, its id is already registered as a
+/// default guest, so a second file claiming the id elsewhere is reported by the
+/// duplicate rule and a start request for it fails like any other taken id.
 pub fn sources() -> Vec<String> {
     let mut sources: Vec<String> = Vec::new();
     let mut push = |directory: &str| {
@@ -70,6 +92,7 @@ pub fn sources() -> Vec<String> {
     for extra in option_env!("AXVISOR_VM_DIRS").unwrap_or("").split(':') {
         push(extra);
     }
+    push(FILESYSTEM_ROOT);
     sources
 }
 
@@ -241,69 +264,94 @@ pub fn scan_dir(directory: &str) -> Pool {
     scan_dirs(&[directory.to_string()])
 }
 
-/// Scan `directories` in order.
+/// Scan `directories` in order, each one recursively.
 ///
 /// The first directory that offers a given `base.id` wins and later copies are
 /// reported as [`IssueKind::DuplicateId`], so a precedence order (see
-/// [`sources`]) decides which of two files with the same id is startable.
-/// Nothing is cached: a config the host adds, replaces or removes is visible to
-/// the next scan.
+/// [`sources`]) decides which of two files with the same id is startable. The
+/// filesystem root is a source too, so a file is reachable twice; it is read
+/// once, through the first source that reaches it. Nothing is cached: a config
+/// the host adds, replaces or removes is visible to the next scan.
 pub fn scan_dirs(directories: &[String]) -> Pool {
-    let mut entries: Vec<Entry> = Vec::new();
-    let mut issues = Vec::new();
-
+    let mut scan = Scan::default();
     for directory in directories {
+        scan.walk(directory, 0);
+    }
+    Pool {
+        directory: directories.first().cloned().unwrap_or_default(),
+        sources: directories.to_vec(),
+        entries: scan.entries,
+        issues: scan.issues,
+    }
+}
+
+/// One scan's accumulated result, carried through the recursive walk.
+#[derive(Default)]
+struct Scan {
+    entries: Vec<Entry>,
+    issues: Vec<Issue>,
+    /// Config paths already read. The filesystem root reaches every file a
+    /// narrower source reaches and both are read, so without this the same file
+    /// would be claimed twice and reported as its own duplicate.
+    read: BTreeSet<String>,
+}
+
+impl Scan {
+    /// Read `directory`, then every directory below it, to [`MAX_SCAN_DEPTH`].
+    fn walk(&mut self, directory: &str, depth: usize) {
         let read_dir = match ax_std::fs::read_dir(directory) {
             Ok(read_dir) => read_dir,
             Err(error) => {
-                issues.push(Issue {
-                    path: directory.clone(),
+                self.issues.push(Issue {
+                    path: directory.to_string(),
                     kind: IssueKind::DirectoryUnavailable(error.to_string()),
                 });
-                continue;
+                return;
             }
         };
 
         for dir_entry in read_dir {
-            let path = match dir_entry {
-                Ok(dir_entry) => dir_entry.path(),
+            let (path, is_directory) = match dir_entry {
+                Ok(dir_entry) => (dir_entry.path(), dir_entry.file_type().is_dir()),
                 Err(error) => {
-                    issues.push(Issue {
-                        path: directory.clone(),
+                    self.issues.push(Issue {
+                        path: directory.to_string(),
                         kind: IssueKind::Unreadable(format!("directory entry: {error}")),
                     });
                     continue;
                 }
             };
-            if !path.ends_with(".toml") {
+            // A symlink to a directory has its own type, so it is not descended
+            // into; that also keeps a link pointing back up the tree finite.
+            if is_directory {
+                if depth < MAX_SCAN_DEPTH {
+                    self.walk(&path, depth + 1);
+                }
+                continue;
+            }
+            if !path.ends_with(".toml") || !self.read.insert(path.clone()) {
                 continue;
             }
 
             let entry = match parse_entry(&path, directory) {
-                Ok(entry) => entry,
+                Ok(Some(entry)) => entry,
+                Ok(None) => continue,
                 Err(kind) => {
-                    issues.push(Issue { path, kind });
+                    self.issues.push(Issue { path, kind });
                     continue;
                 }
             };
-            match entries.iter().find(|known| known.id == entry.id) {
-                Some(known) => issues.push(Issue {
+            match self.entries.iter().find(|known| known.id == entry.id) {
+                Some(known) => self.issues.push(Issue {
                     path: entry.path,
                     kind: IssueKind::DuplicateId {
                         id: entry.id,
                         claimed_by: known.path.clone(),
                     },
                 }),
-                None => entries.push(entry),
+                None => self.entries.push(entry),
             }
         }
-    }
-
-    Pool {
-        directory: directories.first().cloned().unwrap_or_default(),
-        sources: directories.to_vec(),
-        entries,
-        issues,
     }
 }
 
@@ -349,11 +397,21 @@ pub fn log_issues(pool: &Pool) {
     }
 }
 
-fn parse_entry(path: &str, source: &str) -> Result<Entry, IssueKind> {
+/// Read one candidate config.
+///
+/// `Ok(None)` means "not a guest config at all": the scan reads a whole
+/// filesystem and meets every `.toml` on it, and only a document carrying one of
+/// the guest config's own top-level keys is a candidate. A candidate that cannot
+/// be used is still an `Err`, which is what keeps a damaged config visible
+/// instead of silently absent.
+fn parse_entry(path: &str, source: &str) -> Result<Option<Entry>, IssueKind> {
     let toml = ax_std::fs::read_to_string(path)
         .map_err(|error| IssueKind::Unreadable(error.to_string()))?;
     if toml.trim().is_empty() {
         return Err(IssueKind::Empty);
+    }
+    if !looks_like_guest_config(&toml) {
+        return Ok(None);
     }
 
     let config = GuestConfig::from_toml(&toml)
@@ -364,13 +422,50 @@ fn parse_entry(path: &str, source: &str) -> Result<Entry, IssueKind> {
     if let Some(issue) = unusable_image(&config) {
         return Err(issue);
     }
-    Ok(Entry {
+    Ok(Some(Entry {
         path: path.to_string(),
         source: source.to_string(),
         id: config.base.id,
         name: config.base.name.clone(),
         toml,
+    }))
+}
+
+/// Whether `toml` is an attempt at a guest config rather than an unrelated
+/// document.
+///
+/// A whole-filesystem scan meets every `.toml` an operator, a package or a tool
+/// left anywhere on it — manifests, metadata, editor settings. None of those is
+/// a damaged guest config, and reporting them would bury the files that are. So
+/// a document is a candidate only if it names one of the guest config's own
+/// top-level keys, as a table or as a key assignment; whitespace does not
+/// distinguish the two and is ignored.
+fn looks_like_guest_config(toml: &str) -> bool {
+    toml.lines().any(|line| {
+        let compact: String = line
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        ["base", "kernel"]
+            .into_iter()
+            .any(|key| line_names_top_level_key(&compact, key))
     })
+}
+
+/// Why a document that names no guest config key is not one.
+const NO_GUEST_CONFIG_KEY: &str = "it names neither a `base` nor a `kernel` table";
+
+/// Whether one compacted line names `key` at the top level.
+fn line_names_top_level_key(compact: &str, key: &str) -> bool {
+    if let Some(rest) = compact.strip_prefix('[') {
+        // `[base]` and `[base.something]` are the key; `[database]` is not.
+        return rest
+            .strip_prefix(key)
+            .is_some_and(|rest| rest.starts_with(']') || rest.starts_with('.'));
+    }
+    compact
+        .strip_prefix(key)
+        .is_some_and(|rest| rest.starts_with('=') || rest.starts_with('.'))
 }
 
 /// One entry of a browsed folder: a subdirectory or a config file.
@@ -434,9 +529,11 @@ impl Folder {
 ///
 /// This is what lets the operator pick a config from anywhere instead of only
 /// from the pool: every `.toml` is parsed on the spot, so the result already
-/// says which files are startable and why the others are not. A directory that
-/// cannot be read comes back as an empty [`Folder`] with a
-/// [`IssueKind::DirectoryUnavailable`] issue, the same shape a pool scan uses.
+/// says which files are startable and why the others are not — including one
+/// that is no guest config at all, which is reported because this answer is
+/// about the folder the caller asked for. A directory that cannot be read comes
+/// back as an empty [`Folder`] with a [`IssueKind::DirectoryUnavailable`] issue,
+/// the same shape a pool scan uses.
 pub fn browse(path: &str) -> Folder {
     let mut directories = Vec::new();
     let mut entries = Vec::new();
@@ -470,7 +567,16 @@ pub fn browse(path: &str) -> Folder {
                     });
                 } else if entry_path.ends_with(".toml") {
                     match parse_entry(&entry_path, path) {
-                        Ok(entry) => entries.push(entry),
+                        Ok(Some(entry)) => entries.push(entry),
+                        // A browse is how a caller confirms what a folder
+                        // holds, so a `.toml` that is no guest config is
+                        // reported instead of hidden. The scan skips those
+                        // because a whole filesystem is full of them; this
+                        // answer is about one folder the caller asked for.
+                        Ok(None) => issues.push(Issue {
+                            path: entry_path,
+                            kind: IssueKind::InvalidToml(NO_GUEST_CONFIG_KEY.to_string()),
+                        }),
                         Err(kind) => issues.push(Issue {
                             path: entry_path,
                             kind,

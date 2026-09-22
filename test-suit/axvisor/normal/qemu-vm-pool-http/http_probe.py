@@ -750,7 +750,10 @@ def phase_pool():
 
     pool = pool_body("GET /api/vms/pool")
     check("pool directory", pool["directory"], "/usr/bin")
-    check("pool folders", pool["sources"], ["/usr/bin"])
+    # The read sources are the drop-in folder and, last, the guest filesystem
+    # root: a config anywhere on the filesystem is a candidate, and the root is
+    # read after the folder so the folder keeps precedence for a taken id.
+    check("pool folders", pool["sources"], ["/usr/bin", "/"])
     check_pool_matches_fixtures("GET /api/vms/pool", pool)
     check_pool_issue("GET /api/vms/pool", pool)
     check_folder_browsing()
