@@ -1,4 +1,4 @@
-//! Live VM registry feed (`/ws/events`, `browser-console` builds).
+//! Live VM registry feed (the `vms` panel's `events` link, `browser-console` builds).
 //!
 //! The frames only say *that* something changed; `GET /api/vms` stays
 //! authoritative. The feed therefore keeps a list that is replaced wholesale by
@@ -9,7 +9,6 @@
 //! simply be busy creating a VM when the browser reconnects.
 
 import { useEffect, useState } from 'react'
-import { endpoints } from './endpoints'
 import type { VmStatus, VmSummary } from './types'
 import { wsUrl } from './ws'
 
@@ -24,12 +23,17 @@ export interface VmFeed {
   live: boolean
 }
 
-export function useVmFeed(enabled = true): VmFeed {
+export function useVmFeed(url: string | null): VmFeed {
   const [vms, setVms] = useState<VmSummary[]>([])
   const [live, setLive] = useState(false)
 
   useEffect(() => {
-    if (!enabled) return
+    // A build without the feed declares no such link, and the caller passes
+    // `null`: there is nothing to connect to, and no error to report either.
+    if (url === null) {
+      setLive(false)
+      return
+    }
     let socket: WebSocket | null = null
     let closedByUs = false
     let retries = 0
@@ -37,7 +41,7 @@ export function useVmFeed(enabled = true): VmFeed {
 
     const connect = () => {
       if (closedByUs) return
-      socket = new WebSocket(wsUrl(endpoints.events))
+      socket = new WebSocket(wsUrl(url))
       socket.onopen = () => {
         retries = 0
         setLive(true)
@@ -66,7 +70,7 @@ export function useVmFeed(enabled = true): VmFeed {
       if (timer !== undefined) window.clearTimeout(timer)
       socket?.close()
     }
-  }, [enabled])
+  }, [url])
 
   return { vms, live }
 }

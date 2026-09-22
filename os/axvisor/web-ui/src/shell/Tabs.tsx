@@ -10,6 +10,7 @@ import { Suspense, useState } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { VmSummary } from '@/api/types'
 import type { PanelMeta, PanelRegistry } from '@/api/types'
+import type { Capabilities } from '@/capability/accessor'
 import { cn } from '@/lib/utils'
 import { PanelErrorBoundary } from './PanelErrorBoundary'
 import type { TabState } from './App'
@@ -20,6 +21,8 @@ interface TabsProps {
   activeId: string | null
   registry: PanelRegistry
   api: ApiClient
+  /** Declared capabilities, bound per panel so no panel can name another's paths. */
+  capabilities: Capabilities
   resources: VmSummary[]
   focusVm: number | null
   onActivate: (id: string) => void
@@ -28,8 +31,19 @@ interface TabsProps {
 }
 
 export function Tabs(props: TabsProps) {
-  const { panels, tabs, activeId, registry, api, resources, focusVm, onActivate, onClose, onNew } =
-    props
+  const {
+    panels,
+    tabs,
+    activeId,
+    registry,
+    api,
+    capabilities,
+    resources,
+    focusVm,
+    onActivate,
+    onClose,
+    onNew,
+  } = props
   const [pickerOpen, setPickerOpen] = useState(false)
 
   // Number the instances of a kind so two terminals are told apart.
@@ -114,13 +128,22 @@ export function Tabs(props: TabsProps) {
           const meta = panels.find((panel) => panel.kind === tab.kind)
           if (!meta) return null
           const Panel = registry.resolve(tab.kind)
+          // One stable accessor per kind: a panel may keep `link` in an effect's
+          // dependency list without re-running on every render of this strip.
+          const link = capabilities.bind(tab.kind)
           return (
             <div key={tab.id} className={cn('h-full', tab.id === activeId ? 'block' : 'hidden')}>
               {/* One boundary per tab: a panel that throws on one VM must not
                   take the shell, the navigation or the other tabs down. */}
               <PanelErrorBoundary title={meta.title}>
                 <Suspense fallback={<p className="text-sm text-muted-foreground">加载面板…</p>}>
-                  <Panel meta={meta} api={api} resources={resources} focusVm={focusVm} />
+                  <Panel
+                    meta={meta}
+                    api={api}
+                    link={link}
+                    resources={resources}
+                    focusVm={focusVm}
+                  />
                 </Suspense>
               </PanelErrorBoundary>
             </div>

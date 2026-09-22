@@ -1,35 +1,43 @@
 //! Board-hosted HTTP/WebSocket gateway for the current network console lanes.
 //!
 //! The console set is a runtime registry (see [`crate::network_console`]): a VM
-//! gets its lane when it is created and loses it when it is removed, so
-//! `/api/consoles` changes while the hypervisor runs and a route that answered
-//! a moment ago can be gone.
+//! gets its lane when it is created and loses it when it is removed, so the
+//! lane table changes while the hypervisor runs and a route that answered a
+//! moment ago can be gone.
 //!
 //! This module serves the gateway only — discovery plus one socket per lane. The
-//! page a human actually looks at is the embedded dashboard (`crate::web`, the
-//! `web-ui` feature), which consumes this gateway; a build with `browser-console`
-//! but without `web-ui` is a headless gateway whose `/` stays a 404.
+//! paths those two live at are declared in
+//! [`crate::control::capability::table`], which is the only place that knows
+//! them; here they are just two handlers plus the routes that mount them. The
+//! page a human actually looks at is the embedded dashboard
+//! (`crate::control::web`, the `web-ui` feature), which consumes this gateway; a
+//! build with `browser-console` but without `web-ui` is a headless gateway
+//! whose `/` stays a 404.
 
 use anyhow::{Context, Result};
 use axum::{
-    Json, Router,
+    Json,
     extract::{
         Path,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{MethodRouter, get},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 
 const BROWSER_INPUT_CAPACITY: usize = 4096;
-/// Browser-console routes served by Axvisor's optional HTTP listener.
-pub(super) fn router() -> Router {
-    Router::new()
-        .route("/api/consoles", get(console_descriptions))
-        .route("/ws/{endpoint}", get(upgrade_console))
+
+/// Route for the lane table: which lanes exist and whether they are taken.
+pub(crate) fn console_list_route() -> MethodRouter {
+    get(console_descriptions)
+}
+
+/// Route for a lane socket, shared by the guest and management panels.
+pub(crate) fn console_stream_route() -> MethodRouter {
+    get(upgrade_console)
 }
 
 async fn console_descriptions() -> Json<Vec<Value>> {

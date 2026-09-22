@@ -1,10 +1,12 @@
 //! Live VM registry events for the browser UI (`browser-console` feature).
 //!
-//! `GET /ws/events` upgrades to a WebSocket and pushes two kinds of frame:
+//! The socket at `/ws/events` — declared in
+//! [`crate::control::capability::table`] — upgrades to a WebSocket and pushes
+//! two kinds of frame:
 //!
 //! - one `snapshot` frame at connect with the current list,
 //! - one `created` / `removed` / `status` frame per registry change
-//!   ([`crate::vm_events`]).
+//!   ([`crate::control::domain::events`]).
 //!
 //! Frames only tell the browser *that* something changed, with the fields a list
 //! needs; `GET /api/vms` and `GET /api/vms/{id}` stay authoritative, so a client
@@ -17,20 +19,19 @@
 //! event stream to notice a disconnect).
 
 use axum::{
-    Router,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{MethodRouter, get},
 };
 use serde_json::{Value, json};
 
+use crate::control::domain::events::{EventKind, Subscription, VmEvent};
 use crate::manager::AxvmManager;
-use crate::vm_events::{EventKind, Subscription, VmEvent};
 
-/// Browser-console routes served by Axvisor's optional HTTP listener.
-pub(super) fn router() -> Router {
-    Router::new().route("/ws/events", get(upgrade_events))
+/// Route for the registry event stream.
+pub(crate) fn events_stream_route() -> MethodRouter {
+    get(upgrade_events)
 }
 
 async fn upgrade_events(
@@ -40,7 +41,7 @@ async fn upgrade_events(
     // Same cross-origin rule as the console sockets: a page served from another
     // origin must not read the hypervisor's state.
     super::validate_browser_origin(&headers)?;
-    let subscription = crate::vm_events::subscribe();
+    let subscription = crate::control::domain::events::subscribe();
     Ok(upgrade
         .on_upgrade(move |socket| stream_events(socket, subscription))
         .into_response())

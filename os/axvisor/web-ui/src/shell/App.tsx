@@ -1,16 +1,22 @@
 //! Application shell: manifest → navigation → tabs → panels.
 //!
-//! Nothing under `shell/` imports `panels/` and no panel kind appears here: how a
+//! Nothing under `shell/` imports `panels/` and no panel kind appears here except
+//! the one the registry names as its terminal, which is a registry fact: how a
 //! panel renders is decided by the injected registry, and which panels exist is
 //! decided by the backend manifest. That is what makes the navigation follow the
 //! build — a `http-axum`-only hypervisor advertises VM management, a build with
-//! `browser-console` adds the termininals — without a frontend change.
+//! `browser-console` adds the terminals — without a frontend change.
+//!
+//! The shell reads the manifest once and turns it into [`Capabilities`]: the
+//! panels below are handed accessors, never paths. The feed URL is looked up the
+//! same way, so a build without the event link simply has no live feed.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useApiClient } from '@/api/client'
-import { endpoints } from '@/api/endpoints'
 import { useVmFeed } from '@/api/events'
 import { describeError, type Manifest, type PanelRegistry } from '@/api/types'
+import { Capabilities } from '@/capability/accessor'
+import { loadManifest } from '@/capability/manifest'
 import { Button } from '@/components/ui/button'
 import { Nav } from './Nav'
 import { Tabs } from './Tabs'
@@ -23,7 +29,6 @@ export interface TabState {
 
 export default function App({ registry }: { registry: PanelRegistry }) {
   const api = useApiClient()
-  const { vms, live } = useVmFeed()
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
@@ -31,11 +36,16 @@ export default function App({ registry }: { registry: PanelRegistry }) {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [focusVm, setFocusVm] = useState<number | null>(null)
   const bootstrappedRef = useRef(false)
+  const capabilities = useMemo(() => new Capabilities(manifest?.panels ?? []), [manifest])
+  // The one cross-panel lookup in the shell: the registry list on the left follows
+  // the `vms` panel's event link. A build that does not declare it keeps a static
+  // list rather than retrying a route that does not exist.
+  const feedUrl = capabilities.maybeUrl('vms', 'events')
+  const { vms, live } = useVmFeed(feedUrl)
 
   useEffect(() => {
     const controller = new AbortController()
-    api
-      .get<Manifest>(endpoints.manifest, controller.signal)
+    loadManifest(api, controller.signal)
       .then((fetched) => {
         setManifest(fetched)
         setError(null)
@@ -142,6 +152,7 @@ export default function App({ registry }: { registry: PanelRegistry }) {
           activeId={activeId}
           registry={registry}
           api={api}
+          capabilities={capabilities}
           resources={vms}
           focusVm={focusVm}
           onActivate={setActiveId}
