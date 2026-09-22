@@ -610,6 +610,17 @@ pub fn save_in(directory: &str, name: &str, toml: &str) -> Result<String, SaveEr
 /// rather than listed: the operator would otherwise pick a config that fails on
 /// start.
 fn unusable_image(config: &GuestConfig) -> Option<IssueKind> {
+    missing_guest_image(config).map(IssueKind::MissingImage)
+}
+
+/// The first path a config names that is not in the guest filesystem.
+///
+/// This is the predicate two planes ask: the pool scan uses it to report a
+/// config that cannot become a VM, and the creation path uses it to refuse a
+/// request that names a file a transfer has not placed yet. Sharing it is the
+/// point — "is this file in place" is one fact, and neither caller has to know
+/// the other exists.
+pub(crate) fn missing_guest_image(config: &GuestConfig) -> Option<String> {
     if config.kernel.image_location.as_deref() != Some("fs") {
         return None;
     }
@@ -623,5 +634,5 @@ fn unusable_image(config: &GuestConfig) -> Option<IssueKind> {
     .flatten()
     .filter(|path| !path.is_empty())
     .find(|path| ax_std::fs::metadata(path).is_err())
-    .map(|path| IssueKind::MissingImage(path.to_string()))
+    .map(|path| path.to_string())
 }

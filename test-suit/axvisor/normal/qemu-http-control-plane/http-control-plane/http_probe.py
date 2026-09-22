@@ -97,6 +97,7 @@ kernel and the same guest disk image as the one the build created.
 """
 
 import json
+import re
 import os
 import sys
 import time
@@ -436,6 +437,78 @@ def check_file_transfer():
 
 
 
+def check_create_gate(vm_config):
+    """A config naming a file nobody transferred is refused, and the file is named.
+
+    This refusal is what the transfer is *for*: "it is not there yet" is an answer
+    an operator can act on, unlike the device error that appears when creation is
+    allowed to proceed and a backing file turns out to be missing.
+    """
+    # A `.toml` name on purpose: the directory listing shows a config that cannot
+    # be parsed as an issue, which is how this probe observes that the file really
+    # is in the guest filesystem at that path.
+    missing = "/guest/probe-gate/linux-missing.toml"
+    # Anchored replacements: the fixture's own comments quote `id = 1`, so an
+    # unanchored substitution would edit the prose instead of the field.
+    target = re.sub(r'(?m)^id = \d+', "id = 4242", vm_config, count=1)
+    target = re.sub(r'(?m)^kernel_path = ".*"$', 'kernel_path = "%s"' % missing, target, count=1)
+    if missing not in target or "id = 4242" not in target:
+        raise AssertionError("the fixture no longer has the fields this check rewrites")
+
+    status, body = request("POST", "/api/vms/create", json.dumps({"toml": target}))
+    check("POST /api/vms/create (kernel not transferred)", status, 409)
+    if missing not in json.dumps(body):
+        raise AssertionError("the refusal does not name the missing file: %r" % (body,))
+    print("  http probe: create refused and named `%s`" % missing)
+
+    # And the transfer is what turns the answer around: once a file is placed at
+    # that path, the predicate the gate uses is satisfied. The probe stops short
+    # of a second creation request on purpose — a creation that gets past the
+    # gate loads the "kernel" it names, and this payload is not one — so what is
+    # asserted here is the fact the gate reads: the file is at that path.
+    directory = "/guest/probe-gate"
+    payload = b"not-a-kernel\n"
+    request(
+        "POST",
+        "/api/files/dirs",
+        json.dumps({"parent": "/guest", "name": "probe-gate"}),
+    )
+    status, _, body = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {"id": "probe-gate", "directory": directory, "total": len(payload)}
+        ).encode("utf-8"),
+    )
+    check("POST /api/files (gate session)", status, 200)
+    status, _, body = request_raw(
+        "PATCH",
+        "/api/files/probe-gate",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "bytes 0-%d/%d" % (len(payload) - 1, len(payload)),
+        },
+        body=payload,
+    )
+    check("PATCH /api/files (gate session)", status, 200)
+    status, _, body = request_raw(
+        "POST",
+        "/api/files/probe-gate/place",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"name": missing.rsplit("/", 1)[1]}).encode("utf-8"),
+    )
+    check("POST /api/files/place (gate session)", status, 200)
+
+    status, body = request("GET", "/api/vms/browse?path=" + directory)
+    check("GET /api/vms/browse (placed file)", status, 200)
+    listed = json.dumps(body)
+    if missing not in listed:
+        raise AssertionError("the placed file is not in %s: %r" % (directory, body))
+    print("  http probe: the placed file is at `%s`" % missing)
+
+
+
 def check(label, actual, expected):
     """Assert a status code, printing a progress line."""
     if actual != expected:
@@ -678,6 +751,7 @@ def main():
         raise AssertionError("GET /api/manifest vms panel had no root: %r" % (panels[0],))
     check_manifest_links(panels)
     check_file_transfer()
+    check_create_gate(vm_config)
     status, _ = request("GET", "/api/consoles")
     check("GET /api/consoles without browser-console", status, 404)
 

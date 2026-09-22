@@ -9,6 +9,7 @@ use alloc::string::ToString;
 
 #[cfg(feature = "fs")]
 use axum::extract::Query;
+use axum::response::{IntoResponse, Response};
 use axum::{Json, extract::Path, http::StatusCode};
 use axvm::{AxVMRef, AxVmError, VmStatus, VmVcpuState};
 use axvmconfig::GuestConfig;
@@ -43,7 +44,7 @@ pub async fn vm_detail(Path(id_str): Path<String>) -> Result<Json<Value>, Status
 /// the config's `base.id` must not currently be registered. An exhausted host
 /// resource (memory, or the browser console lane table of a `browser-console`
 /// build) is a 503, so a caller can tell "try later" from "this config is wrong".
-pub async fn vm_create(Json(payload): Json<Value>) -> Result<Json<Value>, StatusCode> {
+pub async fn vm_create(Json(payload): Json<Value>) -> Response {
     let toml = match (
         payload.get("toml").and_then(Value::as_str),
         payload.get("path").and_then(Value::as_str),
@@ -52,31 +53,56 @@ pub async fn vm_create(Json(payload): Json<Value>) -> Result<Json<Value>, Status
         // Reading a config from the guest filesystem needs the filesystem
         // feature; a build without it only accepts the pasted form.
         #[cfg(feature = "fs")]
-        (None, Some(path)) => ax_std::fs::read_to_string(path).map_err(|error| {
-            warn!("HTTP: cannot read config `{path}`: {error}");
-            StatusCode::BAD_REQUEST
-        })?,
-        (None, _) => return Err(StatusCode::BAD_REQUEST),
+        (None, Some(path)) => match ax_std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                warn!("HTTP: cannot read config `{path}`: {error}");
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+        },
+        (None, _) => return StatusCode::BAD_REQUEST.into_response(),
     };
-    let config = GuestConfig::from_toml(&toml).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let Ok(config) = GuestConfig::from_toml(&toml) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     let id = config.base.id;
     // Explicit duplicate check: `create_vm_from_toml` fails on a re-registered id
     // with a plain anyhow string, so surface the conflict as a contract error
     // (409) instead of an opaque 500.
     if AxvmManager::vm_by_id(id).is_some() {
-        return Err(StatusCode::CONFLICT);
+        return StatusCode::CONFLICT.into_response();
     }
+
+    // "The file is not there yet" and "the config is wrong" are different
+    // answers, and only the first one is what a transfer is for. Checking it
+    // here — with the same predicate the pool scan uses — keeps the refusal
+    // readable instead of failing later, inside device setup, with an error
+    // about a backing file nobody asked about. Without the filesystem feature
+    // there is nothing to look up, so the check is absent rather than vacuous.
+    #[cfg(feature = "fs")]
+    if let Some(missing) = crate::control::domain::pool::missing_guest_image(&config) {
+        warn!("HTTP: create refused, `{missing}` is not in the guest filesystem");
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("`{missing}` is not in the guest filesystem yet; transfer it first"),
+                "missing": missing,
+            })),
+        )
+            .into_response();
+    }
+
     match AxvmManager::create_vm_from_toml(&toml) {
         Ok(id) => {
             info!("HTTP: VM[{id}] created via control API");
-            Ok(Json(json!({ "id": id })))
+            Json(json!({ "id": id })).into_response()
         }
         Err(error) => {
             error!("HTTP: create VM[{id}] failed: {error:#}");
             // Shared mapping so an exhausted host resource (memory, and the
             // browser console lane table when `browser-console` is on) is a
             // distinguishable 503 here exactly as it is on a start request.
-            Err(map_axvm_error(error))
+            map_axvm_error(error).into_response()
         }
     }
 }
