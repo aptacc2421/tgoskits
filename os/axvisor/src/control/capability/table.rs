@@ -27,6 +27,13 @@
 //! | GET | `/api/vms/pool` | `vm::vm_pool` | pool (`fs`) |
 //! | POST | `/api/vms/pool` | `vm::vm_pool_save` | pool_save (`fs`) |
 //! | GET | `/api/vms/browse` | `vm::vm_browse` | browse (`fs`) |
+//! | GET | `/api/files` | `files::list_files` | list (`fs`) |
+//! | POST | `/api/files` | `files::open_file` | open (`fs`) |
+//! | HEAD | `/api/files/{id}` | `files::resume_file` | resume (`fs`) |
+//! | PATCH | `/api/files/{id}` | `files::send_chunk` | send (`fs`) |
+//! | POST | `/api/files/{id}/place` | `files::place_file` | place (`fs`) |
+//! | DELETE | `/api/files/{id}` | `files::drop_file` | drop (`fs`) |
+//! | POST | `/api/files/dirs` | `files::make_directory` | mkdir (`fs`) |
 //! | GET | `/ws/events` | `events::upgrade_events` | events (`http-axum` + `browser-console`) |
 //! | GET | `/api/consoles` | `browser_console::console_descriptions` | list |
 //! | GET | `/ws/{endpoint}` | `browser_console::upgrade_console` | stream |
@@ -40,10 +47,16 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use axum::Router;
+#[cfg(all(feature = "fs", feature = "http-axum"))]
+use axum::extract::DefaultBodyLimit;
 use axum::routing::get;
 #[cfg(feature = "http-axum")]
 use axum::routing::{delete, post};
+#[cfg(all(feature = "fs", feature = "http-axum"))]
+use axum::routing::{head, patch};
 
+#[cfg(all(feature = "fs", feature = "http-axum"))]
+use crate::control::transport::api::files;
 #[cfg(feature = "http-axum")]
 use crate::control::transport::api::vm;
 #[cfg(feature = "browser-console")]
@@ -87,6 +100,9 @@ pub fn resources() -> Vec<&'static Resource> {
 
     #[cfg(feature = "http-axum")]
     all.push(&VMS_RESOURCE);
+
+    #[cfg(all(feature = "fs", feature = "http-axum"))]
+    all.push(&FILES_RESOURCE);
 
     #[cfg(feature = "browser-console")]
     all.push(&CONSOLE_RESOURCE);
@@ -201,6 +217,86 @@ static VMS_ENDPOINTS: &[Endpoint] = &[
         method: Method::Post,
         path: "/api/vms/{id}/resume",
         build: || post(vm::vm_resume),
+    },
+];
+
+#[cfg(all(feature = "fs", feature = "http-axum"))]
+static FILES_RESOURCE: Resource = Resource {
+    kind: "files",
+    title: "文件",
+    root: "/api/files",
+    verbs: &[Verb::Read, Verb::Write],
+    endpoints: FILES_ENDPOINTS,
+};
+
+/// The transfer steps, in the order they follow each other.
+///
+/// One upload is split into the steps an interrupted transfer needs rather than
+/// offered as a single call: `open` names the target directory and the length,
+/// `send` appends one chunk, `resume` reports where the bytes stopped, `place`
+/// moves the finished file to its final name and `drop` forgets an attempt.
+/// `list` is what shows a client which objects are waiting to be placed; a
+/// session whose bytes are still arriving is deliberately absent from it.
+#[cfg(all(feature = "fs", feature = "http-axum"))]
+static FILES_ENDPOINTS: &[Endpoint] = &[
+    Endpoint {
+        name: "list",
+        verb: Verb::Read,
+        method: Method::Get,
+        path: "/api/files",
+        build: || get(files::list_files),
+    },
+    Endpoint {
+        name: "open",
+        verb: Verb::Write,
+        method: Method::Post,
+        path: "/api/files",
+        build: || post(files::open_file),
+    },
+    Endpoint {
+        name: "resume",
+        verb: Verb::Read,
+        method: Method::Head,
+        path: "/api/files/{id}",
+        build: || head(files::resume_file),
+    },
+    // The only route with a body limit of its own: one chunk per request is what
+    // bounds both the memory a transfer can hold and the time it holds the
+    // control-plane thread, so the limit comes from the same constant the
+    // handler reads the body with.
+    Endpoint {
+        name: "send",
+        verb: Verb::Write,
+        method: Method::Patch,
+        path: "/api/files/{id}",
+        build: || {
+            patch(files::send_chunk).layer(DefaultBodyLimit::max(
+                crate::control::domain::files::CHUNK_LIMIT,
+            ))
+        },
+    },
+    Endpoint {
+        name: "place",
+        verb: Verb::Write,
+        method: Method::Post,
+        path: "/api/files/{id}/place",
+        build: || post(files::place_file),
+    },
+    Endpoint {
+        name: "drop",
+        verb: Verb::Write,
+        method: Method::Delete,
+        path: "/api/files/{id}",
+        build: || delete(files::drop_file),
+    },
+    // Not part of a transfer: this is the interface's "new folder", and it is
+    // here because the transfer refuses a target directory that is not there.
+    Endpoint {
+        name: "mkdir",
+        verb: Verb::Write,
+        method: Method::Post,
+        path: "/api/files/dirs",
+        build: || post(files::make_directory),
     },
 ];
 

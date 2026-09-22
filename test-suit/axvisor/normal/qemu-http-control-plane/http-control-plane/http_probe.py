@@ -204,6 +204,238 @@ def check_manifest_links(panels):
     print("  http probe: manifest links all served (%d)" % calls)
 
 
+def request_raw(method, path, headers=None, body=None):
+    """One request with explicit headers, returning (status, headers, payload).
+
+    The chunk endpoint is the only place where the media type and the range
+    header are part of the contract, so the probe has to be able to send them —
+    and has to be able to send the *wrong* ones, which is how the refusal before
+    the body is read gets asserted.
+    """
+    req = urllib.request.Request(
+        BASE + path, data=body, headers=headers or {}, method=method
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            # The header object, not a dict: HTTP/1 lowercases header names on
+            # the wire, and the offset header has to be found either way.
+            return resp.status, resp.headers, resp.read()
+    except urllib.error.HTTPError as err:
+        return err.code, err.headers or {}, err.read()
+    except (OSError, urllib.error.URLError) as err:
+        raise RuntimeError("request %s %s failed: %s" % (method, path, err))
+
+
+def check_file_transfer():
+    """Drive one real transfer: stage it, interrupt it, resume it, place it.
+
+    The transfer is the one capability whose contract is a *sequence*, so the
+    probe walks the sequence rather than poking one endpoint: a chunk that
+    arrives out of order has to be refused with the offset it should have used,
+    and a body whose frame shape is wrong has to be refused before it is read.
+
+    The file it places is not cleaned up, and does not need to be: QEMU boots the
+    root filesystem with `snapshot=on`, so nothing this probe writes survives the
+    run. The assertions below therefore hold whether the image carries a file of
+    that name or not — and the one that always holds is the second placement,
+    which is refused precisely because the bytes are already at the final path.
+    """
+    parent = "/guest"
+    folder = "probe-transfer"
+    name = "probe-transfer.bin"
+    payload = b"axvisor-transfer-probe\n" * 64
+    total = len(payload)
+    session = "probe-transfer"
+    second = "probe-transfer-second"
+
+    # An unknown session is a 404, not a guess: that is what a client which lost
+    # its id has to see.
+    status, _, _ = request_raw("HEAD", "/api/files/%s-absent" % session)
+    check("HEAD /api/files (unknown session)", status, 404)
+
+    # The target folder is *chosen*: a transfer into a directory that is not
+    # there is refused instead of quietly creating it, because what the operator
+    # picked and what the bytes landed in have to be the same directory.
+    status, _, body = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {"id": "probe-missing-dir", "directory": parent + "/not-there", "total": total}
+        ).encode("utf-8"),
+    )
+    check("POST /api/files (missing directory)", status, 404)
+    if "not-there" not in body.decode("utf-8", "replace"):
+        raise AssertionError("the refusal does not name the missing directory")
+
+    # Making one is its own operation, one level at a time: the second call is a
+    # conflict, so the plane never invents a different name either.
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files/dirs",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"parent": parent, "name": folder}).encode("utf-8"),
+    )
+    check("POST /api/files/dirs", status, 200)
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files/dirs",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"parent": parent, "name": folder}).encode("utf-8"),
+    )
+    check("POST /api/files/dirs (already there)", status, 409)
+    directory = parent + "/" + folder
+
+    status, headers, body = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {"id": session, "directory": directory, "total": total}
+        ).encode("utf-8"),
+    )
+    check("POST /api/files", status, 200)
+    opened = json.loads(body.decode("utf-8"))
+    check("POST /api/files state", opened.get("state"), "uploading")
+    check("POST /api/files offset header", headers.get("Upload-Offset"), "0")
+
+    # The frame shape is checked before the body is read, so both of these are
+    # refused without a chunk reaching the staging area.
+    status, _, _ = request_raw(
+        "PATCH",
+        "/api/files/%s" % session,
+        headers={"Content-Type": "text/plain", "Content-Range": "bytes 0-1/%d" % total},
+        body=b"xx",
+    )
+    check("PATCH /api/files (wrong media type)", status, 400)
+    status, _, _ = request_raw(
+        "PATCH",
+        "/api/files/%s" % session,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "0-1/%d" % total,
+        },
+        body=b"xx",
+    )
+    check("PATCH /api/files (malformed range)", status, 400)
+
+    # A chunk that starts where the disk is not: the offset in the answer is the
+    # one the client continues from, which is why the offset is read from the
+    # file rather than from a counter.
+    status, headers, _ = request_raw(
+        "PATCH",
+        "/api/files/%s" % session,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "bytes 4-%d/%d" % (3 + len(payload), total),
+        },
+        body=payload,
+    )
+    check("PATCH /api/files (offset mismatch)", status, 409)
+    check("PATCH /api/files conflict offset", headers.get("Upload-Offset"), "0")
+
+    split = total // 2
+    status, headers, body = request_raw(
+        "PATCH",
+        "/api/files/%s" % session,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "bytes 0-%d/%d" % (split - 1, total),
+        },
+        body=payload[:split],
+    )
+    if status != 200:
+        raise AssertionError(
+            "PATCH /api/files (first chunk) returned %s: %s"
+            % (status, body.decode("utf-8", "replace"))
+        )
+    check("PATCH /api/files (first chunk)", status, 200)
+    check("PATCH /api/files first offset", headers.get("Upload-Offset"), str(split))
+
+    status, headers, _ = request_raw("HEAD", "/api/files/%s" % session)
+    check("HEAD /api/files (interrupted)", status, 200)
+    check("HEAD /api/files offset", headers.get("Upload-Offset"), str(split))
+
+    status, headers, _ = request_raw(
+        "PATCH",
+        "/api/files/%s" % session,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "bytes %d-%d/%d" % (split, total - 1, total),
+        },
+        body=payload[split:],
+    )
+    check("PATCH /api/files (second chunk)", status, 200)
+    check("PATCH /api/files final offset", headers.get("Upload-Offset"), str(total))
+
+    status, body = request("GET", "/api/files")
+    check("GET /api/files", status, 200)
+    listed = [entry for entry in body["files"] if entry.get("id") == session]
+    if not listed:
+        raise AssertionError("the completed session is missing from GET /api/files")
+    check("GET /api/files state", listed[0].get("state"), "uploaded")
+    check("GET /api/files written", listed[0].get("written"), total)
+
+    # The placement step. A previous run on a cached image already put the file
+    # there, which is the conflict the plane is supposed to report, so both
+    # outcomes are correct — and the *second* placement below is the assertion
+    # that holds either way: it is refused because the bytes are at the final
+    # path, which is a real lookup in the guest filesystem.
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files/%s/place" % session,
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"name": name}).encode("utf-8"),
+    )
+    if status not in (200, 409):
+        raise AssertionError("POST /api/files/place returned %s" % status)
+    print("  http probe: place -> %d" % status)
+
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"id": second, "directory": directory, "total": total}).encode(
+            "utf-8"
+        ),
+    )
+    check("POST /api/files (second session)", status, 200)
+    status, headers, _ = request_raw(
+        "PATCH",
+        "/api/files/%s" % second,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "bytes 0-%d/%d" % (total - 1, total),
+        },
+        body=payload,
+    )
+    check("PATCH /api/files (second session)", status, 200)
+    status, _, body = request_raw(
+        "POST",
+        "/api/files/%s/place" % second,
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"name": name}).encode("utf-8"),
+    )
+    check("POST /api/files/place (target exists)", status, 409)
+    if name not in body.decode("utf-8", "replace"):
+        raise AssertionError("the conflict does not name the existing target: %r" % body)
+
+    # A placed file is not undone by forgetting its session: those bytes are the
+    # file a guest config points at.
+    status, _, _ = request_raw("DELETE", "/api/files/%s" % session)
+    check("DELETE /api/files (placed)", status, 409)
+
+    # The second session still only has staged bytes, so it is cleaned up here.
+    status, _, _ = request_raw("DELETE", "/api/files/%s" % second)
+    check("DELETE /api/files (staged)", status, 204)
+    status, body = request("GET", "/api/files")
+    check("GET /api/files (after drop)", status, 200)
+    if any(entry.get("id") == second for entry in body["files"]):
+        raise AssertionError("a dropped session is still listed")
+    print("  http probe: transfer staged, interrupted, resumed and placed")
+
+
+
 def check(label, actual, expected):
     """Assert a status code, printing a progress line."""
     if actual != expected:
@@ -436,11 +668,16 @@ def main():
     if not isinstance(panels, list):
         raise AssertionError("GET /api/manifest panels was not a list: %r" % (body,))
     kinds = [panel.get("kind") for panel in panels]
-    check("GET /api/manifest panel kinds", kinds, ["vms"])
+    # `fs` is enabled for this case, so the file-transfer panel is declared too:
+    # the transfer routes exist exactly where the guest filesystem does.
+    # Declaration order: the VM panel first (it is what an operator lands on),
+    # then the transfer panel that `fs` adds.
+    check("GET /api/manifest panel kinds", kinds, ["vms", "files"])
     check("GET /api/manifest vms verbs", panels[0].get("verbs"), ["read", "write"])
     if not panels[0].get("root"):
         raise AssertionError("GET /api/manifest vms panel had no root: %r" % (panels[0],))
     check_manifest_links(panels)
+    check_file_transfer()
     status, _ = request("GET", "/api/consoles")
     check("GET /api/consoles without browser-console", status, 404)
 

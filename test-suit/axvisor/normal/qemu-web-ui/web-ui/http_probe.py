@@ -133,8 +133,16 @@ MANIFEST_LINKS = {
     ],
     "console": ["list", "stream"],
     "shell": ["stream"],
+    # One upload split into the steps an interrupted transfer needs: the
+    # dashboard drags a file through exactly these operations.
+    "files": ["drop", "list", "mkdir", "open", "place", "resume", "send"],
 }
-MANIFEST_ROOTS = {"vms": "/api/vms", "console": "/api/consoles", "shell": "/ws"}
+MANIFEST_ROOTS = {
+    "vms": "/api/vms",
+    "files": "/api/files",
+    "console": "/api/consoles",
+    "shell": "/ws",
+}
 IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
 
 # How the emitted bundle names the assets it needs. vite lists the chunks in the
@@ -679,7 +687,8 @@ def check_manifest():
     if not isinstance(panels, list):
         raise AssertionError("manifest panels was not a list: %r" % (body,))
     declared = {panel.get("kind"): panel.get("verbs") for panel in panels}
-    check("manifest panel kinds", sorted(declared), ["console", "shell", "vms"])
+    check("manifest panel kinds", sorted(declared), ["console", "files", "shell", "vms"])
+    check("files panel verbs", declared["files"], ["read", "write"])
     check("vms panel verbs", declared["vms"], ["read", "write"])
     check("console panel verbs", declared["console"], ["read", "write", "stream"])
     check("shell panel verbs", declared["shell"], ["read", "write", "stream"])

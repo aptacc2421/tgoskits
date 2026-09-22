@@ -465,7 +465,8 @@ def check_manifest():
     if not isinstance(panels, list):
         raise AssertionError("manifest panels was not a list: %r" % (body,))
     declared = {panel.get("kind"): panel.get("verbs") for panel in panels}
-    check("manifest panel kinds", sorted(declared), ["console", "shell", "vms"])
+    check("manifest panel kinds", sorted(declared), ["console", "files", "shell", "vms"])
+    check("files panel verbs", declared["files"], ["read", "write"])
     check("vms panel verbs", declared["vms"], ["read", "write"])
     check("console panel verbs", declared["console"], ["read", "write", "stream"])
     check("shell panel verbs", declared["shell"], ["read", "write", "stream"])

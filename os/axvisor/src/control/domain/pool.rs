@@ -539,7 +539,12 @@ impl core::fmt::Display for SaveError {
 /// reports "recursive directory creation is not supported"), so the pool only
 /// ever ensures one level. An existing directory is left untouched, which is
 /// what makes this callable on every start and on every save.
-fn ensure_directory(directory: &str) -> Result<(), String> {
+/// Creates one directory level if it is not there yet.
+///
+/// Shared with the file transfer ([`super::files`]), which stages bytes in a
+/// namespace of its own inside the target directory and therefore needs the same
+/// one-level creation.
+pub(crate) fn ensure_directory(directory: &str) -> Result<(), String> {
     if ax_std::fs::read_dir(directory).is_ok() {
         return Ok(());
     }

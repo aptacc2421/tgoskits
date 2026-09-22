@@ -91,9 +91,7 @@ impl Verb {
 /// HTTP method of an operation.
 ///
 /// A variant is present exactly when a build serves it, so the type describes
-/// what this hypervisor answers rather than every method HTTP has. `PUT`,
-/// `PATCH` and `HEAD` arrive with the resumable file transfer, which is the
-/// first operation that needs them.
+/// what this hypervisor answers rather than every method HTTP has.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Method {
     Get,
@@ -101,6 +99,12 @@ pub enum Method {
     Post,
     #[cfg(feature = "http-axum")]
     Delete,
+    /// Asks for the current offset of a transfer that stopped.
+    #[cfg(feature = "http-axum")]
+    Head,
+    /// Carries one chunk of a transfer.
+    #[cfg(feature = "http-axum")]
+    Patch,
 }
 
 impl Method {
@@ -111,6 +115,10 @@ impl Method {
             Method::Post => "POST",
             #[cfg(feature = "http-axum")]
             Method::Delete => "DELETE",
+            #[cfg(feature = "http-axum")]
+            Method::Head => "HEAD",
+            #[cfg(feature = "http-axum")]
+            Method::Patch => "PATCH",
         }
     }
 }
