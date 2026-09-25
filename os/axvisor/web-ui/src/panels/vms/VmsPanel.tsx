@@ -48,11 +48,12 @@ import {
 } from '@/lib/lifecycle'
 import { STATUS_TONE } from '@/lib/status'
 import { cn } from '@/lib/utils'
+import { CreateForm } from './CreateForm'
 
 /** How long the registry is polled while no event socket is available. */
 const REGISTRY_REFRESH_MS = 2000
 
-export default function VmsPanel({ api, link, resources = [], focusVm = null }: PanelProps) {
+export default function VmsPanel({ api, link, files = null, resources = [], focusVm = null }: PanelProps) {
   const [registry, setRegistry] = useState<VmSummary[]>(resources)
   const [pool, setPool] = useState<PoolInfo | null>(null)
   const [poolError, setPoolError] = useState<string | null>(null)
@@ -63,6 +64,8 @@ export default function VmsPanel({ api, link, resources = [], focusVm = null }: 
   const [createOpen, setCreateOpen] = useState(false)
   const [createToml, setCreateToml] = useState('')
   const [createError, setCreateError] = useState<string | null>(null)
+  // The field-driven form, which builds its own request from the declared schema.
+  const [formOpen, setFormOpen] = useState(false)
   // Name the pasted config is stored under when it is dropped into the pool.
   const [createName, setCreateName] = useState('')
   const [browseOpen, setBrowseOpen] = useState(false)
@@ -233,7 +236,7 @@ export default function VmsPanel({ api, link, resources = [], focusVm = null }: 
         toml: createToml,
       })
       setCreateOpen(false)
-      setNote(`配置已存入配置池：${saved.path}`)
+      setNote(`已存为候选配置：${saved.path}`)
       await refreshPool()
     } catch (e: unknown) {
       setCreateError(describeError(e))
@@ -313,7 +316,10 @@ export default function VmsPanel({ api, link, resources = [], focusVm = null }: 
             <Button size="sm" variant="outline" onClick={() => void refreshRegistry()}>
               刷新
             </Button>
-            <Button size="sm" onClick={() => setCreateOpen(true)}>
+            <Button size="sm" onClick={() => setFormOpen(true)}>
+              填表创建
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setCreateOpen(true)}>
               粘贴配置创建
             </Button>
           </div>
@@ -373,7 +379,7 @@ export default function VmsPanel({ api, link, resources = [], focusVm = null }: 
               {registry.length === 0 && (
                 <tr>
                   <td colSpan={6} className="py-3 text-center text-muted-foreground">
-                    注册表中没有客户机——从下面的配置池启动一台，或粘贴一份配置创建。
+                    注册表中没有客户机——从下面的候选配置启动一台，或粘贴一份配置创建。
                   </td>
                 </tr>
               )}
@@ -413,11 +419,11 @@ export default function VmsPanel({ api, link, resources = [], focusVm = null }: 
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <div>
-            <CardTitle>客户机配置池</CardTitle>
+            <CardTitle>候选配置</CardTitle>
             <CardDescription>
-              `GET /api/vms/pool` 按优先级读取**多个目录**：丢进去的配置目录优先，其次
-              `AXVISOR_VM_DIRS` 列出的目录。条目只是候选，`start` 时才会真正创建；
-              `issues` 会说明目录里哪些文件不能变成客户机。
+              整棵客户机树（默认 `/guest` 之下递归，启动目录也在内，`AXVISOR_VM_DIRS` 可以再加目录）
+              里每一份能变成客户机的配置都列在这里。条目只是候选，`start` 时才真正创建；
+              不能用的文件会在下面说明原因。
             </CardDescription>
           </div>
           {pool && (
@@ -427,21 +433,25 @@ export default function VmsPanel({ api, link, resources = [], focusVm = null }: 
           )}
         </CardHeader>
         <CardContent className="flex flex-col gap-3 text-sm">
-          {poolError && <Banner tone="error">读取配置池失败：{poolError}</Banner>}
+          {poolError && <Banner tone="error">读取候选配置失败：{poolError}</Banner>}
           {pool === null && !poolError && (
             <p className="text-muted-foreground">
-              这个构建没有客户机配置池（未启用文件系统能力），可以直接粘贴配置创建。
+              这个构建没有候选配置（未启用文件系统能力），可以直接粘贴配置创建。
             </p>
           )}
           {pool && (
             <>
               <p className="text-muted-foreground">
-                读取目录：
+                读取来源（按优先级）：
                 {pool.sources.map((source) => (
                   <span key={source} className="ml-1 font-mono text-xs">
                     {source}
                   </span>
                 ))}
+              </p>
+              <p className="text-muted-foreground">
+                新建配置写入：
+                <span className="ml-1 font-mono text-xs">{pool.directory}</span>
               </p>
               <ul className="flex flex-col gap-2">
                 {pool.entries.map((entry) => (
@@ -465,7 +475,7 @@ export default function VmsPanel({ api, link, resources = [], focusVm = null }: 
                 ))}
                 {pool.entries.length === 0 && (
                   <li className="text-muted-foreground">
-                    目录里还没有可启动的配置，用「粘贴配置创建」里的「存入配置池」放一份进去。
+                    写入目录里还没有可启动的配置，用「粘贴配置创建」里的「存为候选配置」放一份进去。
                   </li>
                 )}
               </ul>
@@ -577,15 +587,15 @@ export default function VmsPanel({ api, link, resources = [], focusVm = null }: 
           <DialogHeader>
             <DialogTitle>粘贴客户机配置</DialogTitle>
             <DialogDescription>
-              「创建」把 TOML 交给 `POST /api/vms/create`；「存入配置池」把它写成
-              `POST /api/vms/pool` 的一份池文件，之后它就是这个 hypervisor 自己的候选。
+              「创建」把 TOML 交给 `POST /api/vms/create`；「存为候选配置」把它写到候选配置卡片
+              显示的写入目录——没有专门的文件夹，写进去的文件就是整棵客户机树里的一个候选。
             </DialogDescription>
           </DialogHeader>
           <textarea
             className="h-56 w-full rounded-md border bg-transparent p-2 font-mono text-xs"
             value={createToml}
             spellCheck={false}
-            placeholder={'[base]\nid = 9\nname = "guest"\n\n[kernel]\nimage_location = "memory"\n...'}
+            placeholder={'[base]\nid = 9\nname = "guest"\n\n[kernel]\nimage_location = "fs"\n...'}
             onChange={(event) => setCreateToml(event.target.value)}
           />
           {pool && (
@@ -594,7 +604,7 @@ export default function VmsPanel({ api, link, resources = [], focusVm = null }: 
               onChange={(event) => setCreateName(event.target.value)}
               spellCheck={false}
               className="font-mono text-xs"
-              placeholder="池文件名，如 guest.toml"
+              placeholder="文件名，如 guest.toml（写入 /guest）"
             />
           )}
           {createError && <Banner tone="error">{createError}</Banner>}
@@ -608,7 +618,7 @@ export default function VmsPanel({ api, link, resources = [], focusVm = null }: 
                 disabled={busy !== null || createToml.trim().length === 0 || createName.trim().length === 0}
                 onClick={() => void saveToPool()}
               >
-                存入配置池
+                存为候选配置
               </Button>
             )}
             <Button disabled={busy !== null || createToml.trim().length === 0} onClick={() => void create()}>
@@ -617,6 +627,26 @@ export default function VmsPanel({ api, link, resources = [], focusVm = null }: 
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <CreateForm
+        api={api}
+        link={link}
+        files={files}
+        open={formOpen}
+        onOpenChange={setFormOpen}
+        onCreated={(id, saved) => {
+          // A form-made guest is registered the same way a pool-made one is and
+          // its configuration is written to the guest tree, so both lists are
+          // refreshed rather than assumed.
+          setNote(
+            saved
+              ? `已创建 VM[${id}]，候选配置：${saved}，可用「启动」进入 guest`
+              : `已创建 VM[${id}]，可用「启动」进入 guest`,
+          )
+          void refreshRegistry()
+          void refreshPool()
+        }}
+      />
     </div>
   )
 }

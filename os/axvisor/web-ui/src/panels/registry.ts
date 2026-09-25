@@ -12,11 +12,13 @@ import { FallbackPanel } from './FallbackPanel'
 // Lazy: a kind being registered does not mean the user opened it, so its chunk
 // is downloaded on first use.
 const VmsPanel = lazy(() => import('./vms/VmsPanel'))
+const FilesPanel = lazy(() => import('./files/FilesPanel'))
 const ConsolePanel = lazy(() => import('./console/ConsolePanel'))
 const ShellPanel = lazy(() => import('./shell/ShellPanel'))
 
 const renderers: Record<string, PanelComponent> = {
   vms: VmsPanel, // Guest registry, configuration pool, lifecycle actions.
+  files: FilesPanel, // Staged file transfers and where they stand.
   console: ConsolePanel, // One terminal per guest console lane.
   shell: ShellPanel, // The hypervisor's own management shell.
 }

@@ -136,7 +136,7 @@ MANIFEST_LINKS = {
     "shell": ["stream"],
     # One upload split into the steps an interrupted transfer needs: the
     # dashboard drags a file through exactly these operations.
-    "files": ["drop", "list", "mkdir", "open", "place", "resume", "send"],
+    "files": ["browse", "drop", "list", "mkdir", "open", "place", "resume", "send"],
 }
 MANIFEST_ROOTS = {
     "vms": "/api/vms",

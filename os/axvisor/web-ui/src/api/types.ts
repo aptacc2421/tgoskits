@@ -85,6 +85,13 @@ export interface PanelProps {
   resources?: VmSummary[]
   /** VM the navigation asked the panel to focus, set by clicking a resource entry. */
   focusVm?: number | null
+  /**
+   * Shared transfer service, `null` when this build declares no `files` panel
+   * (no filesystem). The shell builds the one instance from the `files`
+   * resource's operations and hands it to every panel that needs it, so panels
+   * observe one set of transfers without importing each other.
+   */
+  files?: FilesCapability | null
 }
 
 export type PanelComponent = ComponentType<PanelProps>
@@ -222,6 +229,34 @@ export interface ActionResult {
   async: boolean
 }
 
+/**
+ * One field of `GET /api/vms/schema`, which is the creation form's field set.
+ *
+ * The set is the template's rather than this interface's: the hypervisor derives
+ * it from the same parameters its own configuration tool builds a guest from, so
+ * a form built from this cannot drift from what a creation request accepts.
+ * `type` says what a value means (`integer`, `string`, `address` or `enum`),
+ * `required` is the difference between a field a request must carry and one the
+ * template fills, and `options` belongs to an `enum`.
+ */
+export interface VmSchemaField {
+  name: string
+  type: string
+  required: boolean
+  /** Value the template fills in when the request omits the field. */
+  default?: string | number | null
+  options?: string[]
+  /** What the field means, in the plane's own words; the form's help shows it. */
+  description?: string
+  /** A value the operator can copy instead of inventing one. */
+  example?: string | number
+}
+
+/** `GET /api/vms/schema`: the fields a creation request may carry. */
+export interface VmSchema {
+  fields: VmSchemaField[]
+}
+
 /** One element of `GET /api/vms/pool`'s `entries`. */
 export interface PoolEntry {
   id: number
@@ -265,6 +300,11 @@ export interface BrowseInfo {
   /** Parent directory, or `null` at the filesystem root. */
   parent: string | null
   directories: BrowseDirectory[]
+  /**
+   * The plain files here. A `file` creation field's candidates come from this:
+   * a path the listing holds is one that is already in the guest filesystem.
+   */
+  files: FolderFile[]
   /** Startable `.toml` files in this directory. */
   entries: PoolEntry[]
   /** `.toml` files here that cannot become a VM, and unreadable directories. */
@@ -281,4 +321,127 @@ export interface ConsoleInfo {
    * browser WebSocket hides the server's 409 behind an anonymous 1006.
    */
   attached: boolean
+}
+
+/**
+ * Where one staged object stands (`state` of a [`FileSession`]).
+ *
+ * Byte arrival and being usable are two different questions, which is why the
+ * states are not collapsed into one: `uploading` is bytes arriving (and is not
+ * listed at all), `uploaded` is complete bytes that are not at their target
+ * yet, `placing` holds the target exclusively, and only `placed` may be
+ * referenced by a config. `failed` carries a readable reason.
+ */
+export type FileState = 'uploading' | 'uploaded' | 'placing' | 'placed' | 'failed'
+
+/** One element of `GET /api/files`: a transfer and the bytes it has on disk. */
+export interface FileSession {
+  /** Client-chosen id; re-opening it resumes the session it already names. */
+  id: string
+  /** Directory the bytes will land in. `place` names the file inside it. */
+  directory: string
+  /** Final name, known once `place` has been asked for it. */
+  name: string | null
+  /** Final path, known once the file is `placed`. */
+  path: string | null
+  /** Declared length of the whole file. */
+  total: number
+  /** Bytes actually on disk: the only offset a resume may continue from. */
+  written: number
+  state: FileState
+  /** Why the transfer failed, when it did. */
+  detail: string | null
+}
+
+/** `GET /api/files` (`fs` builds only). */
+export interface FilesInfo {
+  files: FileSession[]
+}
+
+/**
+ * One transfer the client is driving.
+ *
+ * The reported [`FileState`] describes a session the backend knows about; this
+ * is finer, because a transfer is not listed while its bytes are arriving, and a
+ * staging id is chosen by the client before any session state exists.
+ */
+export interface Transfer {
+  id: string
+  /** Final name: what `place` will write the bytes as. */
+  name: string
+  directory: string
+  written: number
+  total: number
+  /**
+   * Local phase, which is finer than the reported state: the backend only
+   * publishes `uploading` for a session it has, and never lists it.
+   */
+  phase: 'opening' | 'sending' | 'placing' | 'placed' | 'needs-name' | 'failed'
+  detail: string | null
+  /** The bytes, kept only while a resume could still need them. */
+  file: File | null
+}
+
+/** What a consumer of the transfer service observes. */
+export interface FilesSnapshot {
+  sessions: FileSession[]
+  transfers: Transfer[]
+}
+
+/**
+ * The transfer service the composition root injects.
+ *
+ * One declaration of the boundary, implemented by the state machine in
+ * `domain/files.ts` and consumed by any panel that transfers a file. The shell
+ * builds a single instance so the file panel and a creation form observe the
+ * same transfers.
+ */
+export interface FilesCapability {
+  subscribe(listener: () => void): () => void
+  getSnapshot(): FilesSnapshot
+  /** Reads the backend's session listing. */
+  refresh(): Promise<void>
+  /** Sends one file into `directory`, finally named `name`. */
+  upload(file: File, directory: string, name?: string): Promise<void>
+  /** Continues a transfer whose bytes are still held. */
+  resume(id: string): Promise<void>
+  /** Moves finished bytes to `name`; `false` when the name is taken. */
+  place(id: string, name: string): Promise<boolean>
+  /** Forgets a session and the bytes it staged. */
+  drop(id: string): Promise<void>
+  /** Creates one directory level, returning the path it created. */
+  mkdir(parent: string, name: string): Promise<string>
+}
+
+/** One subdirectory of `GET /api/files/browse`. */
+export interface FolderDirectory {
+  name: string
+  path: string
+}
+
+/** One file of a folder listing (`GET /api/vms/browse`, `GET /api/files/browse`). */
+export interface FolderFile {
+  name: string
+  path: string
+  /** Length in bytes, or zero when the entry could not be measured. */
+  size: number
+}
+
+/**
+ * `GET /api/files/browse?path=...`: what one folder holds.
+ *
+ * A transfer target has to exist already, which is the whole reason this read
+ * exists: it is what lets the interface walk to a folder instead of asking the
+ * operator to spell one, and what lets it show what is *in* the folder being
+ * looked at. Guest configs are not part of the answer — a folder view answers
+ * "what is here", not "what can become a VM".
+ */
+export interface FolderListing {
+  path: string
+  /** Parent directory, or `null` at the filesystem root. */
+  parent: string | null
+  directories: FolderDirectory[]
+  files: FolderFile[]
+  /** Folders here that could not be read, and why. */
+  issues: PoolIssue[]
 }

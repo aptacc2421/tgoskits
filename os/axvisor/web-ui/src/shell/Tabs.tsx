@@ -9,7 +9,7 @@
 import { Suspense, useState } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { VmSummary } from '@/api/types'
-import type { PanelMeta, PanelRegistry } from '@/api/types'
+import type { FilesCapability, PanelMeta, PanelRegistry } from '@/api/types'
 import type { Capabilities } from '@/capability/accessor'
 import { cn } from '@/lib/utils'
 import { PanelErrorBoundary } from './PanelErrorBoundary'
@@ -23,6 +23,11 @@ interface TabsProps {
   api: ApiClient
   /** Declared capabilities, bound per panel so no panel can name another's paths. */
   capabilities: Capabilities
+  /**
+   * The one transfer service, built by the shell: a panel never names another
+   * resource's operations, so the shared store is injected rather than imported.
+   */
+  files: FilesCapability | null
   resources: VmSummary[]
   focusVm: number | null
   onActivate: (id: string) => void
@@ -38,6 +43,7 @@ export function Tabs(props: TabsProps) {
     registry,
     api,
     capabilities,
+    files,
     resources,
     focusVm,
     onActivate,
@@ -141,6 +147,7 @@ export function Tabs(props: TabsProps) {
                     meta={meta}
                     api={api}
                     link={link}
+                    files={files}
                     resources={resources}
                     focusVm={focusVm}
                   />

@@ -18,6 +18,7 @@ import { describeError, type Manifest, type PanelRegistry } from '@/api/types'
 import { Capabilities } from '@/capability/accessor'
 import { loadManifest } from '@/capability/manifest'
 import { Button } from '@/components/ui/button'
+import { FilesService } from '@/domain/files'
 import { Nav } from './Nav'
 import { Tabs } from './Tabs'
 
@@ -42,6 +43,15 @@ export default function App({ registry }: { registry: PanelRegistry }) {
   // list rather than retrying a route that does not exist.
   const feedUrl = capabilities.maybeUrl('vms', 'events')
   const { vms, live } = useVmFeed(feedUrl)
+  // The transfer store, built once for the whole shell: the `files` panel drives
+  // it and a creation form uses it to put a file where a config names one. It is
+  // built here rather than in a panel because panels do not import each other —
+  // the composition root hands the same store to both. A build without the
+  // `files` panel has no transfers and therefore no store.
+  const files = useMemo(
+    () => (capabilities.panel('files') ? new FilesService(api, capabilities.bind('files')) : null),
+    [api, capabilities],
+  )
 
   useEffect(() => {
     const controller = new AbortController()
@@ -153,6 +163,7 @@ export default function App({ registry }: { registry: PanelRegistry }) {
           registry={registry}
           api={api}
           capabilities={capabilities}
+          files={files}
           resources={vms}
           focusVm={focusVm}
           onActivate={setActiveId}
