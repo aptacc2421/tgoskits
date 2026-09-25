@@ -71,9 +71,8 @@ fn main() {
     #[cfg(feature = "vcpu-perf-load")]
     let _performance_load = perf_load::start();
 
-    // The pool creates its drop-in folder if it is absent, then reports what it
-    // found: a config in it becomes a VM only when the shell or the control
-    // plane asks for it.
+    // The pool reports what it found under the guest tree: a config there
+    // becomes a VM only when the shell or the control plane asks for it.
     #[cfg(feature = "fs")]
     control::domain::pool::log_startup_state();
 

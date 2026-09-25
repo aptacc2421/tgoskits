@@ -33,6 +33,11 @@ resource re-acquire regression — mirroring
     DELETE /api/vms/999        -> 404            (no auth header)
     POST   /api/vms/create {}  -> 400            (missing toml)
     POST   /api/vms/create <bad toml> -> 400     (invalid TOML)
+    POST   /api/vms/create <fields>   -> 409     (a file the config names is not in place)
+    GET    /api/vms/browse            -> 200     (a file candidate for a `file` field, with length)
+    POST   /api/vms/create <toml>     -> 409     (a device's backing file is not in place)
+    POST   /api/vms/4245/start        -> 409     (same, via a pool config's start)
+    POST   /api/vms/create <fields>   -> 200     (file in place: created, config written to the guest tree, then removed)
     POST   /api/vms/999/start  -> 404            (unknown VM)
     POST   /api/vms/999/stop   -> 404            (unknown VM)
     POST   /api/vms/999/pause  -> 404            (unknown VM)
@@ -508,6 +513,87 @@ def check_create_gate(vm_config):
     print("  http probe: the placed file is at `%s`" % missing)
 
 
+def check_create_backing_file_gate(vm_config):
+    """A config whose *disk* nobody transferred is refused the same way.
+
+    The kernel gate is decided by the plane reading the config; a device backing
+    file is named by the device model that owns the option, so this refusal can
+    only come from the failure that would otherwise interrupt creation inside
+    device setup. It has to stay the same answer an operator can act on — 409,
+    with the file named — because one precondition should read as one answer,
+    whichever file the config is about.
+    """
+    absent = "/guest/probe-gate/absent-disk.img"
+    # Anchored replacements: only the device's own `path` line starts with it,
+    # so the fixture's prose and its `kernel_path` stay untouched.
+    target = re.sub(r'(?m)^id = \d+', "id = 4244", vm_config, count=1)
+    target = re.sub(r'(?m)^path = ".*"$', 'path = "%s"' % absent, target, count=1)
+    if absent not in target or "id = 4244" not in target:
+        raise AssertionError("the fixture no longer has the fields this check rewrites")
+
+    status, body = request("POST", "/api/vms/create", json.dumps({"toml": target}))
+    check("POST /api/vms/create (backing file not transferred)", status, 409)
+    if absent not in json.dumps(body):
+        raise AssertionError(
+            "the refusal does not name the missing backing file: %r" % (body,)
+        )
+    print("  http probe: create refused and named `%s`" % absent)
+
+
+def check_start_backing_file_gate(vm_config):
+    """A start of a pool config whose disk nobody transferred is refused too.
+
+    An id that is still only a pool candidate is created before it is started,
+    so `start` reaches the same device setup a create does. The answer has to be
+    the same 409: one precondition should read as one answer whichever route the
+    operator takes to it.
+    """
+    disk = "/guest/probe-gate/absent-pool-disk.img"
+    config = "/guest/probe-gate/pool-disk-missing.toml"
+    target = re.sub(r'(?m)^id = \d+', "id = 4245", vm_config, count=1)
+    target = re.sub(r'(?m)^path = ".*"$', 'path = "%s"' % disk, target, count=1)
+    if disk not in target or "id = 4245" not in target:
+        raise AssertionError("the fixture no longer has the fields this check rewrites")
+
+    # The config reaches the pool the way an operator puts one there: through
+    # the transfer contract, into the folder the pool is read from.
+    payload = target.encode("utf-8")
+    request(
+        "POST",
+        "/api/files/dirs",
+        json.dumps({"parent": "/guest", "name": "probe-gate"}),
+    )
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {"id": "pool-disk", "directory": "/guest/probe-gate", "total": len(payload)}
+        ).encode("utf-8"),
+    )
+    check("POST /api/files (pool config)", status, 200)
+    status, _, _ = request_raw(
+        "PATCH",
+        "/api/files/pool-disk",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "bytes 0-%d/%d" % (len(payload) - 1, len(payload)),
+        },
+        body=payload,
+    )
+    check("PATCH /api/files (pool config)", status, 200)
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files/pool-disk/place",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"name": config.rsplit("/", 1)[1]}).encode("utf-8"),
+    )
+    check("POST /api/files/place (pool config)", status, 200)
+
+    status, _ = request("POST", "/api/vms/4245/start")
+    check("POST /api/vms/4245/start (pool disk not transferred)", status, 409)
+    print("  http probe: starting a pool config with a missing disk is refused")
+
 
 def check_create_form():
     """The form's field set comes from the backend, and its body shares the gate.
@@ -515,20 +601,53 @@ def check_create_form():
     A creation request built from fields is a different *shape*, not a different
     path: it has to reach the same "is the file there" check the textual bodies
     reach, or the form would be a way around the transfer.
+
+    A `file` field is the one a client cannot fill by hand: its candidates are
+    the files that are already in the guest filesystem, so the probe checks that
+    the declaration says which field that is and that the folder listing through
+    the *same* resource (`/api/vms/browse`) shows a file to offer.
     """
     status, body = request("GET", "/api/vms/schema")
     check("GET /api/vms/schema", status, 200)
     fields = {field["name"]: field for field in body.get("fields", [])}
     expected = {
         "id", "name", "guest_type", "cpu_num", "entry_point", "kernel_path",
-        "kernel_load_addr", "image_location", "cmdline",
+        "kernel_load_addr", "image_location", "cmdline", "memory_base", "memory_mb",
     }
     if set(fields) != expected:
         raise AssertionError("schema fields are %r" % (sorted(fields),))
-    for required in ("id", "name", "kernel_path", "image_location", "entry_point", "kernel_load_addr"):
+    for required in (
+        "id", "name", "kernel_path", "entry_point",
+        "kernel_load_addr", "memory_base", "memory_mb",
+    ):
         if not fields[required].get("required"):
             raise AssertionError("schema does not require `%s`" % required)
+    if fields["kernel_path"].get("type") != "file":
+        raise AssertionError(
+            "`kernel_path` is not declared as a file field: %r" % (fields["kernel_path"],)
+        )
+    # A form-made guest reads its kernel from the guest filesystem; an embedded
+    # (`memory`) kernel is a build-time fact no form can provide, so the
+    # declaration must not offer it.
+    if fields["image_location"].get("options") != ["fs"]:
+        raise AssertionError(
+            "`image_location` offers more than the filesystem source: %r"
+            % (fields["image_location"],)
+        )
     print("  http probe: schema advertises %d fields" % len(fields))
+
+    status, body = request("GET", "/api/vms/browse?path=/guest/linux")
+    check("GET /api/vms/browse (file candidates)", status, 200)
+    listed = {entry["path"]: entry for entry in body.get("files", [])}
+    kernel = listed.get("/guest/linux/linux-qemu")
+    if kernel is None:
+        raise AssertionError("the kernel is not offered as a file candidate: %r" % (body,))
+    if not isinstance(kernel.get("size"), int) or kernel["size"] <= 0:
+        raise AssertionError("a file candidate has no length: %r" % (kernel,))
+    print("  http probe: browse offers `%s` (%d bytes) as a file candidate" % (
+        kernel["path"],
+        kernel["size"],
+    ))
 
     absent = "/guest/probe-gate/absent-kernel"
     status, body = request(
@@ -544,6 +663,8 @@ def check_create_form():
                     # Hexadecimal text, the way a guest configuration writes it.
                     "entry_point": "0x8020_0000",
                     "kernel_load_addr": "0x8020_0000",
+                    "memory_base": "0x8000_0000",
+                    "memory_mb": 256,
                 }
             }
         ),
@@ -552,6 +673,49 @@ def check_create_form():
     if absent not in json.dumps(body):
         raise AssertionError("the fields body is not gated: %r" % (body,))
     print("  http probe: fields body reaches the same gate")
+
+    # The same body, with the file it names actually there, has to become a
+    # guest: that is the form's whole contract. The field set is the template's,
+    # so a request can carry every declared field and still be refused by the
+    # plane's own model — in which case the form offers a way of asking for
+    # something that cannot exist, and saying so here is the point.
+    status, body = request(
+        "POST",
+        "/api/vms/create",
+        json.dumps(
+            {
+                "fields": {
+                    "id": 4243,
+                    "name": "probe-fields",
+                    "kernel_path": "/guest/linux/linux-qemu",
+                    "image_location": "fs",
+                    "entry_point": "0x8020_0000",
+                    "kernel_load_addr": "0x8020_0000",
+                    "memory_base": "0x8000_0000",
+                    "memory_mb": 256,
+                    "cpu_num": 1,
+                    "guest_type": "virtualized",
+                }
+            }
+        ),
+    )
+    check("POST /api/vms/create (fields, file in place)", status, 200)
+    check("created VM id", body.get("id"), 4243)
+    # The form's guest is also a file on the guest tree: the same configuration
+    # the registry holds is what the candidate scan reads, so it survives a
+    # reboot. The response names the file; the pool is what proves it is there.
+    saved = body.get("config")
+    if saved != "/guest/probe-fields.toml":
+        raise AssertionError("the form's config was not written to the guest tree: %r" % (body,))
+    status, body = request("GET", "/api/vms/pool")
+    check("GET /api/vms/pool (form config persisted)", status, 200)
+    entries = {entry["id"]: entry for entry in body.get("entries", [])}
+    if 4243 not in entries or entries[4243].get("path") != saved:
+        raise AssertionError("the persisted form config is not a candidate: %r" % (body,))
+    print("  http probe: the form's config is a candidate at `%s`" % saved)
+    status, _ = request("DELETE", "/api/vms/4243")
+    check("DELETE /api/vms/4243", status, 204)
+    print("  http probe: a form body created and removed VM[4243]")
 
 
 
@@ -798,6 +962,8 @@ def main():
     check_manifest_links(panels)
     check_file_transfer()
     check_create_gate(vm_config)
+    check_create_backing_file_gate(vm_config)
+    check_start_backing_file_gate(vm_config)
     check_create_form()
     status, _ = request("GET", "/api/consoles")
     check("GET /api/consoles without browser-console", status, 404)

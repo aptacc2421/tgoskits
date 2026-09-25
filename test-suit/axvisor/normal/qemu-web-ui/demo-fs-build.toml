@@ -6,9 +6,10 @@
 # and open http://localhost:8080/.
 #
 # `vm_configs` is deliberately absent: no guest is registered at boot, so every
-# guest on the page comes from a config directory the operator can inspect and
-# change. The pool reads `AXVISOR_VM_POOL` (drop-in folder, first) plus
-# `AXVISOR_VM_DIRS`; both are plain folders in the guest filesystem.
+# guest on the page comes from a config the operator puts in the guest tree. The
+# pool reads every `.toml` under `/guest` (recursively), and a config the
+# dashboard saves goes to `/guest` too; `AXVISOR_VM_DIRS` / `AXVISOR_VM_POOL`
+# could point those elsewhere, and this demo needs neither.
 features = [
     "web-ui",
     "browser-console",
@@ -21,11 +22,3 @@ target = "aarch64-unknown-none-softfloat"
 
 [env]
 AXVM_HTTP_BIND = "0.0.0.0:8080"
-# The drop-in folder. The root filesystem is managed and re-synced by the build,
-# so a file placed here by hand does not survive a rebuild; the dashboard's
-# 「存入配置池」 is how a config gets in from the UI, and any folder may hold
-# configs the browser can pick from (see the 「浏览目录…」 dialog).
-AXVISOR_VM_POOL = "/guest/vm_pool"
-# A second folder, read after the drop-in one: this is what makes the pool
-# "a few folders" rather than one.
-AXVISOR_VM_DIRS = "/guest/linux"

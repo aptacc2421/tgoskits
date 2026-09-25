@@ -13,16 +13,71 @@
 //! request still gets to spend memory and disk, which is exactly what the
 //! staging area is meant to keep out.
 
-use alloc::format;
+use alloc::{collections::BTreeMap, format};
 
 use axum::Json;
 use axum::body::{Body, to_bytes};
-use axum::extract::{Path, Request};
+use axum::extract::{Path, Query, Request};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
 use crate::control::domain::files::{self, CHUNK_LIMIT, FileError, SessionView};
+use crate::control::domain::pool::{self, IssueKind};
+
+/// `GET /api/files/browse?path=...` — what one folder holds.
+///
+/// A transfer target has to exist already, so the interface has to be able to
+/// walk to one, and a file manager has to show what is in the folder it is
+/// looking at. This is the same directory read the configuration pool browses
+/// with, projected to a folder view: where this folder is, what is under it, and
+/// why a folder could not be read. Guest configs are left out — a folder view
+/// answers "what is here", not "what can become a VM" — and a `.toml` that is no
+/// guest config is one of the files, not a problem.
+pub async fn browse(Query(query): Query<BTreeMap<String, String>>) -> Json<Value> {
+    let path = query
+        .get("path")
+        .map(String::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| pool::directory().to_string());
+    let folder = pool::browse(&path);
+    let directories: alloc::vec::Vec<Value> = folder
+        .directories()
+        .iter()
+        .map(|directory| json!({ "name": directory.name(), "path": directory.path() }))
+        .collect();
+    let files: alloc::vec::Vec<Value> = folder
+        .files()
+        .iter()
+        .map(|file| {
+            json!({
+                "name": file.name(),
+                "path": file.path(),
+                "size": file.size(),
+            })
+        })
+        .collect();
+    let issues: alloc::vec::Vec<Value> = folder
+        .issues()
+        .iter()
+        .filter(|issue| matches!(issue.kind(), IssueKind::DirectoryUnavailable(_)))
+        .map(|issue| {
+            json!({
+                "kind": issue.kind().as_str(),
+                "path": issue.path(),
+                "detail": issue.kind().to_string(),
+            })
+        })
+        .collect();
+    Json(json!({
+        "path": folder.path(),
+        "parent": folder.parent(),
+        "directories": directories,
+        "files": files,
+        "issues": issues,
+    }))
+}
 
 /// `GET /api/files` — the staged objects and where they stand.
 pub async fn list_files() -> Json<Value> {

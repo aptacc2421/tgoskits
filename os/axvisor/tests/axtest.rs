@@ -669,10 +669,10 @@ mod tests {
             .collect();
         ax_assert_eq!(reported, [format!("invalid-toml {nested}/damaged.toml")]);
 
-        // The root is a source as well, read last so the narrower ones keep
-        // precedence; a file reached through two sources is one candidate
+        // The guest tree is a source as well, read last so the narrower ones
+        // keep precedence; a file reached through two sources is one candidate
         // rather than a duplicate of itself.
-        ax_assert_eq!(sources().last(), Some(&"/".to_string()));
+        ax_assert_eq!(sources().last(), Some(&"/guest".to_string()));
         let overlap = scan_dirs(&[nested.clone(), root.to_string()]);
         let ids: alloc::vec::Vec<usize> =
             overlap.entries().iter().map(|entry| entry.id()).collect();
@@ -712,9 +712,9 @@ mod tests {
     fn vm_pool_reads_several_directories_in_precedence_order() {
         use crate::pool::{browse, scan_dirs, sources};
 
-        // The drop-in directory comes first, so a config an operator drops in
-        // shadows a same-id config from a directory that is only read.
-        ax_assert_eq!(sources().first(), Some(&"/guest/vm_pool".to_string()));
+        // The directory a new config is written to comes first, so a config the
+        // operator saves there shadows a same-id config found elsewhere.
+        ax_assert_eq!(sources().first(), Some(&"/guest".to_string()));
 
         let root = "/tmp/axvisor-vm-pool-multi";
         reset_test_dir(root);
@@ -789,6 +789,14 @@ mod tests {
         // `kernel.bin` is neither a directory nor a `.toml`, so it is not
         // reported as a problem: browsing must not turn a normal file into noise.
         ax_assert!(nested.issues().is_empty());
+        // It is still a file, though: a folder view lists what is there, and the
+        // length is what the filesystem knows about it.
+        let listed: alloc::vec::Vec<(&str, usize)> = nested
+            .files()
+            .iter()
+            .map(|file| (file.name(), file.size()))
+            .collect();
+        ax_assert_eq!(listed, [("kernel.bin", 12)]);
 
         remove_path(
             root,

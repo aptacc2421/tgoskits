@@ -51,22 +51,57 @@ pub async fn vm_detail(Path(id_str): Path<String>) -> Result<Json<Value>, Status
 /// where a guest configuration is built from parameters — the `axvmconfig`
 /// command line tool calls the same function — so the dashboard never keeps a
 /// second copy of which fields a guest has. `required` is the difference between
-/// a field a request must carry and one the template fills; the addresses are
-/// required because they belong to the guest image, not to this platform.
+/// a field a request must carry and one the template fills; the addresses and the
+/// memory size are required because they belong to the guest image and the
+/// machine it is written for, not to this platform. A `file` field is one whose
+/// value names a file in the guest filesystem: a client can only offer the files
+/// that are there ([`Self::vm_browse`]), which is what makes "transfer it before
+/// submitting" the same fact as "the file is in the listing".
+///
+/// `description` and `example` travel with the declaration because they are the
+/// field's own documentation: a dashboard that explains a field in the plane's
+/// words cannot drift from what the plane actually does with it. `image_location`
+/// offers `fs` only — a form-made guest reads its kernel from the guest
+/// filesystem, and an embedded (`memory`) kernel is a build-time fact no form
+/// can provide.
 pub async fn vm_schema() -> Json<Value> {
     Json(json!({
         "fields": [
-            {"name": "id", "type": "integer", "required": true},
-            {"name": "name", "type": "string", "required": true},
-            {"name": "kernel_path", "type": "string", "required": true},
-            {"name": "image_location", "type": "enum", "required": true,
-             "options": ["fs", "memory"]},
-            {"name": "entry_point", "type": "address", "required": true},
-            {"name": "kernel_load_addr", "type": "address", "required": true},
+            {"name": "id", "type": "integer", "required": true,
+             "description": "客户机的数字标识，注册表里必须唯一；候选配置里已有的 id 也不能重复。",
+             "example": 2},
+            {"name": "name", "type": "string", "required": true,
+             "description": "显示用的名字，随意取，方便在列表里认出它。",
+             "example": "linux-demo"},
+            {"name": "kernel_path", "type": "file", "required": true,
+             "description": "内核镜像在客户机文件系统里的路径。必须是已经就位的文件：可以在这一行直接传，或从「选择已就位」里挑一个。",
+             "example": "/guest/linux/linux-qemu"},
+            {"name": "image_location", "type": "enum", "required": false,
+             "default": "fs", "options": ["fs"],
+             "description": "内核从哪里来。表单创建的客户机只支持 fs：从客户机文件系统读上面那个内核文件。"},
+            {"name": "entry_point", "type": "address", "required": true,
+             "description": "CPU 从哪个客户机物理地址开始执行内核，要和内核自己链接的入口一致；QEMU virt 上的 Linux 惯例是 0x8020_0000。",
+             "example": "0x8020_0000"},
+            {"name": "kernel_load_addr", "type": "address", "required": true,
+             "description": "内核镜像被装载到的客户机物理地址，通常与入口地址相同。",
+             "example": "0x8020_0000"},
+            {"name": "memory_base", "type": "address", "required": true,
+             "description": "客户机内存的起始地址（客户机物理地址）。QEMU virt 从 0x8000_0000 开始划分客户机内存。",
+             "example": "0x8000_0000"},
+            {"name": "memory_mb", "type": "integer", "required": true,
+             "description": "客户机内存大小（MiB）。不要超过宿主机实际可用的内存。",
+             "example": 256},
             {"name": "guest_type", "type": "enum", "required": false,
-             "default": "virtualized", "options": ["virtualized", "passthrough"]},
-            {"name": "cpu_num", "type": "integer", "required": false, "default": 1},
-            {"name": "cmdline", "type": "string", "required": false, "default": null},
+             "default": "virtualized", "options": ["virtualized", "passthrough"],
+             "description": "virtualized：纯虚拟客户机，设备都是模拟的；passthrough：直通物理设备，需要平台里真的有可直通的设备。"},
+            {"name": "cpu_num", "type": "integer", "required": false,
+             "default": 1,
+             "description": "给客户机几个 vCPU。",
+             "example": 1},
+            {"name": "cmdline", "type": "string", "required": false,
+             "default": null,
+             "description": "传给内核的命令行，可留空。Linux 客户机要从磁盘根启动才需要 root=…；只进 shell 的话写个 console= 就够。",
+             "example": "console=ttyAMA0 root=/dev/vda ro"},
         ],
     }))
 }
@@ -92,11 +127,25 @@ fn template_params(fields: &Value) -> Result<VmTemplateParams, String> {
         entry_point: address_field(fields, "entry_point")?,
         kernel_path: text_field(fields, "kernel_path")?,
         kernel_load_addr: address_field(fields, "kernel_load_addr")?,
-        image_location: text_field(fields, "image_location")?,
+        // A form-made guest reads its kernel from the guest filesystem — that is
+        // the only source the schema declares, so an omitted field is the
+        // template's "fs" and anything else is refused here rather than at start
+        // time, where it would read as a missing embedded image.
+        image_location: match fields.get("image_location").and_then(Value::as_str) {
+            None | Some("") | Some("fs") => "fs".to_string(),
+            Some(other) => {
+                return Err(format!(
+                    "`image_location` has no `{other}` source: a form-made guest reads its \
+                     kernel from the guest filesystem"
+                ));
+            }
+        },
         cmdline: fields
             .get("cmdline")
             .and_then(Value::as_str)
             .map(ToString::to_string),
+        memory_base: address_field(fields, "memory_base")?,
+        memory_mb: integer_field(fields, "memory_mb")?,
     })
 }
 
@@ -107,6 +156,19 @@ fn text_field(fields: &Value, name: &str) -> Result<String, String> {
         .filter(|value| !value.trim().is_empty())
         .map(ToString::to_string)
         .ok_or_else(|| format!("`{name}` is required"))
+}
+
+/// A required field carrying a count.
+///
+/// `as_u64` is what turns a negative, fractional or textual value into a refusal
+/// instead of a coercion, which is the difference between a field the operator
+/// filled in and one the form guessed at.
+fn integer_field(fields: &Value, name: &str) -> Result<usize, String> {
+    fields
+        .get(name)
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .ok_or_else(|| format!("`{name}` is required and must be a non-negative integer"))
 }
 
 fn address_field(fields: &Value, name: &str) -> Result<usize, String> {
@@ -145,6 +207,8 @@ pub async fn vm_create(Json(payload): Json<Value>) -> Response {
         };
         let config = get_vm_config_template(params);
         let id = config.base.id;
+        #[cfg(feature = "fs")]
+        let guest_name = config.base.name.clone();
         if AxvmManager::vm_by_id(id).is_some() {
             return StatusCode::CONFLICT.into_response();
         }
@@ -160,14 +224,41 @@ pub async fn vm_create(Json(payload): Json<Value>) -> Response {
             )
                 .into_response();
         }
-        return match AxvmManager::create_vm_from_config(config) {
+        // The same bytes the registry will hold are what the candidate scan
+        // reads, so a form-made guest is also written onto the guest tree and
+        // survives a reboot. Serialized before the config moves into the
+        // manager; a serialization failure only costs the persistence, and is
+        // reported in the response rather than thrown away.
+        #[cfg(feature = "fs")]
+        let config_toml = match config.to_toml() {
+            Ok(text) => Some(text),
+            Err(error) => {
+                warn!("HTTP: cannot serialize VM[{id}]'s config for persistence: {error}");
+                None
+            }
+        };
+        let created = AxvmManager::create_vm_from_config(config);
+        #[cfg(feature = "fs")]
+        let saved = match &created {
+            Ok(_) => config_toml
+                .as_deref()
+                .and_then(|text| persist_candidate(id, &guest_name, text)),
+            Err(_) => None,
+        };
+        return match created {
             Ok(id) => {
                 info!("HTTP: VM[{id}] created from form fields");
-                Json(json!({ "id": id })).into_response()
+                let mut body = json!({ "id": id });
+                #[cfg(feature = "fs")]
+                if let Some(path) = &saved {
+                    info!("HTTP: VM[{id}]'s config saved as `{path}`");
+                    body["config"] = json!(path);
+                }
+                Json(body).into_response()
             }
             Err(error) => {
                 error!("HTTP: create VM[{id}] from fields failed: {error:#}");
-                map_axvm_error(error).into_response()
+                create_failed(error)
             }
         };
     }
@@ -226,12 +317,77 @@ pub async fn vm_create(Json(payload): Json<Value>) -> Response {
         }
         Err(error) => {
             error!("HTTP: create VM[{id}] failed: {error:#}");
-            // Shared mapping so an exhausted host resource (memory, and the
-            // browser console lane table when `browser-console` is on) is a
-            // distinguishable 503 here exactly as it is on a start request.
-            map_axvm_error(error).into_response()
+            create_failed(error)
         }
     }
+}
+
+/// Writes a form-made guest's configuration onto the guest tree.
+///
+/// The registry holds the guest only for this boot; the file is what a later
+/// scan lists as a candidate, which is what makes the guest reproducible after
+/// a reboot. The file name comes from the guest's own name, reduced to one
+/// plain component, with the id as the fallback when nothing survives the
+/// reduction. A failure is reported to the caller as `None` — the guest is
+/// registered either way — and logged, because "created but not written" is a
+/// state the operator should be able to see.
+#[cfg(feature = "fs")]
+fn persist_candidate(id: usize, guest_name: &str, config_toml: &str) -> Option<String> {
+    let stem: String = guest_name
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let stem = stem.trim_matches(|character| character == '-' || character == '.');
+    let file = if stem.is_empty() {
+        format!("guest-{id}.toml")
+    } else {
+        format!("{stem}.toml")
+    };
+    match crate::control::domain::pool::save_in(
+        crate::control::domain::pool::directory(),
+        &file,
+        config_toml,
+    ) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            warn!("HTTP: cannot persist VM[{id}]'s config as `{file}`: {error}");
+            None
+        }
+    }
+}
+
+/// The answer for a creation that failed.
+///
+/// A config naming a guest file nobody transferred yet is a precondition the
+/// operator clears by transferring it, so it keeps the same 409 body the
+/// pre-create gate produces instead of reading as a host fault. The kernel
+/// gate decides its files by reading the config; a device's backing file is
+/// named by the model that owns the option, so this refusal arrives as the
+/// typed error that failure produces. Every other failure keeps the shared
+/// status mapping, which is the 503 an exhausted host resource gets on a start
+/// request too.
+fn create_failed(error: anyhow::Error) -> Response {
+    if let Some(AxVmError::DeviceBackingFileMissing { path, .. }) =
+        error.root_cause().downcast_ref::<AxVmError>()
+    {
+        warn!("HTTP: create refused, `{path}` is not in the guest filesystem");
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("`{path}` is not in the guest filesystem yet; transfer it first"),
+                "missing": path,
+            })),
+        )
+            .into_response();
+    }
+    map_axvm_error(error).into_response()
 }
 
 /// `DELETE /api/vms/{id}` — destroy and unregister a VM.
@@ -261,10 +417,10 @@ pub async fn vm_delete(Path(id_str): Path<String>) -> Result<StatusCode, StatusC
 
 /// `GET /api/vms/pool` — the configs a start request can create on demand.
 ///
-/// The pool is every guest config directory named by the build config (the
-/// drop-in `AXVISOR_VM_POOL` directory first, then any `AXVISOR_VM_DIRS`
-/// entries; see [`crate::control::domain::pool`]), so "a few folders" is the normal setup: the
-/// default folder and the folder the operator drops configs into. It is not the
+/// The pool is every guest config the guest tree holds: the scan reads the
+/// directory a new config is written to, any extra `AXVISOR_VM_DIRS` entries and
+/// the tree itself (see [`crate::control::domain::pool`]), so a config anywhere
+/// under the tree is a candidate. It is not the
 /// VM registry: a pool entry is only a candidate and is created when a start
 /// request names its id. `entries` carries the raw TOML so a client can show or
 /// prefill a config, each entry says which `source` folder it came from, and
@@ -288,13 +444,14 @@ pub async fn vm_pool() -> Json<Value> {
 /// `GET /api/vms/browse?path=...` — list one directory of the guest filesystem.
 ///
 /// Where [`vm_pool`] answers "what can be started without a create call", this
-/// answers "what is in this folder": the subdirectories to walk into and every
-/// `.toml` in it, already parsed, so a client can offer the startable ones and
-/// say why the others are not. Together with the `path` form of
-/// [`vm_create`] this is what lets an operator create a VM from a config in any
-/// folder instead of only from the pool. A directory that cannot be read comes
-/// back as an empty listing plus an issue, never an error, so browsing to a
-/// missing folder is a visible state rather than a failed request.
+/// answers "what is in this folder": the subdirectories to walk into, every file
+/// in it, and every `.toml` already parsed, so a client can offer the startable
+/// configs, name the files a creation field may reference, and say why the other
+/// configs are not usable. Together with the `path` form of [`vm_create`] this is
+/// what lets an operator create a VM from a config in any folder instead of only
+/// from the pool. A directory that cannot be read comes back as an empty listing
+/// plus an issue, never an error, so browsing to a missing folder is a visible
+/// state rather than a failed request.
 #[cfg(feature = "fs")]
 pub async fn vm_browse(Query(query): Query<BTreeMap<String, String>>) -> Json<Value> {
     let path = query
@@ -313,12 +470,14 @@ pub async fn vm_browse(Query(query): Query<BTreeMap<String, String>>) -> Json<Va
         "path": folder.path(),
         "parent": folder.parent(),
         "directories": directories,
+        "files": files_json(folder.files()),
         "entries": entries_json(folder.entries()),
         "issues": issues_json(folder.issues()),
     }))
 }
 
-/// `POST /api/vms/pool` — store a pasted config in the drop-in pool directory.
+/// `POST /api/vms/pool` — store a pasted config in the directory new configs go
+/// to.
 ///
 /// Body: `{"name": "guest.toml", "toml": "<完整 TOML 配置>"}`. This is how a
 /// config reaches the pool on a machine whose shell cannot write a multi-line
@@ -346,6 +505,25 @@ pub async fn vm_pool_save(Json(payload): Json<Value>) -> Result<Json<Value>, Sta
             Err(StatusCode::BAD_REQUEST)
         }
     }
+}
+
+/// Render the plain files of a browsed folder for JSON.
+///
+/// These are the candidates a `file` creation field can name: a path a client
+/// offers here is one that already exists in the guest filesystem, which is the
+/// same predicate the create gate reads.
+#[cfg(feature = "fs")]
+fn files_json(files: &[crate::control::domain::pool::File]) -> Vec<Value> {
+    files
+        .iter()
+        .map(|file| {
+            json!({
+                "name": file.name(),
+                "path": file.path(),
+                "size": file.size(),
+            })
+        })
+        .collect()
 }
 
 /// Render pool entries for JSON, raw TOML included.
@@ -506,6 +684,16 @@ fn map_axvm_error(error: anyhow::Error) -> StatusCode {
         // existence pre-check), mapping to 404. Anything else is a host-side
         // fault.
         Some(AxVmError::VmNotFound { .. }) => StatusCode::NOT_FOUND,
+        // A device whose backing file is not in the guest filesystem is a
+        // precondition the operator clears by transferring it. Creation answers
+        // this with the file's name (`create_failed`); the other entry points,
+        // a start of a pooled config among them, get the same status with the
+        // file named in the log, since a bare status is all their contract
+        // carries.
+        Some(AxVmError::DeviceBackingFileMissing { path, .. }) => {
+            warn!("HTTP: refused, `{path}` is not in the guest filesystem");
+            StatusCode::CONFLICT
+        }
         _ => {
             error!("management HTTP action failed: {error:#}");
             StatusCode::INTERNAL_SERVER_ERROR

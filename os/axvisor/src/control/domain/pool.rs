@@ -14,20 +14,20 @@
 
 //! Candidate guest configs that a start request may create on demand.
 //!
-//! A candidate is any guest config on the guest filesystem: [`scan`] reads the
-//! drop-in directory ([`directory`], `AXVISOR_VM_POOL` when set and
-//! [`DEFAULT_POOL_DIR`] otherwise), then every `AXVISOR_VM_DIRS` entry, then the
-//! filesystem root itself, each of them recursively to [`MAX_SCAN_DEPTH`]. An
-//! entry is only a candidate: nothing in those directories is created at
+//! A candidate is any guest config under the guest tree: [`scan`] reads the
+//! directory a new config is written to ([`directory`], `AXVISOR_VM_POOL` when
+//! set and [`DEFAULT_VM_ROOT`] otherwise), then every `AXVISOR_VM_DIRS` entry,
+//! then [`DEFAULT_VM_ROOT`] itself, each of them recursively to
+//! [`MAX_SCAN_DEPTH`]. An entry is only a candidate: nothing is created at
 //! startup, so an idle pool costs no guest memory and may list more guests than
 //! the machine can run at once. This is the difference from
 //! [`DEFAULT_VM_CONFIG_DIR`], whose configs the startup path creates immediately
 //! as the default guest set.
 //!
-//! The filesystem is the single authority for the candidate set: the scan reads
-//! it on every call and keeps no cache, so a config that the host adds, replaces
-//! or repairs is visible to the next query without a reboot. Reading a whole
-//! filesystem also means meeting documents that are no guest config at all —
+//! The tree is the single authority for the candidate set: the scan reads it on
+//! every call and keeps no cache, so a config that the host adds, replaces or
+//! repairs is visible to the next query without a reboot. Reading a whole tree
+//! also means meeting documents that are no guest config at all —
 //! manifests, metadata, editor settings. Those are skipped, because "unusable
 //! config" is a report an operator can act on and "some other tool's file" is
 //! not. A file that *is* a config attempt and cannot be used becomes an [`Issue`]
@@ -46,14 +46,15 @@ use alloc::{
 use ax_std::fs::FileTypeExt;
 use axvmconfig::GuestConfig;
 
-/// Directory the pool is read from when the build config does not override it.
-pub const DEFAULT_POOL_DIR: &str = "/guest/vm_pool";
+/// Guest tree the pool reads, and writes a new config into, by default.
+///
+/// A guest's configuration lives next to the images it names, so that tree is
+/// what a scan reads: every `.toml` under it is a candidate. There is no drop-in
+/// folder of the pool's own any more, and nothing creates one at startup.
+pub const DEFAULT_VM_ROOT: &str = "/guest";
 
 /// Directory of configs that the startup path creates as the default guest set.
 pub const DEFAULT_VM_CONFIG_DIR: &str = "/guest/vm_default";
-
-/// The guest filesystem root, read as the last and widest pool source.
-pub const FILESYSTEM_ROOT: &str = "/";
 
 /// How many directory levels below a source a scan descends.
 ///
@@ -63,22 +64,24 @@ pub const FILESYSTEM_ROOT: &str = "/";
 /// candidates.
 pub const MAX_SCAN_DEPTH: usize = 8;
 
-/// Pool directory: `[env] AXVISOR_VM_POOL` wins over [`DEFAULT_POOL_DIR`].
+/// Directory a new config is written to: `[env] AXVISOR_VM_POOL` wins over
+/// [`DEFAULT_VM_ROOT`].
 pub fn directory() -> &'static str {
-    option_env!("AXVISOR_VM_POOL").unwrap_or(DEFAULT_POOL_DIR)
+    option_env!("AXVISOR_VM_POOL").unwrap_or(DEFAULT_VM_ROOT)
 }
 
 /// Every directory the pool is read from, in precedence order.
 ///
-/// The drop-in directory comes first, so a config the operator puts there wins
-/// over one of the same id from an extra directory; `AXVISOR_VM_DIRS` appends
-/// `:`-separated directories for a host that keeps its configs elsewhere; the
-/// guest filesystem root comes last, so a config in any other folder is a
-/// candidate as well. Every source is read recursively, to [`MAX_SCAN_DEPTH`].
+/// The directory a config is written to comes first, so a config the operator
+/// just saved wins over one of the same id found later; `AXVISOR_VM_DIRS`
+/// appends `:`-separated directories for a host that keeps its configs outside
+/// the tree; and [`DEFAULT_VM_ROOT`] comes last, so a config anywhere under the
+/// guest tree is a candidate as well. Every source is read recursively, to
+/// [`MAX_SCAN_DEPTH`].
 ///
-/// The startup directory is not listed separately: the filesystem root covers
-/// it. A config there is listed by that scan, its id is already registered as a
-/// default guest, so a second file claiming the id elsewhere is reported by the
+/// The startup directory is not listed separately: the guest tree covers it. A
+/// config there is listed by that scan, and because its id is already registered
+/// as a default guest, a second file claiming the id is reported by the
 /// duplicate rule and a start request for it fails like any other taken id.
 pub fn sources() -> Vec<String> {
     let mut sources: Vec<String> = Vec::new();
@@ -92,7 +95,7 @@ pub fn sources() -> Vec<String> {
     for extra in option_env!("AXVISOR_VM_DIRS").unwrap_or("").split(':') {
         push(extra);
     }
-    push(FILESYSTEM_ROOT);
+    push(DEFAULT_VM_ROOT);
     sources
 }
 
@@ -361,7 +364,6 @@ impl Scan {
 /// request's job. Reporting here makes a broken pool visible in the serial log
 /// before anything asks for it.
 pub fn log_startup_state() {
-    ensure_directories();
     let pool = scan();
     info!(
         "VM pool: {} folder(s): {}",
@@ -474,8 +476,39 @@ pub struct Folder {
     path: String,
     parent: Option<String>,
     directories: Vec<Directory>,
+    files: Vec<File>,
     entries: Vec<Entry>,
     issues: Vec<Issue>,
+}
+
+/// One file in a browsed folder that is not a directory.
+///
+/// A folder view lists what is there, and what a file is *for* belongs to
+/// whoever references it, so this carries only what the filesystem knows: the
+/// name, the path, and how long it is. The configuration pool's own view of the
+/// same folder is [`Entry`], which exists only for files that can become a VM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct File {
+    name: String,
+    path: String,
+    size: usize,
+}
+
+impl File {
+    /// Last component of the path.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Path to read.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Length in bytes, or zero when the file could not be measured.
+    pub fn size(&self) -> usize {
+        self.size
+    }
 }
 
 /// One subdirectory that can be browsed into.
@@ -513,6 +546,11 @@ impl Folder {
         &self.directories
     }
 
+    /// Files in this folder, by name.
+    pub fn files(&self) -> &[File] {
+        &self.files
+    }
+
     /// Startable configs in this folder, by name.
     pub fn entries(&self) -> &[Entry] {
         &self.entries
@@ -536,6 +574,7 @@ impl Folder {
 /// the same shape a pool scan uses.
 pub fn browse(path: &str) -> Folder {
     let mut directories = Vec::new();
+    let mut files = Vec::new();
     let mut entries = Vec::new();
     let mut issues = Vec::new();
 
@@ -565,22 +604,34 @@ pub fn browse(path: &str) -> Folder {
                         name,
                         path: entry_path,
                     });
-                } else if entry_path.ends_with(".toml") {
-                    match parse_entry(&entry_path, path) {
-                        Ok(Some(entry)) => entries.push(entry),
-                        // A browse is how a caller confirms what a folder
-                        // holds, so a `.toml` that is no guest config is
-                        // reported instead of hidden. The scan skips those
-                        // because a whole filesystem is full of them; this
-                        // answer is about one folder the caller asked for.
-                        Ok(None) => issues.push(Issue {
-                            path: entry_path,
-                            kind: IssueKind::InvalidToml(NO_GUEST_CONFIG_KEY.to_string()),
-                        }),
-                        Err(kind) => issues.push(Issue {
-                            path: entry_path,
-                            kind,
-                        }),
+                } else {
+                    // Every file is listed, whatever it holds: a folder view
+                    // answers "what is in here", and a file that cannot be
+                    // measured is still a file whose name is known.
+                    files.push(File {
+                        size: ax_std::fs::metadata(&entry_path)
+                            .map(|metadata| metadata.len() as usize)
+                            .unwrap_or(0),
+                        name,
+                        path: entry_path.clone(),
+                    });
+                    if entry_path.ends_with(".toml") {
+                        match parse_entry(&entry_path, path) {
+                            Ok(Some(entry)) => entries.push(entry),
+                            // A browse is how a caller confirms what a folder
+                            // holds, so a `.toml` that is no guest config is
+                            // reported instead of hidden. The scan skips those
+                            // because a whole filesystem is full of them; this
+                            // answer is about one folder the caller asked for.
+                            Ok(None) => issues.push(Issue {
+                                path: entry_path,
+                                kind: IssueKind::InvalidToml(NO_GUEST_CONFIG_KEY.to_string()),
+                            }),
+                            Err(kind) => issues.push(Issue {
+                                path: entry_path,
+                                kind,
+                            }),
+                        }
                     }
                 }
             }
@@ -592,6 +643,7 @@ pub fn browse(path: &str) -> Folder {
     }
 
     directories.sort_by(|left, right| left.name.cmp(&right.name));
+    files.sort_by(|left, right| left.name.cmp(&right.name));
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     issues.sort_by(|left, right| left.path.cmp(&right.path));
 
@@ -610,6 +662,7 @@ pub fn browse(path: &str) -> Folder {
         path: path.to_string(),
         parent,
         directories,
+        files,
         entries,
         issues,
     }
@@ -657,36 +710,22 @@ pub(crate) fn ensure_directory(directory: &str) -> Result<(), String> {
     ax_std::fs::create_dir(directory).map_err(|error| error.to_string())
 }
 
-/// Create every pool directory that can be created, logging what cannot.
-///
-/// Called on start so the drop-in folder exists and is visible in a browse, and
-/// so an unprovisioned pool reads as "empty folder" rather than "missing
-/// folder". A failure is not fatal: the pool is allowed to be absent, and a
-/// read-only filesystem simply keeps it that way.
-pub fn ensure_directories() {
-    for directory in sources() {
-        if let Err(error) = ensure_directory(&directory) {
-            info!("VM pool: cannot create `{directory}`: {error}");
-        }
-    }
-}
-
-/// Store a guest config in the drop-in pool directory, returning its path.
+/// Store a guest config in the directory new configs go to, returning its path.
 ///
 /// This is how a config reaches the pool on a machine whose shell cannot write
 /// a multi-line file: the control plane validates the text and writes it as a
 /// pool file, after which it is a candidate like any other. The name is
 /// restricted to a plain `*.toml` file name so the request cannot write outside
-/// the pool directory.
+/// that directory.
 pub fn save(name: &str, toml: &str) -> Result<String, SaveError> {
     save_in(&directory(), name, toml)
 }
 
 /// Store a guest config in a specific directory, returning its path.
 ///
-/// [`save`] passes the drop-in pool directory; taking the directory as an
+/// [`save`] passes the directory new configs go to; taking the directory as an
 /// argument is what makes the write path testable against a temporary fixture
-/// instead of the deployed pool. Validation is identical in both cases: the name
+/// instead of the deployed tree. Validation is identical in both cases: the name
 /// must be a plain `*.toml` file name (no separators, no leading dot) and the
 /// text must parse as a guest config before anything is written.
 pub fn save_in(directory: &str, name: &str, toml: &str) -> Result<String, SaveError> {
@@ -698,7 +737,7 @@ pub fn save_in(directory: &str, name: &str, toml: &str) -> Result<String, SaveEr
 
     // The guest filesystem cannot create parent directories — `create_dir_all`
     // reports "recursive directory creation is not supported" — so an absent
-    // drop-in folder is created one level deep, which is all the pool needs.
+    // target directory is created one level deep, which is all a save needs.
     ensure_directory(directory).map_err(SaveError::Unwritable)?;
     let path = format!("{directory}/{name}");
     ax_std::fs::write(&path, toml).map_err(|error| SaveError::Unwritable(error.to_string()))?;

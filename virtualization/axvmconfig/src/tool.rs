@@ -96,6 +96,12 @@ pub struct TemplateArgs {
     /// The load address of the kernel image.
     #[arg(short = 'l', long, value_parser = parse_usize)]
     kernel_load_addr: usize,
+    /// The guest physical address the guest's memory region starts at.
+    #[arg(long, value_parser = parse_usize)]
+    memory_base: usize,
+    /// The size of the guest's memory region, in MiB.
+    #[arg(long)]
+    memory_mb: usize,
     /// The location of the kernel image：
     /// - "fs" for the kernel image file inside the ArceOS's rootfs
     /// - "memory" for the kernel image file in the memory.
@@ -198,6 +204,8 @@ pub fn run() {
                 kernel_load_addr: args.kernel_load_addr,
                 image_location: args.image_location,
                 cmdline: args.cmdline,
+                memory_base: args.memory_base,
+                memory_mb: args.memory_mb,
             });
 
             // Convert the configuration template to TOML format

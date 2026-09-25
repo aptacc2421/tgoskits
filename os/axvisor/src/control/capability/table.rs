@@ -264,6 +264,17 @@ static FILES_ENDPOINTS: &[Endpoint] = &[
         path: "/api/files",
         build: || post(files::open_file),
     },
+    // A transfer target has to exist already, so the interface has to be able to
+    // walk to one. The read is the same guest-filesystem walk the configuration
+    // pool browses with, declared here because a panel may only use the
+    // operations its own resource declares.
+    Endpoint {
+        name: "browse",
+        verb: Verb::Read,
+        method: Method::Get,
+        path: "/api/files/browse",
+        build: || get(files::browse),
+    },
     Endpoint {
         name: "resume",
         verb: Verb::Read,

@@ -23,7 +23,7 @@ extern crate alloc;
 #[macro_use]
 extern crate log;
 
-use alloc::{collections::BTreeSet, string::String, vec, vec::Vec};
+use alloc::{collections::BTreeSet, format, string::String, vec, vec::Vec};
 
 pub use axvm_types::{
     AddressSpacePolicy, HostAddressAssignment, HostDeviceAssignment, HostPortAssignment,
@@ -702,6 +702,15 @@ impl GuestConfig {
         config.devices.validate()?;
         config.kernel.configured_memory_region_count = config.kernel.memory_regions.len();
         Ok(config)
+    }
+
+    /// Serialize back to the TOML shape [`Self::from_toml`] reads.
+    ///
+    /// The round trip is how a form-made guest becomes a file on the guest tree:
+    /// the configuration the registry holds is what a later scan reads, so the
+    /// two cannot drift.
+    pub fn to_toml(&self) -> Result<String, String> {
+        toml::to_string(self).map_err(|error| format!("{error}"))
     }
 }
 
