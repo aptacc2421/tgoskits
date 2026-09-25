@@ -50,7 +50,7 @@ on the served asset, so they run without a browser.
 Environment (set by the generic runner):
 
     AXVISOR_HTTP_BASE            http://127.0.0.1:<host_port> (forwarded)
-    AXVISOR_HTTP_CASE_DIR        case directory holding `vm-linux-alpine.toml`
+    AXVISOR_HTTP_CASE_DIR        case directory of this case
     AXVISOR_HTTP_CONNECT_TIMEOUT seconds for the initial reachability wait
     AXVISOR_HTTP_REQUEST_TIMEOUT seconds per HTTP request
 """
@@ -71,6 +71,7 @@ BASE = os.environ.get("AXVISOR_HTTP_BASE", "http://127.0.0.1:8080").rstrip("/")
 CASE_DIR = os.environ.get(
     "AXVISOR_HTTP_CASE_DIR", os.path.dirname(os.path.abspath(__file__))
 )
+LIB_DIR = "os/axvisor/configs/vms/qemu/aarch64"
 CONNECT_TIMEOUT = float(os.environ.get("AXVISOR_HTTP_CONNECT_TIMEOUT", "120"))
 REQUEST_TIMEOUT = float(os.environ.get("AXVISOR_HTTP_REQUEST_TIMEOUT", "5"))
 # Deadline for VM state transitions (guest entry, delete): well below the case
@@ -101,7 +102,8 @@ GUEST_INPUT_REJECTED = b"is not running; input was dropped"
 GUEST_ISOLATION_COMMAND = b"echo $((222*222))\r"
 GUEST_ISOLATION_RESULT = b"49284"
 
-# The default guest (`web-ui/vm-linux-alpine.toml`), kept `Ready` by `no-auto-start`.
+# The default guest (`linux-virtio-blk-fs.toml` in the shared config library),
+# kept `Ready` by `no-auto-start`.
 DEFAULT_VM_ID = 1
 # The one path the bundle has to carry: `GET /api/manifest` is the bootstrap, and
 # it cannot come from the manifest itself. Every other path the dashboard calls
@@ -136,7 +138,7 @@ MANIFEST_LINKS = {
     "shell": ["stream"],
     # One upload split into the steps an interrupted transfer needs: the
     # dashboard drags a file through exactly these operations.
-    "files": ["drop", "list", "mkdir", "open", "place", "resume", "send"],
+    "files": ["browse", "drop", "list", "mkdir", "open", "place", "resume", "send"],
 }
 MANIFEST_ROOTS = {
     "vms": "/api/vms",
@@ -907,7 +909,12 @@ def check_lifecycle(events):
 
 def check_recreate(events):
     """Recreate the default guest from the fixture, the way the panel does."""
-    with open(os.path.join(CASE_DIR, "vm-linux-alpine.toml"), "r", encoding="utf-8") as handle:
+    # The default guest's config lives in the shared config library: the build
+    # registers it from there and this probe reads the same file back.
+    repo = os.path.abspath(os.path.join(CASE_DIR, "..", "..", "..", "..", ".."))
+    with open(
+        os.path.join(repo, LIB_DIR, "linux-virtio-blk-fs.toml"), "r", encoding="utf-8"
+    ) as handle:
         vm_config = handle.read()
     status, body = request(
         "POST", "/api/vms/create", json.dumps({"toml": vm_config})

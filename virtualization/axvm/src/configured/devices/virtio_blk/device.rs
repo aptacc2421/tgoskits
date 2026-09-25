@@ -118,14 +118,7 @@ fn create_device_node(
             path: path.clone(),
         });
     }
-    let backend =
-        VirtioBlkBackend::open(&backend_config, capacity_bytes, vm_id).map_err(|error| {
-            ConfiguredDeviceError::Instantiation {
-                device: request.id.clone(),
-                model: request.model.clone(),
-                detail: format!("failed to initialize backing storage: {error}"),
-            }
-        })?;
+    let backend = VirtioBlkBackend::open(request, &backend_config, capacity_bytes, vm_id)?;
     let controller =
         context
             .default_wired_controller()
@@ -477,23 +470,29 @@ enum VirtioBlkBackend {
 
 impl VirtioBlkBackend {
     fn open(
+        request: &VirtualDeviceRequest,
         config: &BackendConfig,
         capacity_bytes: Option<u64>,
         vm_id: Option<usize>,
-    ) -> DeviceManagerResult<Self> {
+    ) -> Result<Self, ConfiguredDeviceError> {
         match config {
             BackendConfig::RamDisk => {
                 let capacity = capacity_bytes.unwrap_or(DEFAULT_CAPACITY_BYTES);
-                Ok(Self::RamDisk(RamDiskBackend::new(capacity)?))
+                RamDiskBackend::new(capacity)
+                    .map(Self::RamDisk)
+                    .map_err(|error| ConfiguredDeviceError::Instantiation {
+                        device: request.id.clone(),
+                        model: request.model.clone(),
+                        detail: format!("failed to initialize backing storage: {error}"),
+                    })
             }
             BackendConfig::File { path, filesystem } => {
-                let vm_id = vm_id.ok_or_else(|| {
-                    invalid_device_config(
-                        "open virtio-blk backing file",
-                        "file backend requires a VM identity",
-                    )
+                let vm_id = vm_id.ok_or_else(|| ConfiguredDeviceError::Instantiation {
+                    device: request.id.clone(),
+                    model: request.model.clone(),
+                    detail: "virtio-blk file backend requires a VM identity".into(),
                 })?;
-                open_file_backend(path, capacity_bytes, *filesystem, vm_id)
+                open_file_backend(request, path, capacity_bytes, *filesystem, vm_id)
             }
         }
     }
@@ -517,29 +516,48 @@ impl VirtioBlkBackend {
 
 #[cfg(feature = "fs")]
 fn open_file_backend(
+    request: &VirtualDeviceRequest,
     path: &str,
     configured_capacity: Option<u64>,
     filesystem: FilesystemFormat,
     vm_id: usize,
-) -> DeviceManagerResult<VirtioBlkBackend> {
+) -> Result<VirtioBlkBackend, ConfiguredDeviceError> {
     let mut options = ax_api::fs::AxOpenOptions::new();
     options.read(true);
     options.write(true);
     let file = ax_api::fs::ax_open_file(path, &options).map_err(|error| {
-        invalid_device_config(
-            "open virtio-blk backing file",
-            &format!("failed to open `{path}`: {error}"),
-        )
+        // Opening is a guest-filesystem fault, not a wrong request: the file
+        // was just seen there, so this reads as server-side state and stays a
+        // generic instantiation failure.
+        ConfiguredDeviceError::Instantiation {
+            device: request.id.clone(),
+            model: request.model.clone(),
+            detail: format!(
+                "failed to initialize backing storage: failed to open `{path}`: {error}"
+            ),
+        }
     })?;
     let mut reader = AxFileReader { file: &file };
     let capacity =
         inspect_file_image(&mut reader, configured_capacity, filesystem).map_err(|error| {
-            invalid_device_config(
-                "prepare virtio-blk backing file",
-                &format!("failed to prepare `{path}`: {error}"),
-            )
+            // The file is there but is not what its options declare it to be
+            // (a kernel handed to a rootfs slot, a truncated image): that is a
+            // mistake in the request, so it is answered as one, with the
+            // validation's own words.
+            ConfiguredDeviceError::UnusableBackingFile {
+                device: request.id.clone(),
+                model: request.model.clone(),
+                path: path.to_string(),
+                detail: format!("{error}"),
+            }
         })?;
-    FileBackend::new(file, capacity / SECTOR_SIZE as u64, vm_id).map(VirtioBlkBackend::File)
+    FileBackend::new(file, capacity / SECTOR_SIZE as u64, vm_id)
+        .map(VirtioBlkBackend::File)
+        .map_err(|error| ConfiguredDeviceError::Instantiation {
+            device: request.id.clone(),
+            model: request.model.clone(),
+            detail: format!("failed to initialize backing storage: {error}"),
+        })
 }
 
 #[cfg(feature = "fs")]
@@ -562,15 +580,17 @@ impl ImageReader for AxFileReader<'_> {
 
 #[cfg(not(feature = "fs"))]
 fn open_file_backend(
+    request: &VirtualDeviceRequest,
     path: &str,
     _configured_capacity: Option<u64>,
     _filesystem: FilesystemFormat,
     _vm_id: usize,
-) -> DeviceManagerResult<VirtioBlkBackend> {
-    Err(invalid_device_config(
-        "open virtio-blk backing file",
-        &format!("file backend `{path}` requires the AxVM `fs` feature"),
-    ))
+) -> Result<VirtioBlkBackend, ConfiguredDeviceError> {
+    Err(ConfiguredDeviceError::Instantiation {
+        device: request.id.clone(),
+        model: request.model.clone(),
+        detail: format!("file backend `{path}` requires the AxVM `fs` feature"),
+    })
 }
 
 impl BlockBackend for VirtioBlkBackend {

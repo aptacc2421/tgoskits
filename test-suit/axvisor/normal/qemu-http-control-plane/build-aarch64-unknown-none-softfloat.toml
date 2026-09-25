@@ -1,6 +1,6 @@
 # Converged HTTP control-plane build for the axum management API test
 # (http-control-plane).
-# `no-auto-start` keeps the default VM (`http-control-plane/vm-linux-alpine.toml`)
+# `no-auto-start` keeps the default VM (`linux-virtio-blk-fs-ctlplane.toml`)
 # in `Ready` (registered but not booted); the typed probe drives the full
 # lifecycle through the HTTP control API. `fs` + `ax-driver/nvme` are what make
 # the guest possible: the hypervisor reads the guest kernel from its own
@@ -16,7 +16,7 @@ features = [
 ]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
-vm_configs = ["test-suit/axvisor/normal/qemu-http-control-plane/http-control-plane/vm-linux-alpine.toml"]
+vm_configs = ["os/axvisor/configs/vms/qemu/aarch64/linux-virtio-blk-fs-ctlplane.toml"]
 
 # Control-plane bind. The control plane has no authentication, so no token is
 # configured; hostfwd reachability requires binding all interfaces.

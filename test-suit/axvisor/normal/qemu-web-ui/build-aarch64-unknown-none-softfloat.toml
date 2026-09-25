@@ -4,7 +4,7 @@
 # build time (no rootfs read for the assets, cargo never invokes npm), and
 # `browser-console` adds the terminal gateway the dashboard's guest and
 # management panels drive. `no-auto-start` keeps the default VM
-# (`web-ui/vm-linux-alpine.toml`) in `Ready` (registered but not booted), so the
+# (`linux-virtio-blk-fs.toml` in the shared config library) in `Ready` (registered but not booted), so the
 # probe can assert the lane table and then drive start/close/create itself.
 #
 # `fs` + `ax-driver/nvme` are what make the guest possible at all: the guest
@@ -25,7 +25,7 @@ features = [
 ]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
-vm_configs = ["test-suit/axvisor/normal/qemu-web-ui/web-ui/vm-linux-alpine.toml"]
+vm_configs = ["os/axvisor/configs/vms/qemu/aarch64/linux-virtio-blk-fs.toml"]
 
 # Bind contract: the probe reaches the in-guest listener through QEMU hostfwd, so
 # the listener has to accept connections from the QEMU network.

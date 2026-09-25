@@ -68,7 +68,7 @@ pub async fn vm_schema() -> Json<Value> {
     Json(json!({
         "fields": [
             {"name": "id", "type": "integer", "required": true,
-             "description": "客户机的数字标识，注册表里必须唯一；候选配置里已有的 id 也不能重复。",
+             "description": "客户机的数字标识，注册表里必须唯一；候选配置里已有的 id 也不能重复。表单会预填一个当前空闲的 id（比已占用的最大值多 1），按镜像/布局改即可。",
              "example": 2},
             {"name": "name", "type": "string", "required": true,
              "description": "显示用的名字，随意取，方便在列表里认出它。",
@@ -76,6 +76,10 @@ pub async fn vm_schema() -> Json<Value> {
             {"name": "kernel_path", "type": "file", "required": true,
              "description": "内核镜像在客户机文件系统里的路径。必须是已经就位的文件：可以在这一行直接传，或从「选择已就位」里挑一个。",
              "example": "/guest/linux/linux-qemu"},
+            {"name": "rootfs_path", "type": "file", "required": false,
+             "default": null, "accept": [".img"],
+             "description": "根盘镜像的路径，用法和传内核完全一样：把 .img 传到这个地址（或选已就位的），创建时按它挂一块 ext4 盘。留空 = 无盘客户机。",
+             "example": "/guest/rootfs-aarch64-alpine-0.img"},
             {"name": "image_location", "type": "enum", "required": false,
              "default": "fs", "options": ["fs"],
              "description": "内核从哪里来。表单创建的客户机只支持 fs：从客户机文件系统读上面那个内核文件。"},
@@ -99,12 +103,18 @@ pub async fn vm_schema() -> Json<Value> {
              "description": "给客户机几个 vCPU。",
              "example": 1},
             {"name": "cmdline", "type": "string", "required": false,
-             "default": null,
-             "description": "传给内核的命令行，可留空。Linux 客户机要从磁盘根启动才需要 root=…；只进 shell 的话写个 console= 就够。",
-             "example": "console=ttyAMA0 root=/dev/vda ro"},
+             "default": "root=/dev/vda ro rootwait console=ttyAMA0 init=/bin/sh",
+             "description": "传给内核的命令行。默认值把控制台接到模拟串口（浏览器终端的输入输出走它）并从 virtio-blk 盘的根启动；换客户机镜像时按它的布局改。",
+             "example": "root=/dev/vda ro rootwait console=ttyAMA0 init=/bin/sh"},
         ],
     }))
 }
+
+/// The kernel command line a form-made guest gets when the operator leaves the
+/// field empty: a console wired to the emulated UART (which the browser
+/// terminal reads and writes) and a root on the virtio-blk disk the form's
+/// rootfs names. The workspace's own images boot from exactly this shape.
+const FORM_CMDLINE_DEFAULT: &str = "root=/dev/vda ro rootwait console=ttyAMA0 init=/bin/sh";
 
 /// Reads one creation request's `fields` into template parameters.
 ///
@@ -140,10 +150,19 @@ fn template_params(fields: &Value) -> Result<VmTemplateParams, String> {
                 ));
             }
         },
-        cmdline: fields
-            .get("cmdline")
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
+        // An empty cmdline produces the quietest possible failure: a Linux
+        // guest that runs with no console attached and nothing to answer the
+        // browser terminal. The default gives the guest a voice (and a root to
+        // mount) unless the operator types one over it.
+        cmdline: Some(
+            fields
+                .get("cmdline")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| FORM_CMDLINE_DEFAULT.to_string()),
+        ),
         memory_base: address_field(fields, "memory_base")?,
         memory_mb: integer_field(fields, "memory_mb")?,
     })
@@ -205,7 +224,31 @@ pub async fn vm_create(Json(payload): Json<Value>) -> Response {
                 return (StatusCode::BAD_REQUEST, Json(json!({ "error": reason }))).into_response();
             }
         };
-        let config = get_vm_config_template(params);
+        let mut config = get_vm_config_template(params);
+        // The root disk rides the form the same way the kernel does: a file
+        // field whose value the operator transfers to. The disk is the
+        // configuration's own device, so the request's path becomes the
+        // `[[devices.virtual]]` entry here, and a file that is not in the
+        // guest filesystem yet is answered by the device's own typed error —
+        // the same transfer prompt the kernel gate gives.
+        if let Some(path) = fields
+            .get("rootfs_path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let mut options = toml::Table::new();
+            options.insert("path".into(), toml::Value::String(path.to_string()));
+            options.insert("filesystem".into(), toml::Value::String("ext4".into()));
+            config
+                .devices
+                .virtual_devices
+                .push(axvmconfig::VirtualDeviceRequest {
+                    id: "virtblk0".into(),
+                    model: "virtio-blk".into(),
+                    options,
+                });
+        }
         let id = config.base.id;
         #[cfg(feature = "fs")]
         let guest_name = config.base.name.clone();
@@ -374,20 +417,33 @@ fn persist_candidate(id: usize, guest_name: &str, config_toml: &str) -> Option<S
 /// status mapping, which is the 503 an exhausted host resource gets on a start
 /// request too.
 fn create_failed(error: anyhow::Error) -> Response {
-    if let Some(AxVmError::DeviceBackingFileMissing { path, .. }) =
-        error.root_cause().downcast_ref::<AxVmError>()
-    {
-        warn!("HTTP: create refused, `{path}` is not in the guest filesystem");
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "error": format!("`{path}` is not in the guest filesystem yet; transfer it first"),
-                "missing": path,
-            })),
-        )
-            .into_response();
+    match error.root_cause().downcast_ref::<AxVmError>() {
+        Some(AxVmError::DeviceBackingFileMissing { path, .. }) => {
+            warn!("HTTP: create refused, `{path}` is not in the guest filesystem");
+            (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!("`{path}` is not in the guest filesystem yet; transfer it first"),
+                    "missing": path,
+                })),
+            )
+                .into_response()
+        }
+        // A file that is there but is not what the request declares it to be
+        // (a kernel named as a rootfs) is a mistake in the request, so it is a
+        // 400 that says so in the validation's own words.
+        Some(AxVmError::DeviceBackingFileUnusable { path, detail, .. }) => {
+            warn!("HTTP: create refused, `{path}` is not usable as a backing file: {detail}");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("`{path}` cannot serve as the named backing file: {detail}"),
+                })),
+            )
+                .into_response()
+        }
+        _ => map_axvm_error(error).into_response(),
     }
-    map_axvm_error(error).into_response()
 }
 
 /// `DELETE /api/vms/{id}` — destroy and unregister a VM.
@@ -693,6 +749,13 @@ fn map_axvm_error(error: anyhow::Error) -> StatusCode {
         Some(AxVmError::DeviceBackingFileMissing { path, .. }) => {
             warn!("HTTP: refused, `{path}` is not in the guest filesystem");
             StatusCode::CONFLICT
+        }
+        // A backing file that is present but is not what the config declares
+        // (a kernel named as a rootfs) is the config's mistake, so a start of
+        // a pooled config with one is refused as a client error too.
+        Some(AxVmError::DeviceBackingFileUnusable { path, detail, .. }) => {
+            warn!("HTTP: refused, `{path}` is not usable as a backing file: {detail}");
+            StatusCode::BAD_REQUEST
         }
         _ => {
             error!("management HTTP action failed: {error:#}");

@@ -13,10 +13,12 @@ features = [
 ]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
+# The same three guests the non-intlog case registers: one layout, two
+# hypervisor builds, so the guest configs live once in the shared library.
 vm_configs = [
-    "test-suit/axvisor/normal/qemu-browser-console-3vm/vm1.toml",
-    "test-suit/axvisor/normal/qemu-browser-console-3vm/vm2.toml",
-    "test-suit/axvisor/normal/qemu-browser-console-3vm/vm3.toml",
+    "os/axvisor/configs/vms/qemu/aarch64/arceos-fs-guest1.toml",
+    "os/axvisor/configs/vms/qemu/aarch64/arceos-fs-guest2.toml",
+    "os/axvisor/configs/vms/qemu/aarch64/arceos-fs-guest3.toml",
 ]
 
 [env]

@@ -56,6 +56,16 @@ pub enum AxVmError {
     /// the path is kept for the caller instead of being buried in a diagnostic.
     #[error("virtual device '{device}' needs `{path}`, which is not in the guest filesystem")]
     DeviceBackingFileMissing { device: String, path: String },
+    /// A backing file that is present cannot serve as what the device's options
+    /// declare it to be (a non-ext4 file named as an ext4 rootfs, a truncated
+    /// image). The mistake is in the request, so the validation's own words
+    /// travel with the error instead of the path alone.
+    #[error("virtual device '{device}' cannot use `{path}` as its backing file: {detail}")]
+    DeviceBackingFileUnusable {
+        device: String,
+        path: String,
+        detail: String,
+    },
     /// A required VM resource is unavailable.
     #[error("VM resource {resource} is unavailable: {detail}")]
     ResourceUnavailable {

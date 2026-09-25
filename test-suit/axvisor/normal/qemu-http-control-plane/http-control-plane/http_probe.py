@@ -3,7 +3,8 @@
 
 Case asset for the `http-control-plane` test case
 (`test-suit/axvisor/normal/qemu-http-control-plane/`). It owns the *test
-content* — the concrete requests, the `vm-linux-alpine.toml` fixture, and the
+content* — the concrete requests, the default guest's fixture (which now
+lives in the shared config library), and the
 assertions — and can evolve independently of the axbuild runner.
 
 The generic axbuild probe runner
@@ -16,7 +17,7 @@ networking hostfwd. Nothing in the hypervisor knows a test is running.
 Environment (set by the generic runner):
 
     AXVISOR_HTTP_BASE            http://127.0.0.1:<host_port> (forwarded)
-    AXVISOR_HTTP_CASE_DIR        case directory holding `vm-linux-alpine.toml`
+    AXVISOR_HTTP_CASE_DIR        case directory of this case-alpine.toml`
                                  (default: this file's directory)
     AXVISOR_HTTP_CONNECT_TIMEOUT seconds for the initial reachability wait
     AXVISOR_HTTP_REQUEST_TIMEOUT seconds per HTTP request
@@ -96,7 +97,8 @@ deterministic regression for the failed-entry path as well.
 The last recreate -> start -> stop -> delete block is the resource re-acquire
 regression: it proves destroy freed guest memory, vCPUs, devices, and the
 registry entry so a fresh VM can be rebuilt from the same filesystem images.
-`vm-linux-alpine.toml` is the config the build registers as the default VM, so
+`linux-virtio-blk-fs-ctlplane.toml` is the config the build registers as the
+default VM, so
 the create body carries that file verbatim and the recreated VM reads the same
 kernel and the same guest disk image as the one the build created.
 """
@@ -113,6 +115,7 @@ BASE = os.environ.get("AXVISOR_HTTP_BASE", "http://127.0.0.1:8080").rstrip("/")
 CASE_DIR = os.environ.get(
     "AXVISOR_HTTP_CASE_DIR", os.path.dirname(os.path.abspath(__file__))
 )
+LIB_DIR = "os/axvisor/configs/vms/qemu/aarch64"
 CONNECT_TIMEOUT = float(os.environ.get("AXVISOR_HTTP_CONNECT_TIMEOUT", "120"))
 REQUEST_TIMEOUT = float(os.environ.get("AXVISOR_HTTP_REQUEST_TIMEOUT", "5"))
 # Deadline for VM state transitions (boot, stop, delete): must stay well below
@@ -304,6 +307,39 @@ def check_file_transfer():
     opened = json.loads(body.decode("utf-8"))
     check("POST /api/files state", opened.get("state"), "uploading")
     check("POST /api/files offset header", headers.get("Upload-Offset"), "0")
+
+    # Re-opening the same target is idempotent: it answers the session it has,
+    # with the bytes that are really staged. A target that disagrees with what
+    # the bytes were staged *under* is a conflict that names the truth, because
+    # silently re-pointing the session would stream this folder's bytes into the
+    # one the session first named.
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"id": session, "directory": directory, "total": total}).encode("utf-8"),
+    )
+    check("POST /api/files (same target again)", status, 200)
+    status, _, body = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {"id": session, "directory": parent + "/linux", "total": total}
+        ).encode("utf-8"),
+    )
+    check("POST /api/files (same id, other directory)", status, 409)
+    if directory not in body.decode("utf-8", "replace"):
+        raise AssertionError("the conflict does not name the directory the bytes are staged in")
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"id": session, "directory": directory, "total": total + 1}).encode(
+            "utf-8"
+        ),
+    )
+    check("POST /api/files (same id, other length)", status, 409)
 
     # The frame shape is checked before the body is read, so both of these are
     # refused without a chunk reaching the staging area.
@@ -595,6 +631,29 @@ def check_start_backing_file_gate(vm_config):
     print("  http probe: starting a pool config with a missing disk is refused")
 
 
+def fields_body(kernel_path, **overrides):
+    """The form's create body: only the fields a form itself must type.
+
+    The optional fields (`image_location`, `cpu_num`, `guest_type`, `cmdline`)
+    stay absent unless a caller overrides them: the template fills them from
+    its declared defaults, so a successful create is also proof those defaults
+    reach a bootable guest, and the field set stays the declaration's to
+    change rather than this probe's to restate.
+    """
+    fields = {
+        "id": 4243,
+        "name": "probe-fields",
+        "kernel_path": kernel_path,
+        # Hexadecimal text, the way a guest configuration writes it.
+        "entry_point": "0x8020_0000",
+        "kernel_load_addr": "0x8020_0000",
+        "memory_base": "0x8000_0000",
+        "memory_mb": 256,
+    }
+    fields.update(overrides)
+    return json.dumps({"fields": fields})
+
+
 def check_create_form():
     """The form's field set comes from the backend, and its body shares the gate.
 
@@ -613,6 +672,7 @@ def check_create_form():
     expected = {
         "id", "name", "guest_type", "cpu_num", "entry_point", "kernel_path",
         "kernel_load_addr", "image_location", "cmdline", "memory_base", "memory_mb",
+        "rootfs_path",
     }
     if set(fields) != expected:
         raise AssertionError("schema fields are %r" % (sorted(fields),))
@@ -634,6 +694,19 @@ def check_create_form():
             "`image_location` offers more than the filesystem source: %r"
             % (fields["image_location"],)
         )
+    # The rootfs field declares the extensions it takes, so a client can filter
+    # its file chooser down to images before a transfer is even attempted.
+    if fields["rootfs_path"].get("accept") != [".img"]:
+        raise AssertionError(
+            "`rootfs_path` does not declare its image extensions: %r"
+            % (fields["rootfs_path"],)
+        )
+    # The command line arrives with a working default: a guest without one runs
+    # silent and answers no terminal, which reads like a broken form.
+    if "console=" not in str(fields["cmdline"].get("default")):
+        raise AssertionError(
+            "`cmdline` has no console in its default: %r" % (fields["cmdline"],)
+        )
     print("  http probe: schema advertises %d fields" % len(fields))
 
     status, body = request("GET", "/api/vms/browse?path=/guest/linux")
@@ -650,53 +723,64 @@ def check_create_form():
     ))
 
     absent = "/guest/probe-gate/absent-kernel"
-    status, body = request(
-        "POST",
-        "/api/vms/create",
-        json.dumps(
-            {
-                "fields": {
-                    "id": 4243,
-                    "name": "probe-fields",
-                    "kernel_path": absent,
-                    "image_location": "fs",
-                    # Hexadecimal text, the way a guest configuration writes it.
-                    "entry_point": "0x8020_0000",
-                    "kernel_load_addr": "0x8020_0000",
-                    "memory_base": "0x8000_0000",
-                    "memory_mb": 256,
-                }
-            }
-        ),
-    )
+    status, body = request("POST", "/api/vms/create", fields_body(absent))
     check("POST /api/vms/create (fields, file not transferred)", status, 409)
     if absent not in json.dumps(body):
         raise AssertionError("the fields body is not gated: %r" % (body,))
     print("  http probe: fields body reaches the same gate")
 
-    # The same body, with the file it names actually there, has to become a
-    # guest: that is the form's whole contract. The field set is the template's,
-    # so a request can carry every declared field and still be refused by the
-    # plane's own model — in which case the form offers a way of asking for
-    # something that cannot exist, and saying so here is the point.
+    # A form can also ask for something the plane's own model refuses: the
+    # memory-image kernel is a build-time fact no form can provide.
     status, body = request(
         "POST",
         "/api/vms/create",
-        json.dumps(
-            {
-                "fields": {
-                    "id": 4243,
-                    "name": "probe-fields",
-                    "kernel_path": "/guest/linux/linux-qemu",
-                    "image_location": "fs",
-                    "entry_point": "0x8020_0000",
-                    "kernel_load_addr": "0x8020_0000",
-                    "memory_base": "0x8000_0000",
-                    "memory_mb": 256,
-                    "cpu_num": 1,
-                    "guest_type": "virtualized",
-                }
-            }
+        fields_body("/guest/linux/linux-qemu", image_location="memory"),
+    )
+    check("POST /api/vms/create (fields, memory kernel)", status, 400)
+    print("  http probe: a form body cannot ask for a memory kernel")
+
+    # The root disk rides the form like the kernel does: a file field the
+    # operator transfers to. Naming one that is not there yet is the same
+    # precondition, answered with the same transfer prompt — from the device's
+    # own typed error, because the disk is the device the request implies.
+    absent_rootfs = "/guest/probe-gate/absent-rootfs.img"
+    status, body = request(
+        "POST",
+        "/api/vms/create",
+        fields_body("/guest/linux/linux-qemu", rootfs_path=absent_rootfs),
+    )
+    check("POST /api/vms/create (fields, rootfs not transferred)", status, 409)
+    if absent_rootfs not in json.dumps(body):
+        raise AssertionError("the rootfs refusal does not name the missing file: %r" % (body,))
+    print("  http probe: fields rootfs reaches the same gate")
+
+    # A file that is there but is not what the slot declares (the kernel is no
+    # ext4 image) is a mistake in the request, not a server fault: it is a 400
+    # that says so in the validation's own words.
+    status, body = request(
+        "POST",
+        "/api/vms/create",
+        fields_body("/guest/linux/linux-qemu", rootfs_path="/guest/linux/linux-qemu"),
+    )
+    check("POST /api/vms/create (fields, rootfs is not a filesystem)", status, 400)
+    if "ext4" not in json.dumps(body):
+        raise AssertionError("the unusable-rootfs refusal does not say why: %r" % (body,))
+    print("  http probe: a non-filesystem rootfs is refused as a bad request")
+
+    # The same body, with the file it names actually there, has to become a
+    # guest: that is the form's whole contract. Only the fields a form must
+    # type are sent — the optional ones (`image_location`, `cpu_num`,
+    # `guest_type`, `cmdline`) stay absent, so the create succeeding is also
+    # proof that the template fills its declared defaults. This form guest
+    # names a root disk, so the create also instantiates its virtio-blk device
+    # against the real image, and the close below is the lock-outside destroy
+    # the file backend needs.
+    status, body = request(
+        "POST",
+        "/api/vms/create",
+        fields_body(
+            "/guest/linux/linux-qemu",
+            rootfs_path="/guest/rootfs-aarch64-alpine-0.img",
         ),
     )
     check("POST /api/vms/create (fields, file in place)", status, 200)
@@ -712,7 +796,13 @@ def check_create_form():
     entries = {entry["id"]: entry for entry in body.get("entries", [])}
     if 4243 not in entries or entries[4243].get("path") != saved:
         raise AssertionError("the persisted form config is not a candidate: %r" % (body,))
-    print("  http probe: the form's config is a candidate at `%s`" % saved)
+    if "virtblk0" not in entries[4243].get("toml", ""):
+        raise AssertionError("the persisted form config carries no root disk")
+    # The defaults are the form's promise: a guest built from an empty-cmdline
+    # submission still carries a console, or the terminal reads as broken.
+    if "console=ttyAMA0" not in entries[4243].get("toml", ""):
+        raise AssertionError("the persisted form config carries no console")
+    print("  http probe: the form's config is a candidate at `%s` with its root disk" % saved)
     status, _ = request("DELETE", "/api/vms/4243")
     check("DELETE /api/vms/4243", status, 204)
     print("  http probe: a form body created and removed VM[4243]")
@@ -930,8 +1020,13 @@ def poll_vm_gone(vm_id):
 
 
 def main():
-    with open(os.path.join(CASE_DIR, "vm-linux-alpine.toml"), "r", encoding="utf-8") as f:
-        vm_config = f.read()
+    # The default guest's config lives in the shared config library: the build
+    # registers it from there and this probe reads the same file back.
+    repo = os.path.abspath(os.path.join(CASE_DIR, "..", "..", "..", "..", ".."))
+    with open(
+        os.path.join(repo, LIB_DIR, "linux-virtio-blk-fs-ctlplane.toml"), "r", encoding="utf-8"
+    ) as handle:
+        vm_config = handle.read()
     create_body = json.dumps({"toml": vm_config})
     bad_body = json.dumps({"toml": "this is not [[ valid toml {{{"})
 

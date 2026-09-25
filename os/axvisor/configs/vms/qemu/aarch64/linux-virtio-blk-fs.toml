@@ -1,4 +1,6 @@
-# Guest fixture for the `qemu-web-ui` case, kept `Ready` by `no-auto-start`.
+# A Linux guest whose kernel and root disk are read from the guest
+# filesystem (`image_location = "fs"`): the machine model the `qemu-web-ui`
+# case registers as its default, kept `Ready` by `no-auto-start`.
 #
 # Everything this guest needs is read from the Axvisor host filesystem, which is
 # why the case is built with `fs`:
