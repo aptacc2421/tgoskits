@@ -14,9 +14,9 @@ features = [
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
 vm_configs = [
-    "test-suit/axvisor/normal/qemu-browser-console-3vm-intlog/vm1.toml",
-    "test-suit/axvisor/normal/qemu-browser-console-3vm-intlog/vm2.toml",
-    "test-suit/axvisor/normal/qemu-browser-console-3vm-intlog/vm3.toml",
+    "os/axvisor/configs/vms/qemu/aarch64/arceos-fs-guest1.toml",
+    "os/axvisor/configs/vms/qemu/aarch64/arceos-fs-guest2.toml",
+    "os/axvisor/configs/vms/qemu/aarch64/arceos-fs-guest3.toml",
 ]
 
 [env]

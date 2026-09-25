@@ -325,6 +325,13 @@ pub enum ConfiguredDeviceError {
         model: String,
         path: String,
     },
+    #[error("`{path}` is not usable as device '{device}' ({model})'s backing file: {detail}")]
+    UnusableBackingFile {
+        device: String,
+        model: String,
+        path: String,
+        detail: String,
+    },
     #[error("invalid virtual device id '{device}': {detail}")]
     InvalidDeviceId { device: String, detail: String },
 }

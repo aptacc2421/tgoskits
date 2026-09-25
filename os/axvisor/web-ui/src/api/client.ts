@@ -35,6 +35,31 @@ export class ApiClient {
     return res.status
   }
 
+  /**
+   * `PATCH` with a caller-shaped body, answering with the response headers.
+   *
+   * A chunk is raw bytes under a caller-built frame rather than JSON, so neither
+   * the body nor the headers can be built here; and the endpoint answers in a
+   * header instead of a body, so the headers are what comes back.
+   */
+  async patch(
+    path: string,
+    body: Blob,
+    headers: Record<string, string>,
+    signal?: AbortSignal,
+  ): Promise<Headers> {
+    const res = await send(() => fetch(path, { method: 'PATCH', headers, body, signal }))
+    if (!res.ok) throw await parseError(res)
+    return res.headers
+  }
+
+  /** `HEAD`: for endpoints that answer in headers only, with no body to parse. */
+  async head(path: string, signal?: AbortSignal): Promise<Headers> {
+    const res = await send(() => fetch(path, { method: 'HEAD', signal }))
+    if (!res.ok) throw await parseError(res)
+    return res.headers
+  }
+
   private async request<T>(
     method: 'GET' | 'POST',
     path: string,

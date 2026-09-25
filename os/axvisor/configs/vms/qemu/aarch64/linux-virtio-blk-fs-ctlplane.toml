@@ -1,4 +1,6 @@
-# Guest fixture for the converged HTTP control-plane test.
+# The `qemu-http-control-plane` case's default guest: the fs-read machine
+# model with the memory, pinning and PCI exclusions that case's management
+# network needs, kept `Ready` by `no-auto-start`.
 #
 # The guest kernel and the guest root filesystem are files in the hypervisor's
 # own filesystem (`image_location = "fs"`), so nothing about this guest is baked

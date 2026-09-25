@@ -157,12 +157,24 @@ fn serial_uses_host_console(request: &VirtualDeviceRequest, default: bool) -> Ax
 
 fn configured_error(error: ConfiguredDeviceError) -> AxVmError {
     match error {
-        // A missing backing file is the one configuration error the operator
-        // clears by transferring a file, so its path survives into the typed
-        // error instead of becoming part of a diagnostic string.
+        // Backing-file failures are the configuration errors the operator
+        // addresses through the file itself — transfer it, or name a file of
+        // the declared kind — so the path and the validation's own words
+        // survive into the typed errors instead of becoming part of a
+        // diagnostic string.
         ConfiguredDeviceError::MissingBackingFile { device, path, .. } => {
             AxVmError::DeviceBackingFileMissing { device, path }
         }
+        ConfiguredDeviceError::UnusableBackingFile {
+            device,
+            path,
+            detail,
+            ..
+        } => AxVmError::DeviceBackingFileUnusable {
+            device,
+            path,
+            detail,
+        },
         error => AxVmError::invalid_config(std::format!("{error}")),
     }
 }

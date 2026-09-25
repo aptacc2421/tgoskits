@@ -27,7 +27,7 @@ args = [
 # asserts the dashboard served from the embedded bundle (shell, hashed assets,
 # CSP/cache headers, no SPA catch-all, and the endpoints the bundle calls), the
 # terminal lanes and their two sockets, and then drives the default VM
-# (id 1, `vm-linux-alpine.toml`, kept `Ready` by `no-auto-start`) through start,
+# (id 1, `linux-virtio-blk-fs.toml`, kept `Ready` by `no-auto-start`) through start,
 # close and recreate while watching the event channel; it quits QEMU over QMP and
 # the runner collects the asset's exit code as the verdict.
 #

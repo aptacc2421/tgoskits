@@ -1,4 +1,5 @@
-# Guest #2 of a three-guest browser-console layout.
+# Guest #3 of the three-guest browser-console layout shared by the
+# `qemu-browser-console-3vm` and `qemu-browser-console-3vm-intlog` cases.
 #
 # ArceOS, read from `/guest/arceos/arceos-qemu` in the hypervisor's own
 # filesystem (`image_location = "fs"`): the case exists to give the dashboard
@@ -11,11 +12,11 @@
 # virtual. A passthrough guest makes the hypervisor hand over its own filesystem,
 # and this case has to keep reading guest kernels from that filesystem.
 [base]
-id = 2
-name = "guest-2"
+id = 3
+name = "guest-3"
 guest_type = "virtualized"
 cpu_num = 1
-phys_cpu_ids = [2]
+phys_cpu_ids = [3]
 
 #
 # Vm kernel configs

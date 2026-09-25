@@ -61,10 +61,12 @@ pub const CHUNK_LIMIT: usize = 1024 * 1024;
 
 /// The largest file this plane will accept, declared or streamed.
 ///
-/// A guest disk image is the biggest thing that travels through here; 256 MiB
-/// covers the images this workspace builds and keeps a runaway client from
-/// filling the hypervisor's own filesystem.
-pub const FILE_LIMIT: usize = 256 * 1024 * 1024;
+/// A guest disk image is the biggest thing that travels through here, and
+/// images several times the size of this workspace's own are ordinary, so the
+/// limit only guards against runaway declarations. The binding constraint is
+/// the guest filesystem's free space, which a transfer that exceeds it meets
+/// as a recoverable out-of-space refusal, not as this check.
+pub const FILE_LIMIT: usize = 4 * 1024 * 1024 * 1024;
 
 /// Name of the staging namespace inside the target directory.
 ///
@@ -165,6 +167,12 @@ static SESSIONS: LazyLock<NoPreemptMutex<BTreeMap<String, Session>>> =
 /// is always read from the disk: dragging the same file twice therefore resumes
 /// instead of starting over, and never truncates bytes that already arrived. To
 /// start over deliberately, `drop` the session first.
+///
+/// Picking a session up is only offered for the same target: one that was
+/// opened for another directory, or for another length, is answered with
+/// [`FileError::Conflict`] and the offset of the bytes that are really there.
+/// Silently re-pointing it would write the new folder's bytes into the old
+/// folder's staging file.
 pub fn open(id: &str, directory: &str, total: usize) -> Result<SessionView, FileError> {
     let id = checked_id(id)?;
     let directory = checked_directory(directory)?;
@@ -177,6 +185,32 @@ pub fn open(id: &str, directory: &str, total: usize) -> Result<SessionView, File
 
     if ax_std::fs::read_dir(&directory).is_err() {
         return Err(FileError::NoSuchDirectory(directory));
+    }
+    // A session id is the client's, so the same id can reach this plane twice
+    // for two different folders. The directory and the declared length are what
+    // the bytes already staged were staged *under*, so a second `open` may only
+    // join a session that agrees with both: joining one that does not would
+    // answer with this folder while every later chunk is written into the one
+    // the session first named.
+    let staged_under = {
+        let sessions = SESSIONS.lock();
+        sessions
+            .get(id)
+            .map(|session| (session.directory.clone(), session.total))
+    };
+    if let Some((staged_in, declared)) = staged_under {
+        if staged_in != directory {
+            return Err(FileError::Conflict {
+                reason: format!("{id} is already staged in `{staged_in}`, not `{directory}`"),
+                offset: disk_len(&staging_path(&staged_in, id)),
+            });
+        }
+        if declared != total {
+            return Err(FileError::Conflict {
+                reason: format!("{id} was opened as {declared} bytes, not {total}"),
+                offset: disk_len(&staging_path(&staged_in, id)),
+            });
+        }
     }
     // The staging namespace is this plane's own, not the operator's tree, so it
     // is the one directory the transfer may create on the way in.
