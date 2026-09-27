@@ -104,6 +104,35 @@ graph LR
 - `src/capability/` 是能力层：把内核声明的动作链接变成访问器（`accessor.ts`）并读取声明本身（`manifest.ts`）。它不含任何面板知识，因此可以被单元测试直接覆盖。
 - `src/lib/` 与 `src/components/` 是基础库：状态到文案的映射、生命周期动作规则、终端组件与通用界面组件。
 
+上述分层在目录里的落点如下表。表中给出每个文件的职责，用于判断一次改动应该落在哪个文件；源码演进时在此登记新增文件。
+
+| 文件 | 职责 |
+| :-- | :-- |
+| `src/main.tsx` | 入口，把外壳与面板注册表接起来并引入全局样式 |
+| `src/shell/App.tsx` | 读取能力声明、生成导航与标签、注入访问器、接入事件源 |
+| `src/shell/Nav.tsx` | 左侧导航：面板列表来自声明，客户机列表来自事件通道 |
+| `src/shell/Tabs.tsx` | 顶部分页：每个标签一个面板实例，常驻挂载 |
+| `src/shell/PanelErrorBoundary.tsx` | 每个标签的渲染错误边界 |
+| `src/panels/registry.ts` | 渲染器注册表，按 `kind` 懒加载面板组件 |
+| `src/panels/FallbackPanel.tsx` | 未知 `kind` 降级为 JSON 视图 |
+| `src/panels/vms/VmsPanel.tsx` | 客户机面板：登记表、配置池、目录浏览、生命周期动作 |
+| `src/panels/console/ConsolePanel.tsx` | 客户机终端面板：每通道一个标签，独占通道管理 |
+| `src/panels/shell/ShellPanel.tsx` | 管理台自身的终端面板 |
+| `src/api/types.ts` | 契约类型与错误描述，区分连接失败与 HTTP 错误 |
+| `src/api/client.ts` | REST 客户端：相对路径请求与统一错误解析 |
+| `src/api/events.ts` | 事件通道：全量快照帧与增量帧 |
+| `src/api/ws.ts` | 终端通道：按字符边界分块，流式解码 |
+| `src/capability/manifest.ts` | 引导路径常量与契约版本校验 |
+| `src/capability/accessor.ts` | 声明到访问器：`url()`、`maybeUrl()`、`bind()` |
+| `src/lib/status.ts` | 客户机状态到徽章配色的映射 |
+| `src/lib/lifecycle.ts` | 动作后轮询到终态 |
+| `src/lib/vcpu.ts` | CPU 亲和性位掩码解码 |
+| `src/lib/lanes.ts` | 终端通道纯函数：标签组推导、抢输回退、合并与分离 |
+| `src/lib/panel-error.ts` | 面板失败性质分类 |
+| `src/components/Terminal.tsx` | 单通道终端视图 |
+
+各层的纯函数与客户端逻辑都带同名单元测试（`*.test.ts`）。构建配置相关的文件有 `vite.config.ts`（开发服务器把接口与终端路径代理到内核端口）、`tsconfig.json`、`tailwind.config.js`、`postcss.config.js` 与 `components.json`。
+
 ### 3.2 关键不变量
 
 以下不变量在评审中作为硬性要求，破坏其中任何一条都应被要求修改：
@@ -159,6 +188,10 @@ npm run dev     # 5173 端口，/api 与 /ws 代理到 8080
 npm run typecheck
 npm test
 ```
+
+### 4.3 终端组件来源
+
+终端视图使用 `@xterm/xterm` 及其样式，版本在 `package.json` 里声明，构建时从包管理器取得并打进产物。旧实现把该组件的脚本与样式连同许可证文本一起放在内核源码树内（`src/http/browser_console/assets/xterm-6.0.0/`），该目录已随旧网页实现一并删除。该组件按 MIT 许可分发，许可证文本随包提供，构建产物保留许可声明。
 
 ## 5 测试与持续集成
 
