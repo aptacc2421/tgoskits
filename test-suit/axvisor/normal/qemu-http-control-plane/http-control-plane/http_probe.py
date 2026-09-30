@@ -1047,10 +1047,12 @@ def main():
         raise AssertionError("GET /api/manifest panels was not a list: %r" % (body,))
     kinds = [panel.get("kind") for panel in panels]
     # `fs` is enabled for this case, so the file-transfer panel is declared too:
-    # the transfer routes exist exactly where the guest filesystem does.
+    # the transfer routes exist exactly where the guest filesystem does. The
+    # host panel is declared unconditionally: its facts come from the build and
+    # the boot instant, not from a feature switch.
     # Declaration order: the VM panel first (it is what an operator lands on),
-    # then the transfer panel that `fs` adds.
-    check("GET /api/manifest panel kinds", kinds, ["vms", "files"])
+    # then the transfer panel that `fs` adds, then the host panel.
+    check("GET /api/manifest panel kinds", kinds, ["vms", "files", "host"])
     check("GET /api/manifest vms verbs", panels[0].get("verbs"), ["read", "write"])
     if not panels[0].get("root"):
         raise AssertionError("GET /api/manifest vms panel had no root: %r" % (panels[0],))

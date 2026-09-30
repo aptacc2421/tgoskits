@@ -119,6 +119,7 @@ BUNDLE_ENDPOINTS = (b"/api/manifest",)
 # declares fails the case, and a declared link that stops being served fails it
 # too (`check_manifest_links`).
 MANIFEST_LINKS = {
+    "host": ["get"],
     "vms": [
         "browse",
         "create",
@@ -143,6 +144,7 @@ MANIFEST_LINKS = {
 MANIFEST_ROOTS = {
     "vms": "/api/vms",
     "files": "/api/files",
+    "host": "/api/host",
     "console": "/api/consoles",
     "shell": "/ws",
 }
@@ -690,7 +692,7 @@ def check_manifest():
     if not isinstance(panels, list):
         raise AssertionError("manifest panels was not a list: %r" % (body,))
     declared = {panel.get("kind"): panel.get("verbs") for panel in panels}
-    check("manifest panel kinds", sorted(declared), ["console", "files", "shell", "vms"])
+    check("manifest panel kinds", sorted(declared), ["console", "files", "host", "shell", "vms"])
     check("files panel verbs", declared["files"], ["read", "write"])
     check("vms panel verbs", declared["vms"], ["read", "write"])
     check("console panel verbs", declared["console"], ["read", "write", "stream"])
