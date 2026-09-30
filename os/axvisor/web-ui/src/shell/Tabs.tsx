@@ -7,9 +7,10 @@
 //! the panels are.
 
 import { Suspense, useState } from 'react'
+import { Plus, X } from 'lucide-react'
 import type { ApiClient } from '@/api/client'
 import type { VmSummary } from '@/api/types'
-import type { FilesCapability, PanelMeta, PanelRegistry } from '@/api/types'
+import type { FilesCapability, HostInfo, PanelMeta, PanelRegistry } from '@/api/types'
 import type { Capabilities } from '@/capability/accessor'
 import { cn } from '@/lib/utils'
 import { PanelErrorBoundary } from './PanelErrorBoundary'
@@ -29,6 +30,8 @@ interface TabsProps {
    */
   files: FilesCapability | null
   resources: VmSummary[]
+  /** The host facts the shell read once; `null` when this build exports none. */
+  host: HostInfo | null
   focusVm: number | null
   onActivate: (id: string) => void
   onClose: (id: string) => void
@@ -45,6 +48,7 @@ export function Tabs(props: TabsProps) {
     capabilities,
     files,
     resources,
+    host,
     focusVm,
     onActivate,
     onClose,
@@ -59,19 +63,22 @@ export function Tabs(props: TabsProps) {
 
   return (
     <div className="flex min-w-0 flex-1 flex-col">
-      <div className="flex items-center gap-1 border-b px-2 py-1">
+      <div className="flex items-center gap-1 border-b px-2">
         {tabs.map((tab) => {
           const meta = panels.find((panel) => panel.kind === tab.kind)
           if (!meta) return null
           const index = (seen.get(tab.kind) ?? 0) + 1
           seen.set(tab.kind, index)
           const multiple = (totals.get(tab.kind) ?? 0) > 1
+          const active = tab.id === activeId
           return (
             <div
               key={tab.id}
               className={cn(
-                'flex items-center gap-2 rounded-md px-3 py-1.5 text-sm',
-                tab.id === activeId ? 'bg-secondary' : 'text-muted-foreground hover:bg-accent',
+                'group flex items-center gap-1.5 border-b-2 px-3 py-1.5 text-sm transition-colors',
+                active
+                  ? 'border-primary text-foreground'
+                  : 'border-transparent text-muted-foreground hover:text-foreground',
               )}
             >
               <button type="button" onClick={() => onActivate(tab.id)}>
@@ -81,10 +88,13 @@ export function Tabs(props: TabsProps) {
               <button
                 type="button"
                 aria-label={`关闭 ${meta.title}`}
-                className="text-muted-foreground hover:text-foreground"
+                className={cn(
+                  'rounded p-0.5 text-muted-foreground transition-opacity hover:bg-accent hover:text-foreground',
+                  active ? 'opacity-70' : 'opacity-0 group-hover:opacity-70',
+                )}
                 onClick={() => onClose(tab.id)}
               >
-                ×
+                <X className="h-3 w-3" />
               </button>
             </div>
           )
@@ -94,10 +104,10 @@ export function Tabs(props: TabsProps) {
             type="button"
             aria-label="新开面板实例"
             title="新开面板实例"
-            className="rounded-md px-2.5 py-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={() => setPickerOpen((open) => !open)}
           >
-            +
+            <Plus className="h-3.5 w-3.5" />
           </button>
           {pickerOpen && (
             <div className="absolute right-0 top-full z-10 mt-1 w-60 rounded-md border bg-popover p-2 shadow-md">
@@ -149,6 +159,7 @@ export function Tabs(props: TabsProps) {
                     link={link}
                     files={files}
                     resources={resources}
+                    host={host}
                     focusVm={focusVm}
                   />
                 </Suspense>

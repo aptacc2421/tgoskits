@@ -15,12 +15,14 @@ const VmsPanel = lazy(() => import('./vms/VmsPanel'))
 const FilesPanel = lazy(() => import('./files/FilesPanel'))
 const ConsolePanel = lazy(() => import('./console/ConsolePanel'))
 const ShellPanel = lazy(() => import('./shell/ShellPanel'))
+const HostPanel = lazy(() => import('./host/HostPanel'))
 
 const renderers: Record<string, PanelComponent> = {
   vms: VmsPanel, // Guest registry, configuration pool, lifecycle actions.
   files: FilesPanel, // Staged file transfers and where they stand.
   console: ConsolePanel, // One terminal per guest console lane.
   shell: ShellPanel, // The hypervisor's own management shell.
+  host: HostPanel, // The machine the hypervisor itself is running on.
 }
 
 export function resolvePanel(kind: string): PanelComponent {

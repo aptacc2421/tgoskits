@@ -1,0 +1,1666 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="graphite">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AxVisor 控制台</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+/* ============================================================
+   AxVisor 控制台 — v3
+   视觉立场：这台物理机是主角。
+   一屏一个锚点：物理核切分图。其余全部降级为注脚。
+   无卡片。色相只给交互与状态，客户机之间用中性明度区分。
+   ============================================================ */
+
+/* ---------- 主题 ---------- */
+
+/* 石墨：默认。近黑中性，琥珀是唯一交互色。 */
+[data-theme='graphite'] {
+  --bg: oklch(13.5% 0.006 250);
+  --surface-1: oklch(16.5% 0.007 250);
+  --surface-2: oklch(20.5% 0.008 250);
+  --surface-3: oklch(25% 0.009 250);
+  --line: oklch(29% 0.009 250);
+  --line-soft: oklch(22% 0.007 250);
+
+  --ink: oklch(96% 0.002 250);
+  --ink-2: oklch(76% 0.005 250);
+  --ink-3: oklch(57% 0.008 250);
+  --ink-4: oklch(40% 0.008 250);
+
+  --accent: oklch(83% 0.13 84);
+  --accent-ink: oklch(15% 0.03 84);
+
+  --signal: oklch(76% 0.07 175);
+  --alert: oklch(64% 0.19 25);
+
+  /* 客户机填充：同一中性色相上的明度阶梯，不使用色相区分 */
+  --fill-1: oklch(74% 0.012 250);
+  --fill-2: oklch(62% 0.013 250);
+  --fill-3: oklch(52% 0.013 250);
+  --fill-4: oklch(44% 0.013 250);
+  --fill-5: oklch(37% 0.013 250);
+  --fill-ink: oklch(14% 0.008 250);
+}
+
+/* 纸白：瑞士网格。亮底 + 朱红。 */
+[data-theme='paper'] {
+  --bg: oklch(97.5% 0.003 250);
+  --surface-1: oklch(95% 0.003 250);
+  --surface-2: oklch(92% 0.004 250);
+  --surface-3: oklch(88% 0.005 250);
+  --line: oklch(84% 0.006 250);
+  --line-soft: oklch(90% 0.004 250);
+
+  --ink: oklch(20% 0.008 250);
+  --ink-2: oklch(38% 0.009 250);
+  --ink-3: oklch(52% 0.009 250);
+  --ink-4: oklch(66% 0.008 250);
+
+  --accent: oklch(52% 0.2 26);
+  --accent-ink: oklch(98% 0.002 250);
+
+  --signal: oklch(48% 0.08 165);
+  --alert: oklch(48% 0.19 25);
+
+  --fill-1: oklch(38% 0.012 250);
+  --fill-2: oklch(50% 0.013 250);
+  --fill-3: oklch(60% 0.013 250);
+  --fill-4: oklch(70% 0.013 250);
+  --fill-5: oklch(79% 0.013 250);
+  --fill-ink: oklch(99% 0.002 250);
+}
+
+/* 磷光：终端气质。深灰 + 磷绿。 */
+[data-theme='phosphor'] {
+  --bg: oklch(16% 0.008 165);
+  --surface-1: oklch(19% 0.009 165);
+  --surface-2: oklch(23% 0.010 165);
+  --surface-3: oklch(28% 0.011 165);
+  --line: oklch(33% 0.012 165);
+  --line-soft: oklch(25% 0.010 165);
+
+  --ink: oklch(94% 0.010 165);
+  --ink-2: oklch(78% 0.014 165);
+  --ink-3: oklch(60% 0.016 165);
+  --ink-4: oklch(44% 0.014 165);
+
+  --accent: oklch(80% 0.15 150);
+  --accent-ink: oklch(15% 0.03 150);
+
+  --signal: oklch(80% 0.10 150);
+  --alert: oklch(66% 0.19 25);
+
+  --fill-1: oklch(70% 0.020 165);
+  --fill-2: oklch(58% 0.022 165);
+  --fill-3: oklch(48% 0.022 165);
+  --fill-4: oklch(40% 0.022 165);
+  --fill-5: oklch(33% 0.022 165);
+  --fill-ink: oklch(15% 0.010 165);
+}
+
+/* ---------- 动效 token ---------- */
+:root {
+  --dur-quick: 150ms;
+  --dur-fast: 250ms;
+  --dur-slow: 400ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  --font-ui: 'Archivo', 'Helvetica Neue', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', monospace;
+
+  --rail-w: 188px;
+  --topbar-h: 49px;
+}
+
+/* ---------- 基础 ---------- */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-variant-numeric: tabular-nums;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+input {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  outline: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 全大写标签：字号极小、字距极大 —— 与值形成强对比 */
+.label {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+  height: var(--topbar-h);
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.brand-mark {
+  width: 15px;
+  height: 15px;
+  color: var(--ink);
+  align-self: center;
+}
+
+.brand-name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+}
+
+.brand-ver {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-4);
+}
+
+.topbar-mid {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.topbar-mid .sep {
+  color: var(--ink-4);
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 27px;
+  padding: 0 11px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+  transition: background var(--dur-quick) var(--ease-out),
+    color var(--dur-quick) var(--ease-out), border-color var(--dur-quick) var(--ease-out);
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 500;
+}
+
+.theme-switch {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.theme-switch button {
+  padding: 0 8px;
+  height: 27px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+  transition: background var(--dur-quick) var(--ease-out),
+    color var(--dur-quick) var(--ease-out);
+}
+
+.theme-switch button.on {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+/* ---------- 骨架 ---------- */
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  height: calc(100vh - var(--topbar-h));
+}
+
+.rail {
+  border-right: 1px solid var(--line-soft);
+  padding: 16px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.rail-group {
+  padding: 14px 8px 6px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 32px;
+  padding: 0 9px;
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--ink-2);
+  transition: background var(--dur-quick) var(--ease-out),
+    color var(--dur-quick) var(--ease-out);
+}
+
+.nav-item svg {
+  color: var(--ink-3);
+  transition: color var(--dur-quick) var(--ease-out);
+}
+
+.nav-item[aria-current='true'] {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.nav-item[aria-current='true'] svg {
+  color: var(--accent);
+}
+
+.nav-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-4);
+}
+
+.workspace {
+  overflow-y: auto;
+  padding: 0;
+}
+
+/* ---------- 锚点：这台机器 ---------- */
+.figure {
+  padding: 22px 26px 26px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.figure-head {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.figure-head .title {
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.figure-head .meta {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+
+.figure-head .spacer {
+  margin-left: auto;
+}
+
+/* 注脚数字：不再是主角，尺寸克制 */
+.legend {
+  display: flex;
+  align-items: baseline;
+  gap: 26px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.legend-item .n {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--ink);
+}
+
+.legend-item .n .of {
+  font-size: 14px;
+  color: var(--ink-4);
+}
+
+/* 物理核格子 —— 本屏唯一视觉锚点 */
+.slots {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 4px;
+  margin-top: 18px;
+}
+
+.slot {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.slot-box {
+  height: 108px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 3px;
+  background: var(--surface-1);
+  border: 1px solid var(--line-soft);
+  overflow: hidden;
+}
+
+.slot.idle .slot-box {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--line);
+}
+
+.seg {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.seg span {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--fill-ink);
+  white-space: nowrap;
+  padding: 0 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.slot-foot {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-4);
+  padding: 0 1px;
+}
+
+/* 悬停客户机时：非相关的核退让 */
+.slots.focusing .slot {
+  opacity: 0.28;
+}
+
+.slots.focusing .slot.lit {
+  opacity: 1;
+}
+
+.slot.lit .slot-box {
+  border-color: var(--accent);
+  border-style: solid;
+}
+
+/* 内存条 */
+.membar {
+  display: flex;
+  height: 10px;
+  margin-top: 16px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--surface-1);
+  border: 1px solid var(--line-soft);
+}
+
+.membar .seg {
+  border-radius: 0;
+}
+
+.membar-note {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+
+.membar-note .q {
+  color: var(--ink-4);
+}
+
+/* ---------- 客户机列表 ---------- */
+.section {
+  padding: 20px 26px 32px;
+}
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.section-head .title {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.section-head .count {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-4);
+}
+
+.rows {
+  margin-top: 10px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.4fr) 100px 132px 88px 76px;
+  align-items: center;
+  gap: 14px;
+  height: 46px;
+  padding: 0 8px;
+  margin: 0 -8px;
+  border-bottom: 1px solid var(--line-soft);
+  cursor: pointer;
+  transition: background var(--dur-quick) var(--ease-out);
+}
+
+.row:last-child {
+  border-bottom: 0;
+}
+
+.row .name {
+  font-size: 13.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row .cell {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row .ops {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+  opacity: 0;
+  transition: opacity var(--dur-quick) var(--ease-out);
+}
+
+.row:hover .ops,
+.row:focus-within .ops {
+  opacity: 1;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 4px;
+  color: var(--ink-2);
+  border: 1px solid transparent;
+  transition: background var(--dur-quick) var(--ease-out),
+    border-color var(--dur-quick) var(--ease-out), color var(--dur-quick) var(--ease-out);
+}
+
+.icon-btn:active {
+  transform: scale(0.94);
+}
+
+.icon-btn.danger {
+  color: var(--alert);
+}
+
+/* 状态点：一个圆点 + 文字，不使用徽章 */
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-4);
+  flex: none;
+}
+
+.state.running .dot {
+  background: var(--signal);
+}
+
+.state.running {
+  color: var(--ink);
+}
+
+.state.failed .dot {
+  background: var(--alert);
+}
+
+.state.failed {
+  color: var(--alert);
+}
+
+/* ---------- 抽屉 ---------- */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: oklch(0% 0 0 / 0.5);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.scrim.in {
+  opacity: 1;
+}
+
+/* 从右侧长出，不做位移 keyframes，可打断 */
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 400px;
+  max-width: 92vw;
+  background: var(--surface-1);
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform var(--dur-slow) var(--ease-drawer);
+}
+
+.drawer.in {
+  transform: translateX(0);
+}
+
+.drawer-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.drawer-head .t {
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.drawer-head .s {
+  margin-top: 5px;
+}
+
+.drawer-body {
+  padding: 18px 22px 28px;
+  overflow-y: auto;
+}
+
+.field {
+  display: grid;
+  grid-template-columns: 108px minmax(0, 1fr);
+  gap: 14px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+
+.field:last-child {
+  border-bottom: 0;
+}
+
+.field .k {
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+
+.field .v {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink);
+  word-break: break-all;
+}
+
+.bignums {
+  display: flex;
+  gap: 30px;
+  padding: 4px 0 18px;
+}
+
+.bignum .n {
+  font-family: var(--font-mono);
+  font-size: 32px;
+  line-height: 1;
+  font-weight: 500;
+}
+
+.bignum .k {
+  margin-top: 7px;
+}
+
+.pin-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.pin {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  color: var(--ink-3);
+}
+
+.pin.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.notice {
+  margin-top: 16px;
+  padding: 11px 13px;
+  border-left: 2px solid var(--alert);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+/* ---------- 控制台 ---------- */
+.term {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.term-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 26px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.term-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 26px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--ink-2);
+}
+
+.term-body .ts {
+  color: var(--ink-4);
+  margin-right: 10px;
+}
+
+.term-body .hi {
+  color: var(--ink);
+}
+
+.term-body .ok {
+  color: var(--signal);
+}
+
+/* ---------- 通用面板 ---------- */
+.pane {
+  padding: 22px 26px 32px;
+  max-width: 900px;
+}
+
+.pane h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.pane .sub {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  margin-bottom: 20px;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 156px minmax(0, 1fr);
+  gap: 14px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+
+.kv .k {
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+
+.kv .v {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.chip {
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+}
+
+/* 文件传输 */
+.xfer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 74px 92px;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.xfer .bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-3);
+  overflow: hidden;
+  margin-top: 7px;
+}
+
+.xfer .bar i {
+  display: block;
+  height: 100%;
+  background: var(--ink-2);
+  transition: width var(--dur-slow) var(--ease-out);
+}
+
+.xfer.active .bar i {
+  background: var(--accent);
+}
+
+.xfer .pct,
+.xfer .st {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-3);
+  text-align: right;
+}
+
+/* 命令面板：键盘触发，不做入场动画 */
+.cmdk-wrap {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  justify-content: center;
+  padding-top: 14vh;
+  background: oklch(0% 0 0 / 0.55);
+}
+
+.cmdk {
+  width: 520px;
+  max-width: 92vw;
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+  align-self: flex-start;
+}
+
+.cmdk input {
+  width: 100%;
+  height: 46px;
+  padding: 0 16px;
+  font-size: 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.cmdk-list {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.cmdk-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--ink-2);
+  text-align: left;
+}
+
+.cmdk-item svg {
+  color: var(--ink-3);
+}
+
+.cmdk-item.on {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+.cmdk-item .hint {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-4);
+}
+
+.cmdk-empty {
+  padding: 22px 14px;
+  font-size: 12.5px;
+  color: var(--ink-4);
+  text-align: center;
+}
+
+/* 入场：只做一次，且只是透明度 */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.rise {
+  animation: rise var(--dur-fast) var(--ease-out) both;
+}
+
+/* ---------- 交互限定 ---------- */
+@media (hover: hover) and (pointer: fine) {
+  .btn:hover {
+    background: var(--surface-2);
+    color: var(--ink);
+  }
+  .btn-primary:hover {
+    background: var(--accent);
+    color: var(--accent-ink);
+    filter: brightness(1.08);
+  }
+  .theme-switch button:hover {
+    background: var(--surface-2);
+    color: var(--ink-2);
+  }
+  .nav-item:hover {
+    background: var(--surface-1);
+    color: var(--ink);
+  }
+  .row:hover {
+    background: var(--surface-1);
+  }
+  .icon-btn:hover {
+    background: var(--surface-3);
+    border-color: var(--line);
+    color: var(--ink);
+  }
+  .icon-btn.danger:hover {
+    color: var(--alert);
+    border-color: var(--alert);
+  }
+  .cmdk-item:hover {
+    background: var(--surface-2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .shell {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+  .nav-item span {
+    display: none;
+  }
+  .row {
+    grid-template-columns: minmax(0, 1fr) 96px;
+  }
+  .row .cell.cpus,
+  .row .ops {
+    display: none;
+  }
+  .slots {
+    grid-auto-columns: 44px;
+    grid-auto-flow: row;
+    grid-template-columns: repeat(4, 44px);
+  }
+}
+
+</style>
+  </head>
+  <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <g id="i-server" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <path d="M9 3v18M15 3v18" />
+        </g>
+        <g id="i-terminal" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 17l6-5-6-5" />
+          <path d="M12 19h8" />
+        </g>
+        <g id="i-file" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+          <path d="M14 3v5h5" />
+        </g>
+        <g id="i-shell" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2.5" y="4" width="19" height="16" rx="2" />
+          <path d="M7 9l3 3-3 3M13 15h4" />
+        </g>
+        <g id="i-cpu" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="6" y="6" width="12" height="12" rx="1.5" />
+          <path d="M10 2v4M14 2v4M10 18v4M14 18v4M2 10h4M2 14h4M18 10h4M18 14h4" />
+        </g>
+        <g id="i-play" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M7 4.5l12 7.5-12 7.5z" />
+        </g>
+        <g id="i-stop" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
+        </g>
+        <g id="i-trash" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" />
+        </g>
+        <g id="i-search" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7" />
+          <path d="M20 20l-4.2-4.2" />
+        </g>
+        <g id="i-close" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6 6l12 12M18 6L6 18" />
+        </g>
+        <g id="i-mark" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 7l9-4 9 4-9 4z" />
+          <path d="M3 12l9 4 9-4" />
+          <path d="M3 17l9 4 9-4" />
+        </g>
+      </defs>
+    </svg>
+
+    <header class="topbar">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 24 24"><use href="#i-mark" /></svg>
+        <span class="brand-name">AXVISOR</span>
+        <span class="brand-ver">0.8.2</span>
+      </div>
+      <div class="topbar-mid">
+        <span id="chipArch" class="mono">x86_64</span>
+        <span class="sep">·</span>
+        <span id="chipCpus">8 物理核</span>
+        <span class="sep">·</span>
+        <span id="chipLoad">6 核已划分</span>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn" id="cmdkBtn">
+          <svg viewBox="0 0 24 24" width="14" height="14"><use href="#i-search" /></svg>
+          <span>搜索</span>
+          <span class="mono" style="color: var(--ink-4); font-size: 11px">⌘K</span>
+        </button>
+        <div class="theme-switch" id="themeSwitch">
+          <button data-theme="graphite">石墨</button>
+          <button data-theme="paper">纸白</button>
+          <button data-theme="phosphor">磷光</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="shell">
+      <nav class="rail" id="nav"></nav>
+      <main class="workspace" id="workspace"></main>
+    </div>
+
+    <script>
+/* AxVisor 控制台 v3 — 数据形状沿用真实控制面契约。 */
+
+const PCPUS = 8;
+const BOOT = Date.now() - (3 * 3600 + 42 * 60) * 1000;
+
+const HOST = {
+  version: '0.8.2',
+  arch: 'x86_64',
+  platform: 'x86_64-qemu-q35',
+  cpus: PCPUS,
+  web: 'http://10.0.2.15:8080',
+  listen: '0.0.0.0:8080',
+  features: ['fs', 'http-axum', 'browser-console', 'web-ui'],
+  pool: ['/guest', 'AXVISOR_VM_DIRS'],
+};
+
+const VMS = [
+  { id: 'vm-1', name: 'arceos-shell', status: 'Running', vcpus: 4, mem: 1.0, cpus: [0, 1, 2, 3], entry: 12, park: 3, image: 'arceos-x86_64.img', cmdline: 'LOG=info' },
+  { id: 'vm-2', name: 'linux-guest', status: 'Running', vcpus: 2, mem: 2.0, cpus: [4, 5], entry: 8, park: 1, image: 'linux-x86_64.img', cmdline: 'console=ttyS0' },
+  { id: 'vm-3', name: 'rtos-node', status: 'Paused', vcpus: 2, mem: 0.5, cpus: [0, 1], entry: 5, park: 5, image: 'rtos-x86_64.img', cmdline: '' },
+  { id: 'vm-4', name: 'net-peer', status: 'Stopped', vcpus: 2, mem: 0.5, cpus: [6, 7], entry: 0, park: 0, image: 'net-x86_64.img', cmdline: '' },
+  { id: 'vm-5', name: 'blk-bench', status: 'Failed', vcpus: 1, mem: 4.0, cpus: [7], entry: 2, park: 0, image: 'bench-x86_64.img', cmdline: '', issue: 'duplicate-id' },
+];
+
+const STATE_CN = { Running: '运行中', Paused: '已暂停', Stopped: '已停止', Failed: '失败' };
+
+const VIEWS = [
+  { id: 'vms', label: '客户机', icon: 'i-server', count: () => VMS.length },
+  { id: 'console', label: '网页控制台', icon: 'i-terminal' },
+  { id: 'files', label: '文件传输', icon: 'i-file' },
+  { id: 'shell', label: 'Shell', icon: 'i-shell' },
+];
+const SYS_VIEWS = [{ id: 'host', label: '宿主机', icon: 'i-cpu' }];
+
+const TRANSFERS = [
+  { name: 'rootfs.ext4', total: 268435456, done: 268435456, state: '完成' },
+  { name: 'app.bin', total: 12582912, done: 7340032, state: '传输中' },
+  { name: 'config.toml', total: 4096, done: 0, state: '排队' },
+];
+
+const BOOTLOG = [
+  'Booting AxVisor 0.8.2 (x86_64-qemu-q35)',
+  '  phys memory regions: 3',
+  '  percpu areas: 8 cpus',
+  'Initializing guest vm-1 "arceos-shell"',
+  '  vcpu: 4  pinned: 0-3',
+  '  memory: 1.000 GiB',
+  'VMM setup done, entering guest',
+  '[    0.112] ArceOS starting...',
+  '[    0.118] axhal: x86_64 initialized',
+  '[    0.124] axalloc: bitmap allocator ready',
+  '[    0.131] axtask: 4 tasks spawned',
+  '[    0.140] axfs: mounting ramfs at /',
+  '[    0.152] shell: arceos shell ready',
+];
+
+/* ---------- helpers ---------- */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = (s) =>
+  String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const icon = (id, size = 15) =>
+  `<svg viewBox="0 0 24 24" width="${size}" height="${size}"><use href="#${id}" /></svg>`;
+const memStr = (g) => (g >= 1 ? `${g.toFixed(1)} GiB` : `${Math.round(g * 1024)} MiB`);
+const bytes = (n) =>
+  n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`;
+
+/* 只有仍在调度中的客户机才真正占住物理核 */
+const holds = (vm) => vm.status === 'Running' || vm.status === 'Paused';
+
+/** 每个物理核上的占用者，按客户机在列表中的顺序 */
+const occupancy = () =>
+  Array.from({ length: PCPUS }, (_, cpu) => VMS.filter((v) => holds(v) && v.cpus.includes(cpu)));
+
+const fillVar = (vmId) => `var(--fill-${(VMS.findIndex((v) => v.id === vmId) % 5) + 1})`;
+
+/* 派生量：真实可算，界面不做估算 */
+const usedCpus = () => occupancy().filter((o) => o.length > 0).length;
+const totalVcpus = () => VMS.reduce((n, v) => n + v.vcpus, 0);
+const totalMem = () => VMS.reduce((n, v) => n + v.mem, 0);
+
+const state = {
+  view: 'vms',
+  theme: localStorage.getItem('axvisor.theme') || 'graphite',
+  selected: null,
+  hover: null,
+  cmdkOpen: false,
+  cmdkIndex: 0,
+  query: '',
+};
+
+/* ---------- 顶栏 ---------- */
+function renderChips() {
+  $('#chipArch').textContent = HOST.arch;
+  $('#chipCpus').textContent = `${PCPUS} 物理核`;
+  $('#chipLoad').textContent = `${usedCpus()} 核已划分`;
+}
+
+/* ---------- 侧栏 ---------- */
+function renderNav() {
+  const group = (title, items) =>
+    `<div class="rail-group"><div class="label">${title}</div>${items}</div>`;
+  const item = (v) =>
+    `<button class="nav-item" data-view="${v.id}" aria-current="${state.view === v.id}">
+      ${icon(v.icon)}
+      <span>${v.label}</span>
+      ${v.count ? `<span class="nav-count">${v.count()}</span>` : ''}
+    </button>`;
+  $('#nav').innerHTML =
+    group('能力', VIEWS.map(item).join('')) + group('系统', SYS_VIEWS.map(item).join(''));
+
+  $$('#nav .nav-item').forEach((b) =>
+    b.addEventListener('click', () => switchView(b.dataset.view))
+  );
+}
+
+/* ---------- 锚点：物理核切分 ---------- */
+function renderFigure() {
+  const occ = occupancy();
+  const used = occ.filter((o) => o.length).length;
+  const ratio = (totalVcpus() / PCPUS).toFixed(1);
+
+  const slots = occ
+    .map((owners, cpu) => {
+      const busy = owners.length > 0;
+      const inner = busy
+        ? owners
+            .map(
+              (v) =>
+                `<div class="seg" style="background:${fillVar(v.id)}" title="${esc(v.name)}"><span>${esc(v.name)}</span></div>`
+            )
+            .join('')
+        : '';
+      const lit = state.hover && owners.some((v) => v.id === state.hover) ? ' lit' : '';
+      return `<div class="slot${busy ? '' : ' idle'}${lit}" data-cpu="${cpu}">
+        <div class="slot-box">${inner}</div>
+        <div class="slot-foot"><span>${cpu}</span><span>${busy ? (owners.length > 1 ? '共享' : '') : '空闲'}</span></div>
+      </div>`;
+    })
+    .join('');
+
+  const memSegs = VMS.filter(holds)
+    .map(
+      (v) =>
+        `<div class="seg" style="flex:0 0 ${((v.mem / totalMem()) * 100).toFixed(3)}%;background:${fillVar(v.id)}" title="${esc(v.name)} ${memStr(v.mem)}"></div>`
+    )
+    .join('');
+
+  return `<section class="figure rise">
+    <div class="figure-head">
+      <span class="title">这台机器</span>
+      <span class="meta">${esc(HOST.platform)}</span>
+      <span class="spacer"></span>
+      <div class="legend">
+        <div class="legend-item"><span class="n">${used}<span class="of">/${PCPUS}</span></span><span class="label">核已划分</span></div>
+        <div class="legend-item"><span class="n">${ratio}<span class="of">×</span></span><span class="label">超配比</span></div>
+        <div class="legend-item"><span class="n">${VMS.length}</span><span class="label">客户机</span></div>
+      </div>
+    </div>
+
+    <div class="slots${state.hover ? ' focusing' : ''}" id="slots">${slots}</div>
+
+    <div class="membar">${memSegs}</div>
+    <div class="membar-note">
+      已分配 <span class="mono">${memStr(totalMem())}</span> 内存
+      <span class="q">· 宿主总量不由控制面导出，界面不做估算</span>
+    </div>
+  </section>`;
+}
+
+/* ---------- 客户机列表 ---------- */
+function renderRows() {
+  const rows = VMS.map((v) => {
+    const cls = v.status.toLowerCase();
+    return `<div class="row" data-vm="${v.id}" tabindex="0">
+      <span class="name">${esc(v.name)}</span>
+      <span class="state ${cls}"><span class="dot"></span>${STATE_CN[v.status]}</span>
+      <span class="cell">${v.vcpus} vCPU · ${memStr(v.mem)}</span>
+      <span class="cell cpus">${v.cpus.join(', ')}</span>
+      <span class="ops">
+        <button class="icon-btn" data-act="start" title="启动">${icon('i-play', 14)}</button>
+        <button class="icon-btn" data-act="stop" title="停止">${icon('i-stop', 14)}</button>
+        <button class="icon-btn danger" data-act="del" title="销毁">${icon('i-trash', 14)}</button>
+      </span>
+    </div>`;
+  }).join('');
+
+  return `<section class="section">
+    <div class="section-head">
+      <span class="title">客户机</span>
+      <span class="count">${VMS.length}</span>
+      <span class="spacer" style="margin-left:auto"></span>
+      <button class="btn btn-primary" id="newVm">新建客户机</button>
+    </div>
+    <div class="rows">${rows}</div>
+  </section>`;
+}
+
+/* ---------- 视图 ---------- */
+function viewVms() {
+  return renderFigure() + renderRows();
+}
+
+function viewConsole() {
+  return `<div class="term">
+    <div class="term-head">
+      <span class="title" style="font-size:15px;font-weight:500">串口控制台</span>
+      <span class="meta mono" style="font-size:11.5px;color:var(--ink-3)">arceos-shell · /ws/console/vm-1</span>
+      <span style="margin-left:auto"></span>
+      <button class="btn">断开</button>
+    </div>
+    <div class="term-body" id="termBody"></div>
+  </div>`;
+}
+
+function viewFiles() {
+  return `<div class="pane">
+    <h2>文件传输</h2>
+    <div class="sub">暂存区中的文件，可写入客户机文件系统。</div>
+    ${TRANSFERS.map(
+      (t) => `<div class="xfer${t.state === '传输中' ? ' active' : ''}">
+        <div>
+          <div style="font-size:13.5px">${esc(t.name)}</div>
+          <div class="bar"><i style="width:${((t.done / t.total) * 100).toFixed(1)}%"></i></div>
+        </div>
+        <span class="st">${t.state}</span>
+        <span class="pct">${bytes(t.done)} / ${bytes(t.total)}</span>
+      </div>`
+    ).join('')}
+  </div>`;
+}
+
+function viewShell() {
+  return `<div class="pane">
+    <h2>Shell</h2>
+    <div class="sub">在 Hypervisor 上直接执行命令。</div>
+    <div class="term-body" id="shBody" style="border:1px solid var(--line-soft);border-radius:5px;height:280px;padding:14px 16px">
+      <div><span class="ts" style="color:var(--ink-4)">$</span> <span class="hi">uname -a</span></div>
+      <div style="color:var(--ink-2)">AxVisor 0.8.2 x86_64-qemu-q35</div>
+      <div><span class="ts" style="color:var(--ink-4)">$</span> <span class="hi">help</span></div>
+      <div style="color:var(--ink-2)">可用命令：help · version · uname · ps · free · vm</div>
+    </div>
+  </div>`;
+}
+
+function viewHost() {
+  const up = Math.floor((Date.now() - BOOT) / 1000);
+  const h = Math.floor(up / 3600);
+  const m = Math.floor((up % 3600) / 60);
+  const kv = (k, v) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+  return `<div class="pane">
+    <h2>宿主机</h2>
+    <div class="sub">运行 AxVisor 的物理机器。</div>
+    ${kv('版本', HOST.version)}
+    ${kv('架构', HOST.arch)}
+    ${kv('平台', HOST.platform)}
+    ${kv('物理核', PCPUS)}
+    ${kv('运行时长', `${h} 小时 ${m} 分`)}
+    ${kv('Web 控制台', HOST.web)}
+    ${kv('监听地址', HOST.listen)}
+    ${kv(
+      '构建特性',
+      `<span class="chips">${HOST.features.map((f) => `<span class="chip">${f}</span>`).join('')}</span>`
+    )}
+    ${kv('配置池', HOST.pool.map((p) => `<span class="chip">${esc(p)}</span>`).join(' '))}
+    ${kv('已划分核', `${usedCpus()} / ${PCPUS}`)}
+    ${kv('客户机 vCPU 合计', `${totalVcpus()}（超配比 ${(totalVcpus() / PCPUS).toFixed(1)}×）`)}
+    ${kv('已分配内存', memStr(totalMem()))}
+    ${kv('宿主内存总量', '<span style="color:var(--ink-3)">不由控制面导出</span>')}
+  </div>`;
+}
+
+const RENDER = { vms: viewVms, console: viewConsole, files: viewFiles, shell: viewShell, host: viewHost };
+
+/* 高频动作：视图切换不加动画 */
+function switchView(id) {
+  if (!RENDER[id]) return;
+  state.view = id;
+  state.hover = null;
+  $$('#nav .nav-item').forEach((b) => b.setAttribute('aria-current', String(b.dataset.view === id)));
+  $('#workspace').innerHTML = RENDER[id]();
+  bindWorkspace();
+}
+
+function bindWorkspace() {
+  renderChips();
+  $$('.row').forEach((row) => {
+    const id = row.dataset.vm;
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('[data-act]')) return;
+      openDrawer(id);
+    });
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') openDrawer(id);
+    });
+    /* 悬停客户机 → 它的物理核亮起，其余退让 */
+    row.addEventListener('mouseenter', () => focusVm(id));
+    row.addEventListener('mouseleave', () => focusVm(null));
+  });
+  $$('[data-act]').forEach((b) =>
+    b.addEventListener('click', (e) => e.stopPropagation())
+  );
+  const slots = $('#slots');
+  if (slots) {
+    slots.addEventListener('mouseleave', () => focusVm(null));
+  }
+  if (state.view === 'console') startConsole();
+  if (state.view === 'files') tickTransfers();
+}
+
+function focusVm(id) {
+  state.hover = id;
+  const slots = $('#slots');
+  if (!slots) return;
+  slots.classList.toggle('focusing', !!id);
+  $$('.slot', slots).forEach((s) => {
+    const owners = occupancy()[Number(s.dataset.cpu)];
+    s.classList.toggle('lit', !!id && owners.some((v) => v.id === id));
+  });
+}
+
+/* ---------- 抽屉 ---------- */
+function openDrawer(id) {
+  const v = VMS.find((x) => x.id === id);
+  if (!v) return;
+  state.selected = id;
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `<div class="scrim" data-close></div>
+    <aside class="drawer" role="dialog" aria-label="${esc(v.name)}">
+      <div class="drawer-head">
+        <div style="flex:1">
+          <div class="t">${esc(v.name)}</div>
+          <div class="s"><span class="state ${v.status.toLowerCase()}"><span class="dot"></span>${STATE_CN[v.status]}</span></div>
+        </div>
+        <button class="icon-btn" data-close aria-label="关闭">${icon('i-close', 15)}</button>
+      </div>
+      <div class="drawer-body">
+        <div class="bignums">
+          <div class="bignum"><div class="n">${v.entry}</div><div class="label">进入 guest</div></div>
+          <div class="bignum"><div class="n">${v.park}</div><div class="label">park 次数</div></div>
+        </div>
+        ${[
+          ['ID', v.id],
+          ['vCPU', v.vcpus],
+          ['内存', memStr(v.mem)],
+          ['镜像', v.image],
+          ['内核参数', v.cmdline || '—'],
+        ]
+          .map(([k, val]) => `<div class="field"><span class="k">${k}</span><span class="v">${esc(val)}</span></div>`)
+          .join('')}
+        <div class="field">
+          <span class="k">物理核亲和</span>
+          <span class="v"><span class="pin-grid">${Array.from(
+            { length: PCPUS },
+            (_, i) => `<span class="pin${v.cpus.includes(i) ? ' on' : ''}">${i}</span>`
+          ).join('')}</span></span>
+        </div>
+        ${v.issue ? `<div class="notice">配置问题：<span class="mono">${esc(v.issue)}</span> — 该客户机的 ID 与池中另一项重复，未加载。</div>` : ''}
+      </div>
+    </aside>`;
+  document.body.appendChild(wrap);
+
+  requestAnimationFrame(() => {
+    $('.scrim', wrap).classList.add('in');
+    $('.drawer', wrap).classList.add('in');
+  });
+
+  $$('[data-close]', wrap).forEach((el) => el.addEventListener('click', () => closeDrawer(wrap)));
+}
+
+function closeDrawer(wrap) {
+  const scrim = $('.scrim', wrap);
+  const drawer = $('.drawer', wrap);
+  if (scrim) scrim.classList.remove('in');
+  if (drawer) drawer.classList.remove('in');
+  setTimeout(() => wrap.remove(), 400);
+  state.selected = null;
+}
+
+/* ---------- 命令面板：键盘触发，无入场动画 ---------- */
+function openCmdk() {
+  if (state.cmdkOpen) return;
+  state.cmdkOpen = true;
+  state.query = '';
+  state.cmdkIndex = 0;
+  const wrap = document.createElement('div');
+  wrap.className = 'cmdk-wrap';
+  wrap.innerHTML = `<div class="cmdk" role="dialog" aria-label="命令面板">
+    <input id="cmdkInput" placeholder="跳转到面板或客户机…" />
+    <div class="cmdk-list" id="cmdkList"></div>
+  </div>`;
+  document.body.appendChild(wrap);
+  const close = () => {
+    wrap.remove();
+    state.cmdkOpen = false;
+  };
+  wrap.addEventListener('click', (e) => {
+    if (e.target === wrap) close();
+  });
+  $('#cmdkInput', wrap).addEventListener('input', (e) => {
+    state.query = e.target.value;
+    state.cmdkIndex = 0;
+    renderCmdk();
+  });
+  $('#cmdkInput', wrap).addEventListener('keydown', (e) => {
+    const items = cmdkItems();
+    if (e.key === 'Escape') return close();
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      state.cmdkIndex = (state.cmdkIndex + 1) % items.length;
+      renderCmdk();
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      state.cmdkIndex = (state.cmdkIndex - 1 + items.length) % items.length;
+      renderCmdk();
+    }
+    if (e.key === 'Enter') {
+      const it = items[state.cmdkIndex];
+      if (it) {
+        close();
+        it.run();
+      }
+    }
+  });
+  $('#cmdkInput', wrap).focus();
+  renderCmdk();
+}
+
+function cmdkItems() {
+  const q = state.query.trim().toLowerCase();
+  const views = [...VIEWS, ...SYS_VIEWS].map((v) => ({
+    icon: v.icon,
+    label: v.label,
+    hint: '面板',
+    run: () => switchView(v.id),
+  }));
+  const vms = VMS.map((v) => ({
+    icon: 'i-server',
+    label: v.name,
+    hint: STATE_CN[v.status],
+    run: () => {
+      switchView('vms');
+      setTimeout(() => openDrawer(v.id), 60);
+    },
+  }));
+  return [...views, ...vms].filter((i) => !q || i.label.toLowerCase().includes(q));
+}
+
+function renderCmdk() {
+  const list = $('#cmdkList');
+  if (!list) return;
+  const items = cmdkItems();
+  if (!items.length) {
+    list.innerHTML = `<div class="cmdk-empty">没有匹配项</div>`;
+    return;
+  }
+  list.innerHTML = items
+    .map(
+      (it, i) => `<button class="cmdk-item${i === state.cmdkIndex ? ' on' : ''}" data-i="${i}">
+        ${icon(it.icon, 14)}<span>${esc(it.label)}</span><span class="hint">${esc(it.hint)}</span>
+      </button>`
+    )
+    .join('');
+  $$('.cmdk-item', list).forEach((b) =>
+    b.addEventListener('click', () => {
+      const it = items[Number(b.dataset.i)];
+      $('.cmdk-wrap').remove();
+      state.cmdkOpen = false;
+      it.run();
+    })
+  );
+}
+
+/* ---------- 控制台日志流 ---------- */
+let consoleTimer = null;
+function startConsole() {
+  const body = $('#termBody');
+  if (!body) return;
+  let i = 0;
+  clearInterval(consoleTimer);
+  const step = () => {
+    if (!document.body.contains(body)) return clearInterval(consoleTimer);
+    if (i >= BOOTLOG.length) return clearInterval(consoleTimer);
+    const line = BOOTLOG[i++];
+    const div = document.createElement('div');
+    div.innerHTML = `<span class="ts">${new Date().toLocaleTimeString('zh-CN', { hour12: false })}</span><span class="${line.startsWith('[') ? '' : 'hi'}">${esc(line)}</span>`;
+    body.appendChild(div);
+    body.scrollTop = body.scrollHeight;
+  };
+  step();
+  consoleTimer = setInterval(step, 260);
+}
+
+/* ---------- 文件传输推进 ---------- */
+function tickTransfers() {
+  const t = TRANSFERS.find((x) => x.state === '传输中');
+  if (!t || t.done >= t.total) return;
+  const timer = setInterval(() => {
+    t.done = Math.min(t.total, t.done + 1_400_000);
+    if (t.done >= t.total) {
+      t.state = '完成';
+      clearInterval(timer);
+    }
+    if (state.view === 'files') {
+      $('#workspace').innerHTML = viewFiles();
+      bindWorkspace();
+    } else {
+      clearInterval(timer);
+    }
+  }, 700);
+}
+
+/* ---------- 主题 ---------- */
+function setTheme(name) {
+  state.theme = name;
+  document.documentElement.dataset.theme = name;
+  localStorage.setItem('axvisor.theme', name);
+  $$('#themeSwitch button').forEach((b) => b.classList.toggle('on', b.dataset.theme === name));
+}
+
+/* ---------- 启动 ---------- */
+renderNav();
+$$('#themeSwitch button').forEach((b) => b.addEventListener('click', () => setTheme(b.dataset.theme)));
+$('#cmdkBtn').addEventListener('click', openCmdk);
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    openCmdk();
+  }
+  if (e.key === 'Escape' && state.cmdkOpen) {
+    $('.cmdk-wrap')?.remove();
+    state.cmdkOpen = false;
+  }
+});
+setTheme(state.theme);
+switchView('vms');
+
+</script>
+  </body>
+</html>

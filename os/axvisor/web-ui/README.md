@@ -51,6 +51,8 @@
 }
 ```
 
+除 `panels` 之外，声明还携带一个 `host` 对象：这台 hypervisor 所在机器的事实（版本、架构、平台、物理核数、运行时长、构建特性）。它随声明一起发布，是因为外壳要把物理核数交给客户机面板去画超配比，而外壳不得点名任何面板 `kind`；`host` 面板自己要刷新的运行时长则走它的 `GET /api/host` 动作，两者由内核侧同一个函数生成，不会各说各话。
+
 `kind` 的取值集合是前端渲染器注册表的键集合的子集。若内核声明了一个前端还不认识的 `kind`，导航仍然显示它，面板区域降级为 JSON 视图；这样内核侧可以先于前端增加能力，而不会把整个界面打坏。
 
 ### 2.2 路径来自能力声明
@@ -112,10 +114,16 @@ graph LR
 | `src/shell/App.tsx` | 读取能力声明、生成导航与标签、注入访问器、接入事件源 |
 | `src/shell/Nav.tsx` | 左侧导航：面板列表来自声明，客户机列表来自事件通道 |
 | `src/shell/Tabs.tsx` | 顶部分页：每个标签一个面板实例，常驻挂载 |
+| `src/shell/CommandPalette.tsx` | 命令面板：`⌘K`/`Ctrl+K` 按声明打开面板或客户机终端 |
+| `src/shell/ThemeToggle.tsx` | 深浅色切换：只改 `<html>` 上的一个类 |
 | `src/shell/PanelErrorBoundary.tsx` | 每个标签的渲染错误边界 |
 | `src/panels/registry.ts` | 渲染器注册表，按 `kind` 懒加载面板组件 |
 | `src/panels/FallbackPanel.tsx` | 未知 `kind` 降级为 JSON 视图 |
 | `src/panels/vms/VmsPanel.tsx` | 客户机面板：登记表、配置池、目录浏览、生命周期动作 |
+| `src/panels/vms/Overview.tsx` | 客户机面板的总量指标：台数、vCPU 超配比、内存合计、进入次数 |
+| `src/panels/vms/AffinityMatrix.tsx` | vCPU 亲和矩阵：客户机 × 物理核，一格一个绑定 |
+| `src/panels/vms/DetailDrawer.tsx` | 单台客户机详情抽屉：进度计数与逐 vCPU 亲和 |
+| `src/panels/host/HostPanel.tsx` | 宿主机面板：构建、机器与运行时长；内存一项明确说明不导出 |
 | `src/panels/console/ConsolePanel.tsx` | 客户机终端面板：每通道一个标签，独占通道管理 |
 | `src/panels/shell/ShellPanel.tsx` | 管理台自身的终端面板 |
 | `src/api/types.ts` | 契约类型与错误描述，区分连接失败与 HTTP 错误 |
@@ -124,7 +132,9 @@ graph LR
 | `src/api/ws.ts` | 终端通道：按字符边界分块，流式解码 |
 | `src/capability/manifest.ts` | 引导路径常量与契约版本校验 |
 | `src/capability/accessor.ts` | 声明到访问器：`url()`、`maybeUrl()`、`bind()` |
-| `src/lib/status.ts` | 客户机状态到徽章配色的映射 |
+| `src/lib/status.ts` | 客户机状态到徽章配色的映射（深浅两套） |
+| `src/lib/format.ts` | 运行时长与内存的显示换算，各面板共用一份 |
+| `src/lib/theme.ts` | 配色方案：`<html>` 上的一个类与跨刷新的记忆 |
 | `src/lib/lifecycle.ts` | 动作后轮询到终态 |
 | `src/lib/vcpu.ts` | CPU 亲和性位掩码解码 |
 | `src/lib/lanes.ts` | 终端通道纯函数：标签组推导、抢输回退、合并与分离 |

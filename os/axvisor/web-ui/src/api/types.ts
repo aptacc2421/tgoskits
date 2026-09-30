@@ -73,6 +73,41 @@ export interface PanelLink {
 export interface Manifest {
   proto: number
   panels: PanelMeta[]
+  /**
+   * The machine this hypervisor runs on, published by the descriptor next to
+   * the panels.
+   *
+   * It is here so the shell can hand it to every panel without naming a panel
+   * kind: a guest panel draws its overcommit ratio against the physical CPU
+   * count, and a panel may not ask another resource's operations for one.
+   */
+  host?: HostInfo | null
+}
+
+/**
+ * `GET /api/host`: the machine the hypervisor is running on.
+ *
+ * The host panel is the one panel that is never about a guest: it reports the
+ * build, the board, the physical CPUs and how long this instance has been up.
+ * Host *memory* is absent on purpose — the control plane does not export it,
+ * because `axvm::host` publishes only its `cpu` module — and the panel says so
+ * rather than showing a figure this build cannot know.
+ */
+export interface HostInfo {
+  /** `CARGO_PKG_VERSION` of the running binary. */
+  version: string
+  /** Target architecture; empty when the build did not report one. */
+  arch: string
+  /** Board the build targets; empty when the build did not report one. */
+  platform: string
+  /** Host CPUs this build was configured for. */
+  smp: number
+  /** Physical CPUs the runtime reports: `axvm::host::cpu::count()`. */
+  phys_cpu_count: number
+  /** Seconds since the kernel entry point; advances between two reads. */
+  uptime_secs: number
+  /** Control-plane features this binary was built with. */
+  features: string[]
 }
 
 /** Context handed to every panel by the shell. */
@@ -85,6 +120,15 @@ export interface PanelProps {
   resources?: VmSummary[]
   /** VM the navigation asked the panel to focus, set by clicking a resource entry. */
   focusVm?: number | null
+  /**
+   * The machine the hypervisor runs on, `null` when this build declares no host
+   * panel or the read failed.
+   *
+   * Injected for the same reason the registry snapshot is: a panel may not name
+   * another panel's operations, so a guest panel that wants the physical CPU
+   * count to draw an overcommit ratio cannot ask the host resource itself.
+   */
+  host?: HostInfo | null
   /**
    * Shared transfer service, `null` when this build declares no `files` panel
    * (no filesystem). The shell builds the one instance from the `files`

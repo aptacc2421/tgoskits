@@ -7,4 +7,5 @@
 
 #[cfg(feature = "fs")]
 pub mod files;
+pub mod host;
 pub mod vm;

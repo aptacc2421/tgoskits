@@ -1,0 +1,2029 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="stage">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AxVisor 控制台</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+/* ============================================================
+   AxVisor 控制台 — v4
+   立场：这不是仪表盘，是一个正在运行的系统的舞台。
+   去掉实心色块。用光（渐变、辉光、流动的前沿）表达占用。
+   用流式输出表达"活着"。用大排版承载主张。
+   ============================================================ */
+
+/* ---------- 主题 ---------- */
+[data-theme='stage'] {
+  --bg: oklch(12% 0.006 265);
+  --bg-2: oklch(15% 0.007 265);
+  --surface: oklch(17.5% 0.008 265);
+  --surface-2: oklch(22% 0.009 265);
+  --line: oklch(29% 0.010 265);
+  --line-soft: oklch(21% 0.008 265);
+
+  --ink: oklch(97% 0.002 265);
+  --ink-2: oklch(78% 0.005 265);
+  --ink-3: oklch(58% 0.008 265);
+  --ink-4: oklch(42% 0.009 265);
+
+  --accent: oklch(82% 0.13 84);
+  --accent-2: oklch(72% 0.15 62);
+  --accent-glow: oklch(82% 0.13 84 / 0.42);
+  --accent-ink: oklch(14% 0.03 84);
+
+  --signal: oklch(78% 0.08 175);
+  --signal-glow: oklch(78% 0.08 175 / 0.35);
+  --alert: oklch(64% 0.19 25);
+
+  --glow: oklch(82% 0.13 84 / 0.055);
+  --sheen: oklch(97% 0.002 265 / 0.09);
+}
+
+[data-theme='daylight'] {
+  --bg: oklch(98% 0.003 265);
+  --bg-2: oklch(96% 0.003 265);
+  --surface: oklch(99% 0.002 265);
+  --surface-2: oklch(93% 0.004 265);
+  --line: oklch(86% 0.006 265);
+  --line-soft: oklch(91% 0.004 265);
+
+  --ink: oklch(20% 0.008 265);
+  --ink-2: oklch(36% 0.009 265);
+  --ink-3: oklch(50% 0.010 265);
+  --ink-4: oklch(64% 0.009 265);
+
+  --accent: oklch(52% 0.19 30);
+  --accent-2: oklch(58% 0.16 45);
+  --accent-glow: oklch(52% 0.19 30 / 0.22);
+  --accent-ink: oklch(99% 0.002 265);
+
+  --signal: oklch(48% 0.08 165);
+  --signal-glow: oklch(48% 0.08 165 / 0.18);
+  --alert: oklch(48% 0.19 25);
+
+  --glow: oklch(52% 0.19 30 / 0.05);
+  --sheen: oklch(20% 0.008 265 / 0.05);
+}
+
+[data-theme='phosphor'] {
+  --bg: oklch(13% 0.010 165);
+  --bg-2: oklch(16% 0.011 165);
+  --surface: oklch(19% 0.012 165);
+  --surface-2: oklch(24% 0.013 165);
+  --line: oklch(31% 0.014 165);
+  --line-soft: oklch(23% 0.012 165);
+
+  --ink: oklch(95% 0.012 165);
+  --ink-2: oklch(80% 0.015 165);
+  --ink-3: oklch(60% 0.016 165);
+  --ink-4: oklch(44% 0.014 165);
+
+  --accent: oklch(82% 0.15 148);
+  --accent-2: oklch(74% 0.14 165);
+  --accent-glow: oklch(82% 0.15 148 / 0.40);
+  --accent-ink: oklch(14% 0.03 148);
+
+  --signal: oklch(82% 0.11 148);
+  --signal-glow: oklch(82% 0.11 148 / 0.32);
+  --alert: oklch(66% 0.19 25);
+
+  --glow: oklch(82% 0.15 148 / 0.05);
+  --sheen: oklch(95% 0.012 165 / 0.08);
+}
+
+/* ---------- token ---------- */
+:root {
+  --dur-quick: 150ms;
+  --dur-fast: 250ms;
+  --dur-slow: 420ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  --font-ui: 'Archivo', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --topbar-h: 52px;
+  --statusbar-h: 34px;
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+}
+
+/* 舞台聚光灯：一处柔和的径向光，不是紫蓝渐变，不是粒子 */
+body::before {
+  content: '';
+  position: fixed;
+  top: -34vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 130vw;
+  height: 78vh;
+  background: radial-gradient(ellipse 50% 60% at 50% 50%, var(--glow), transparent 72%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+input {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  outline: 0;
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+.mono {
+  font-family: var(--font-mono);
+}
+
+.label {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+  position: relative;
+  z-index: 3;
+  height: var(--topbar-h);
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--line-soft);
+  background: color-mix(in oklab, var(--bg) 78%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+.brand-mark {
+  width: 16px;
+  height: 16px;
+  align-self: center;
+  color: var(--accent);
+}
+.brand-name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+}
+.brand-ver {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-4);
+}
+.topbar-mid {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.topbar-mid .sep {
+  color: var(--ink-4);
+}
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 5px;
+  font-size: 12px;
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+  transition: background var(--dur-quick) var(--ease-out),
+    color var(--dur-quick) var(--ease-out), border-color var(--dur-quick) var(--ease-out);
+}
+.btn:active {
+  transform: scale(0.97);
+}
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 500;
+  box-shadow: 0 0 22px -6px var(--accent-glow);
+}
+
+.theme-switch {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.theme-switch button {
+  padding: 0 9px;
+  height: 28px;
+  font-size: 11px;
+  color: var(--ink-3);
+  transition: background var(--dur-quick) var(--ease-out), color var(--dur-quick) var(--ease-out);
+}
+.theme-switch button.on {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+/* ---------- 骨架 ---------- */
+.shell {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 196px minmax(0, 1fr);
+  height: calc(100vh - var(--topbar-h) - var(--statusbar-h));
+}
+
+.rail {
+  border-right: 1px solid var(--line-soft);
+  padding: 18px 10px;
+  overflow-y: auto;
+}
+.rail-group {
+  padding: 14px 8px 6px;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 33px;
+  padding: 0 10px;
+  border-radius: 5px;
+  font-size: 13px;
+  color: var(--ink-2);
+  transition: background var(--dur-quick) var(--ease-out), color var(--dur-quick) var(--ease-out);
+}
+.nav-item svg {
+  color: var(--ink-3);
+  transition: color var(--dur-quick) var(--ease-out);
+}
+.nav-item[aria-current='true'] {
+  background: var(--surface);
+  color: var(--ink);
+}
+.nav-item[aria-current='true'] svg {
+  color: var(--accent);
+}
+.nav-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-4);
+}
+
+.workspace {
+  overflow-y: auto;
+  padding: 0;
+}
+
+/* ---------- 主张：大排版 ---------- */
+.hero {
+  padding: 38px 34px 30px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.hero-stmt {
+  font-size: 46px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  line-height: 1.14;
+  margin: 0;
+  max-width: none;
+}
+.hero-stmt .dim {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+/* 渐变发光文字：不是紫蓝，是琥珀能量 */
+.hero-stmt .num {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  background: linear-gradient(115deg, var(--accent) 20%, var(--accent-2) 85%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.hero-sub {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+.hero-sub .k {
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+}
+
+/* ---------- 主视觉：发光轨道（不再是方块） ---------- */
+.stage {
+  margin-top: 34px;
+  padding: 24px 26px 22px;
+  border-radius: 12px;
+  border: 1px solid var(--line-soft);
+  background:
+    radial-gradient(ellipse 70% 130% at 50% -20%, var(--glow), transparent 70%),
+    linear-gradient(180deg, var(--sheen), transparent 55%);
+  box-shadow: 0 24px 60px -30px oklch(0% 0 0 / 0.55);
+}
+
+.stage-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.stage-head .t {
+  font-size: 12px;
+  font-weight: 500;
+}
+.stage-head .m {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+.stage-head .r {
+  margin-left: auto;
+  display: flex;
+  gap: 22px;
+}
+.stage-head .r div {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+.stage-head .r .n {
+  font-family: var(--font-mono);
+  font-size: 26px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+/* 轨道本体 */
+.track {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 5px;
+}
+
+.lane {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+/* 细长发光条，替代方块 */
+.bar {
+  height: 15px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  overflow: hidden;
+  position: relative;
+}
+
+.lane.idle .bar {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--line);
+}
+
+.bar i {
+  display: block;
+  height: 100%;
+  border-radius: 7px;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  box-shadow: 0 0 22px -4px var(--accent-glow);
+  position: relative;
+  overflow: hidden;
+}
+
+/* 流动的前沿：能量在走，不是静止的色块 */
+.bar i::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 20%,
+    var(--sheen) 45%,
+    var(--sheen) 55%,
+    transparent 80%
+  );
+  background-size: 220% 100%;
+  animation: sweep 2.6s linear infinite;
+}
+
+@keyframes sweep {
+  from {
+    background-position: 180% 0;
+  }
+  to {
+    background-position: -80% 0;
+  }
+}
+
+/* 分时共享：两条更细的光带 */
+.lane.shared .bar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px;
+  height: 20px;
+}
+.lane.shared .bar i {
+  height: auto;
+  flex: 1;
+  border-radius: 4px;
+}
+.lane.shared .bar i:nth-child(2) {
+  background: linear-gradient(90deg, var(--signal), var(--accent-2));
+  box-shadow: 0 0 14px -4px var(--signal-glow);
+}
+
+.lane-foot {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-4);
+  padding: 0 1px;
+}
+
+.track.focusing .lane {
+  opacity: 0.24;
+}
+.track.focusing .lane.lit {
+  opacity: 1;
+}
+.lane.lit .bar {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-glow), 0 0 20px -6px var(--accent-glow);
+}
+
+/* 内存：同样用光带 */
+.memlane {
+  display: flex;
+  height: 11px;
+  margin-top: 18px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+}
+.memlane i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  box-shadow: 0 0 14px -4px var(--accent-glow);
+}
+.memlane i:nth-child(2) {
+  background: linear-gradient(90deg, var(--accent), var(--signal));
+}
+.memlane i:nth-child(3) {
+  background: linear-gradient(90deg, var(--signal), var(--surface-2));
+}
+.stage-note {
+  margin-top: 9px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+.stage-note .q {
+  color: var(--ink-4);
+}
+
+/* ---------- 客户机列表 ---------- */
+.section {
+  padding: 26px 34px 34px;
+}
+.section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.section-head .title {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.section-head .count {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-4);
+}
+
+.rows {
+  margin-top: 8px;
+}
+.row {
+  display: grid;
+  grid-template-columns: 128px 96px 150px 90px 100px 74px;
+  align-items: center;
+  gap: 16px;
+  height: 48px;
+  padding: 0 10px;
+  margin: 0 -10px;
+  border-radius: 6px;
+  border-bottom: 1px solid var(--line-soft);
+  cursor: pointer;
+  transition: background var(--dur-quick) var(--ease-out),
+    box-shadow var(--dur-quick) var(--ease-out);
+}
+.row:last-child {
+  border-bottom: 0;
+}
+.row .name {
+  font-size: 13.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row .cell {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.row .ops {
+  display: flex;
+  gap: 3px;
+  justify-content: flex-end;
+  opacity: 0;
+  transition: opacity var(--dur-quick) var(--ease-out);
+}
+.row:hover .ops,
+.row:focus-within .ops {
+  opacity: 1;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 27px;
+  height: 27px;
+  border-radius: 5px;
+  color: var(--ink-2);
+  border: 1px solid transparent;
+  transition: background var(--dur-quick) var(--ease-out),
+    border-color var(--dur-quick) var(--ease-out), color var(--dur-quick) var(--ease-out);
+}
+.icon-btn:active {
+  transform: scale(0.94);
+}
+.icon-btn.danger {
+  color: var(--alert);
+}
+
+/* 状态：一个光点，不是徽章 */
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-4);
+  flex: none;
+}
+.state.running .dot {
+  background: var(--signal);
+  box-shadow: 0 0 10px 0 var(--signal-glow);
+}
+.state.running {
+  color: var(--ink);
+}
+.state.failed .dot {
+  background: var(--alert);
+  box-shadow: 0 0 10px 0 oklch(64% 0.19 25 / 0.35);
+}
+.state.failed {
+  color: var(--alert);
+}
+
+/* ---------- 底部状态条：流式事件 ---------- */
+.statusbar {
+  position: relative;
+  z-index: 3;
+  height: var(--statusbar-h);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 22px;
+  border-top: 1px solid var(--line-soft);
+  background: var(--bg-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+.statusbar .live {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink-2);
+}
+.statusbar .live .dot {
+  width: 6px;
+  height: 6px;
+  background: var(--signal);
+  box-shadow: 0 0 9px 0 var(--signal-glow);
+  animation: breathe 2.4s ease-in-out infinite;
+}
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.42;
+  }
+}
+.statusbar .ev {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.statusbar .ev .ts {
+  color: var(--ink-4);
+  margin-right: 8px;
+}
+.statusbar .caret {
+  display: inline-block;
+  width: 6px;
+  height: 12px;
+  background: var(--accent);
+  animation: blink 1.1s steps(1) infinite;
+  vertical-align: -2px;
+  margin-left: 3px;
+}
+@keyframes blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+.statusbar .right {
+  margin-left: auto;
+  display: flex;
+  gap: 16px;
+  color: var(--ink-4);
+}
+
+/* ---------- 抽屉 ---------- */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: oklch(0% 0 0 / 0.55);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+  z-index: 40;
+}
+.scrim.in {
+  opacity: 1;
+}
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 404px;
+  max-width: 92vw;
+  background: var(--bg-2);
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform var(--dur-slow) var(--ease-drawer);
+  z-index: 41;
+  box-shadow: -30px 0 60px -30px oklch(0% 0 0 / 0.6);
+}
+.drawer.in {
+  transform: translateX(0);
+}
+.drawer-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.drawer-head .t {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.drawer-head .s {
+  margin-top: 6px;
+}
+.drawer-body {
+  padding: 20px 24px 30px;
+  overflow-y: auto;
+}
+.bignums {
+  display: flex;
+  gap: 34px;
+  padding: 2px 0 20px;
+}
+.bignum .n {
+  font-family: var(--font-mono);
+  font-size: 34px;
+  line-height: 1;
+  font-weight: 500;
+}
+.bignum .k {
+  margin-top: 8px;
+}
+.field {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 14px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+.field:last-of-type {
+  border-bottom: 0;
+}
+.field .k {
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+.field .v {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  word-break: break-all;
+}
+.pin-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.pin {
+  width: 27px;
+  height: 27px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  color: var(--ink-3);
+}
+.pin.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: 0 0 14px -4px var(--accent-glow);
+}
+.notice {
+  margin-top: 18px;
+  padding: 12px 14px;
+  border-left: 2px solid var(--alert);
+  background: var(--surface);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+/* ---------- 通用面板 ---------- */
+.pane {
+  padding: 34px;
+  max-width: 920px;
+}
+.pane h2 {
+  margin: 0 0 6px;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+.pane .sub {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  margin-bottom: 24px;
+}
+.kv {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 14px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+.kv .k {
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+.kv .v {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.chip {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+}
+
+/* 终端：流式是这个产品的本来面目 */
+.term {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.term-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 34px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.term-head .t {
+  font-size: 15px;
+  font-weight: 500;
+}
+.term-head .m {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+.term-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 22px 34px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: var(--ink-2);
+}
+.term-body .ts {
+  color: var(--ink-4);
+  margin-right: 12px;
+}
+.term-body .hi {
+  color: var(--ink);
+}
+.term-body .ok {
+  color: var(--signal);
+}
+.term-line {
+  animation: lineIn var(--dur-fast) var(--ease-out) both;
+}
+@keyframes lineIn {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 文件传输 */
+.xfer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 78px 96px;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.xfer .bar {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  overflow: hidden;
+  margin-top: 8px;
+}
+.xfer .bar i {
+  display: block;
+  height: 100%;
+  background: var(--ink-3);
+  transition: width var(--dur-slow) var(--ease-out);
+}
+.xfer.active .bar i {
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  box-shadow: 0 0 12px -3px var(--accent-glow);
+}
+.xfer .pct,
+.xfer .st {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-3);
+  text-align: right;
+}
+
+/* 命令面板：键盘触发，无入场动画 */
+.cmdk-wrap {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: center;
+  padding-top: 15vh;
+  background: oklch(0% 0 0 / 0.6);
+  backdrop-filter: blur(3px);
+}
+.cmdk {
+  width: 540px;
+  max-width: 92vw;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  align-self: flex-start;
+  box-shadow: 0 30px 70px -20px oklch(0% 0 0 / 0.7);
+}
+.cmdk input {
+  width: 100%;
+  height: 48px;
+  padding: 0 18px;
+  font-size: 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.cmdk-list {
+  max-height: 330px;
+  overflow-y: auto;
+  padding: 6px;
+}
+.cmdk-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  height: 36px;
+  padding: 0 11px;
+  border-radius: 5px;
+  font-size: 13px;
+  color: var(--ink-2);
+  text-align: left;
+}
+.cmdk-item svg {
+  color: var(--ink-3);
+}
+.cmdk-item.on {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.cmdk-item .hint {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-4);
+}
+.cmdk-empty {
+  padding: 24px 14px;
+  font-size: 12.5px;
+  color: var(--ink-4);
+  text-align: center;
+}
+
+/* 进场：数字与区块错开浮现 */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rise {
+  animation: rise var(--dur-slow) var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 55ms);
+}
+
+/* ---------- 交互限定 ---------- */
+@media (hover: hover) and (pointer: fine) {
+  .btn:hover {
+    background: var(--surface);
+    color: var(--ink);
+  }
+  .btn-primary:hover {
+    background: var(--accent);
+    color: var(--accent-ink);
+    filter: brightness(1.07);
+  }
+  .theme-switch button:hover {
+    background: var(--surface);
+    color: var(--ink-2);
+  }
+  .nav-item:hover {
+    background: var(--surface);
+    color: var(--ink);
+  }
+  .row:hover {
+    background: var(--surface);
+    box-shadow: inset 0 0 0 1px var(--line-soft);
+  }
+  .icon-btn:hover {
+    background: var(--surface-2);
+    border-color: var(--line);
+    color: var(--ink);
+  }
+  .icon-btn.danger:hover {
+    color: var(--alert);
+    border-color: var(--alert);
+  }
+  .cmdk-item:hover {
+    background: var(--surface);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (max-width: 960px) {
+  .shell {
+    grid-template-columns: 62px minmax(0, 1fr);
+  }
+  .nav-item span,
+  .nav-count {
+    display: none;
+  }
+  .hero-stmt {
+    font-size: 26px;
+  }
+  .row {
+    grid-template-columns: minmax(0, 1fr) 92px;
+  }
+  .row .cell.cpus,
+  .row .cell.mono,
+  .row .ops {
+    display: none;
+  }
+  .act {
+    grid-template-columns: minmax(0, 1fr) 88px;
+  }
+  .act-meta,
+  .act-rate {
+    display: none;
+  }
+  .track {
+    grid-auto-columns: 34px;
+    grid-auto-flow: row;
+    grid-template-columns: repeat(4, 34px);
+  }
+}
+
+/* ---------- 正在执行：VM-Entry 脉冲 ---------- */
+.act-stage {
+  margin-top: 26px;
+}
+
+.acts {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.act {
+  display: grid;
+  grid-template-columns: 156px 210px minmax(0, 1fr) 88px 92px;
+  align-items: center;
+  gap: 14px;
+  height: 38px;
+  padding: 0 4px;
+  border-radius: 6px;
+  transition: background var(--dur-quick) var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .act:hover {
+    background: var(--surface-2);
+  }
+}
+
+.act-name {
+  font-size: 13.5px;
+  color: var(--ink-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.act-meta {
+  font-size: 12px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.act-meta .q {
+  color: var(--ink-4);
+}
+
+.act-track {
+  position: relative;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  overflow: hidden;
+}
+
+.act.held .act-track {
+  background: transparent;
+  border-style: dashed;
+}
+
+.act-track .pulse {
+  position: absolute;
+  top: 2px;
+  left: 0;
+  width: 5px;
+  height: 10px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  box-shadow: 0 0 14px -2px var(--accent-glow);
+  animation: entry-sweep var(--d, 1.1s) linear forwards;
+}
+
+@keyframes entry-sweep {
+  from {
+    transform: translateX(-8px);
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  78% {
+    opacity: 1;
+  }
+  to {
+    transform: translateX(var(--sweep-end, 999px));
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .act-track .pulse {
+    animation: none;
+    opacity: 0.9;
+  }
+}
+
+.act-rate {
+  font-size: 12px;
+  color: var(--accent);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.act-count {
+  font-size: 12px;
+  color: var(--ink-2);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.act.held .act-rate,
+.act.held .act-count {
+  color: var(--ink-4);
+}
+
+.col-head {
+  font-size: 10.5px;
+  color: var(--ink-4);
+  letter-spacing: 0.07em;
+}
+
+</style>
+  </head>
+  <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <g id="i-server" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <path d="M9 3v18M15 3v18" />
+        </g>
+        <g id="i-terminal" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 17l6-5-6-5" />
+          <path d="M12 19h8" />
+        </g>
+        <g id="i-file" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+          <path d="M14 3v5h5" />
+        </g>
+        <g id="i-shell" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2.5" y="4" width="19" height="16" rx="2" />
+          <path d="M7 9l3 3-3 3M13 15h4" />
+        </g>
+        <g id="i-cpu" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="6" y="6" width="12" height="12" rx="1.5" />
+          <path d="M10 2v4M14 2v4M10 18v4M14 18v4M2 10h4M2 14h4M18 10h4M18 14h4" />
+        </g>
+        <g id="i-play" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M7 4.5l12 7.5-12 7.5z" />
+        </g>
+        <g id="i-stop" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
+        </g>
+        <g id="i-trash" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" />
+        </g>
+        <g id="i-search" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7" />
+          <path d="M20 20l-4.2-4.2" />
+        </g>
+        <g id="i-close" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6 6l12 12M18 6L6 18" />
+        </g>
+        <g id="i-mark" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 7l9-4 9 4-9 4z" />
+          <path d="M3 12l9 4 9-4" />
+          <path d="M3 17l9 4 9-4" />
+        </g>
+      </defs>
+    </svg>
+
+    <header class="topbar">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 24 24"><use href="#i-mark" /></svg>
+        <span class="brand-name">AXVISOR</span>
+        <span class="brand-ver">0.8.2</span>
+      </div>
+
+      <div class="topbar-mid">
+        <span id="chipArch">x86_64</span>
+        <span class="sep">·</span>
+        <span id="chipCpus">8 物理核</span>
+        <span class="sep">·</span>
+        <span id="chipLoad">6 核已划分</span>
+      </div>
+
+      <div class="topbar-actions">
+        <button class="btn" id="cmdkBtn">
+          <svg viewBox="0 0 24 24" width="14" height="14"><use href="#i-search" /></svg>
+          <span>搜索</span>
+          <span class="mono" style="color: var(--ink-4); font-size: 11px">⌘K</span>
+        </button>
+        <div class="theme-switch" id="themeSwitch">
+          <button data-theme="stage">舞台</button>
+          <button data-theme="daylight">日光</button>
+          <button data-theme="phosphor">磷光</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="shell">
+      <nav class="rail" id="nav"></nav>
+      <main class="workspace" id="workspace"></main>
+    </div>
+
+    <footer class="statusbar">
+      <span class="live"><span class="dot"></span>运行中</span>
+      <span class="ev" id="evStream"></span>
+      <span class="right">
+        <span id="sbUp">—</span>
+        <span id="sbAddr">0.0.0.0:8080</span>
+      </span>
+    </footer>
+
+    <script>
+/* AxVisor 控制台 v5
+ * 数据纪律：只呈现控制面真实导出的字段。
+ *   VM  → id / name / status / cpu_num / memory_mb / vcpu_states[].phys_cpu_set
+ *         guest_entry_count / guest_park_count
+ *   host→ version / arch / platform / cpus / uptime / features / pool / 监听地址
+ * 不呈现、也不估算：CPU 占用率、内存占用率、网络吞吐、块设备 IO、多 host。
+ */
+
+const PCPUS = 8;
+const BOOT = Date.now() - (3 * 3600 + 42 * 60) * 1000;
+const TICK_MS = 380;
+
+const HOST = {
+  version: '0.8.2',
+  arch: 'x86_64',
+  platform: 'x86_64-qemu-q35',
+  cpus: PCPUS,
+  web: 'http://10.0.2.15:8080',
+  listen: '0.0.0.0:8080',
+  features: ['fs', 'http-axum', 'browser-console', 'web-ui'],
+  pool: ['/guest', 'AXVISOR_VM_DIRS'],
+};
+
+/* entry / park 是 guest_entry_count 与 guest_park_count 的实时读数；
+ * rate 是 entry 的一阶差分（次/秒），由运行时测量而非配置。 */
+const VMS = [
+  { id: 'vm-1', name: 'arceos-shell', status: 'Running', vcpus: 4, mem: 1.0, cpus: [0, 1, 2, 3], entry: 48213, park: 3, rate: 0, image: 'arceos-x86_64.img', cmdline: 'LOG=info' },
+  { id: 'vm-2', name: 'linux-guest', status: 'Running', vcpus: 2, mem: 2.0, cpus: [4, 5], entry: 31904, park: 1, rate: 0, image: 'linux-x86_64.img', cmdline: 'console=ttyS0' },
+  { id: 'vm-3', name: 'rtos-node', status: 'Running', vcpus: 2, mem: 0.5, cpus: [0, 1], entry: 17440, park: 5, rate: 0, image: 'rtos-x86_64.img', cmdline: '' },
+  { id: 'vm-4', name: 'net-peer', status: 'Stopped', vcpus: 2, mem: 0.5, cpus: [6, 7], entry: 0, park: 0, rate: 0, image: 'net-x86_64.img', cmdline: '' },
+  { id: 'vm-5', name: 'blk-bench', status: 'Failed', vcpus: 1, mem: 4.0, cpus: [7], entry: 0, park: 0, rate: 0, image: 'bench-x86_64.img', cmdline: '', issue: 'duplicate-id' },
+];
+
+const STATE_CN = { Running: '运行中', Paused: '已暂停', Stopped: '已停止', Failed: '失败' };
+
+const VIEWS = [
+  { id: 'vms', label: '客户机', icon: 'i-server', count: () => VMS.length },
+  { id: 'console', label: '网页控制台', icon: 'i-terminal' },
+  { id: 'files', label: '文件传输', icon: 'i-file' },
+  { id: 'shell', label: 'Shell', icon: 'i-shell' },
+];
+const SYS_VIEWS = [{ id: 'host', label: '宿主机', icon: 'i-cpu' }];
+
+const TRANSFERS = [
+  { name: 'rootfs.ext4', total: 268435456, done: 268435456, state: '完成' },
+  { name: 'app.bin', total: 12582912, done: 7340032, state: '传输中' },
+  { name: 'config.toml', total: 4096, done: 0, state: '排队' },
+];
+
+const BOOTLOG = [
+  'Booting AxVisor 0.8.2 (x86_64-qemu-q35)',
+  '  phys memory regions: 3',
+  '  percpu areas: 8 cpus',
+  'Initializing guest vm-1 "arceos-shell"',
+  '  vcpu: 4  pinned: 0-3',
+  '  memory: 1.000 GiB',
+  'VMM setup done, entering guest',
+  '[    0.112] ArceOS starting...',
+  '[    0.118] axhal: x86_64 initialized',
+  '[    0.124] axalloc: bitmap allocator ready',
+  '[    0.131] axtask: 4 tasks spawned',
+  '[    0.140] axfs: mounting ramfs at /',
+  '[    0.152] shell: arceos shell ready',
+];
+
+/* 事件流只写控制面能真正观察到的现象：
+ * VM-Entry / VM-Exit、vCPU park、状态变更、注册表变更、加载被拒。 */
+const EVENTS = [
+  'vm-1 vcpu 2 → VM-Entry',
+  'vm-1 vcpu 0 → VM-Exit (reason 30)',
+  'vm-2 vcpu 1 → VM-Entry',
+  'vm-3 vcpu 0 parked：suspend wait',
+  'registry：配置池 /guest 变更 1 项',
+  'vm-2 vcpu 0 → VM-Entry',
+  'vm-1 vcpu 3 → VM-Exit (reason 12)',
+  'vm-5 加载被拒：duplicate-id',
+  'vm-3 vcpu 1 → VM-Entry',
+  'vm-1 vcpu 1 → VM-Entry',
+];
+
+/* ---------- helpers ---------- */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const icon = (id, size = 15) =>
+  `<svg viewBox="0 0 24 24" width="${size}" height="${size}"><use href="#${id}" /></svg>`;
+const memStr = (g) => (g >= 1 ? `${g.toFixed(1)} GiB` : `${Math.round(g * 1024)} MiB`);
+const bytes = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`);
+const num = (n) => n.toLocaleString('en-US');
+
+const holds = (vm) => vm.status === 'Running' || vm.status === 'Paused';
+const occupancy = () =>
+  Array.from({ length: PCPUS }, (_, cpu) => VMS.filter((v) => holds(v) && v.cpus.includes(cpu)));
+const usedCpus = () => occupancy().filter((o) => o.length > 0).length;
+const totalVcpus = () => VMS.reduce((n, v) => n + v.vcpus, 0);
+const totalMem = () => VMS.reduce((n, v) => n + v.mem, 0);
+const runningCount = () => VMS.filter((v) => v.status === 'Running').length;
+const entryRate = () => VMS.reduce((n, v) => n + (v.status === 'Running' ? v.rate : 0), 0);
+
+const state = {
+  view: 'vms',
+  theme: localStorage.getItem('axvisor.theme') || 'stage',
+  hover: null,
+  cmdkOpen: false,
+  cmdkIndex: 0,
+  query: '',
+};
+
+/* ---------- 顶栏 ---------- */
+function renderChips() {
+  $('#chipArch').textContent = HOST.arch;
+  $('#chipCpus').textContent = `${PCPUS} 物理核`;
+  $('#chipLoad').textContent = `${usedCpus()} 核已划分`;
+  $('#sbAddr').textContent = HOST.listen;
+}
+
+/* ---------- 侧栏 ---------- */
+function renderNav() {
+  const group = (title, items) =>
+    `<div class="rail-group"><div class="label">${title}</div>${items}</div>`;
+  const item = (v) =>
+    `<button class="nav-item" data-view="${v.id}" aria-current="${state.view === v.id}">
+      ${icon(v.icon)}<span>${v.label}</span>
+      ${v.count ? `<span class="nav-count">${v.count()}</span>` : ''}
+    </button>`;
+  $('#nav').innerHTML =
+    group('能力', VIEWS.map(item).join('')) + group('系统', SYS_VIEWS.map(item).join(''));
+  $$('#nav .nav-item').forEach((b) => b.addEventListener('click', () => switchView(b.dataset.view)));
+}
+
+/* ---------- 正在执行：VM-Entry 脉冲 ---------- */
+function activityRows() {
+  const live = VMS.filter((v) => v.status === 'Running' || v.status === 'Paused');
+  return live
+    .map(
+      (v) => `<div class="act${v.status === 'Paused' ? ' held' : ''}" data-vm="${v.id}">
+        <span class="act-name">${esc(v.name)}</span>
+        <span class="act-meta">${v.vcpus} vCPU <span class="q">· pCPU ${v.cpus.join(',')}</span></span>
+        <span class="act-track" data-track="${v.id}"></span>
+        <span class="act-rate mono" data-rate="${v.id}">—</span>
+        <span class="act-count mono" data-entry="${v.id}">${num(v.entry)}</span>
+      </div>`
+    )
+    .join('');
+}
+
+/* 每个 tick：guest_entry_count 前进一步，轨道上落一个光点 */
+function pulseTick() {
+  VMS.forEach((v) => {
+    if (v.status !== 'Running') {
+      v.rate = 0;
+      return;
+    }
+    const step = 18 + Math.round(Math.random() * 46);
+    v.entry += step;
+    v.rate = Math.round(step * (1000 / TICK_MS));
+
+    const track = document.querySelector(`[data-track="${v.id}"]`);
+    if (track) {
+      const b = document.createElement('b');
+      b.className = 'pulse';
+      b.style.setProperty('--d', `${(0.9 + Math.random() * 0.5).toFixed(2)}s`);
+      b.style.setProperty('--sweep-end', `${Math.max(40, track.clientWidth - 6)}px`);
+      track.appendChild(b);
+      setTimeout(() => b.remove(), 1500);
+      while (track.children.length > 14) track.firstChild.remove();
+    }
+    const c = document.querySelector(`[data-entry="${v.id}"]`);
+    if (c) c.textContent = num(v.entry);
+    const r = document.querySelector(`[data-rate="${v.id}"]`);
+    if (r) r.textContent = `${num(v.rate)}/s`;
+  });
+
+  const sum = VMS.reduce((n, v) => n + v.entry, 0);
+  const rate = entryRate();
+  const hero = $('#heroRate');
+  if (hero) hero.textContent = num(rate);
+  const hero2 = $('#heroRate2');
+  if (hero2) hero2.textContent = num(rate);
+  const entries = $('#heroEntries');
+  if (entries) entries.textContent = num(sum);
+}
+
+/* ---------- 主张 + 舞台 ---------- */
+function viewVms() {
+  const occ = occupancy();
+  const used = occ.filter((o) => o.length).length;
+  const ratio = (totalVcpus() / PCPUS).toFixed(1);
+
+  const lanes = occ
+    .map((owners, cpu) => {
+      const busy = owners.length > 0;
+      const inner = busy ? owners.map(() => '<i></i>').join('') : '';
+      const cls = [busy ? '' : 'idle', owners.length > 1 ? 'shared' : ''].filter(Boolean).join(' ');
+      return `<div class="lane ${cls}">
+        <div class="bar">${inner}</div>
+        <div class="lane-foot"><span>${cpu}</span><span>${
+          busy ? (owners.length > 1 ? '分时共享' : esc(owners[0].name)) : '空闲'
+        }</span></div>
+      </div>`;
+    })
+    .join('');
+
+  const memSegs = VMS.filter(holds)
+    .map(
+      (v) =>
+        `<i style="width:${((v.mem / totalMem()) * 100).toFixed(3)}%" title="${esc(v.name)} ${memStr(v.mem)}"></i>`
+    )
+    .join('');
+
+  const rows = VMS.map(
+    (v) => `<div class="row" data-vm="${v.id}" tabindex="0">
+      <span class="name">${esc(v.name)}</span>
+      <span class="state ${v.status.toLowerCase()}"><span class="dot"></span>${STATE_CN[v.status]}</span>
+      <span class="cell">${v.vcpus} vCPU · ${memStr(v.mem)}</span>
+      <span class="cell cpus">${v.cpus.join(', ')}</span>
+      <span class="cell mono" data-entry="${v.id}">${num(v.entry)}</span>
+      <span class="ops">
+        <button class="icon-btn" data-act="start" title="启动">${icon('i-play', 14)}</button>
+        <button class="icon-btn" data-act="stop" title="停止">${icon('i-stop', 14)}</button>
+        <button class="icon-btn danger" data-act="del" title="销毁">${icon('i-trash', 14)}</button>
+      </span>
+    </div>`
+  ).join('');
+
+  return `
+  <section class="hero rise" style="--i:0">
+    <p class="hero-stmt">
+      <span class="num" data-count="${runningCount()}">0</span> 台客户机正在执行<span class="dim">，</span><br />
+      <span class="dim">每秒</span> <span class="num" id="heroRate">0</span> <span class="dim">次 VM-Entry。</span>
+    </p>
+    <div class="hero-sub">
+      <span>VM-Entry 累计 <span class="k" id="heroEntries">0</span></span>
+      <span class="sep">·</span>
+      <span>已划分 <span class="k">${used}/${PCPUS}</span> 核</span>
+      <span class="sep">·</span>
+      <span>超配比 <span class="k">${ratio}×</span></span>
+      <span class="sep">·</span>
+      <span>内存 <span class="k">${memStr(totalMem())}</span></span>
+      <span class="sep">·</span>
+      <span>${esc(HOST.platform)}</span>
+    </div>
+
+    <div class="stage act-stage">
+      <div class="stage-head">
+        <span class="t">正在执行</span>
+        <span class="m">guest_entry_count 实时读数</span>
+        <span class="r">
+          <div><span class="n" id="heroRate2">0</span><span class="label">VM-Entry / 秒</span></div>
+          <div><span class="n">${runningCount()}</span><span class="label">活跃客户机</span></div>
+          <div><span class="n">${usedCpus()}<span style="font-size:13px;color:var(--ink-4)">/${PCPUS}</span></span><span class="label">占用物理核</span></div>
+        </span>
+      </div>
+      <div class="acts" id="acts">${activityRows()}</div>
+      <div class="stage-note">
+        每个光点是一次成功的 VM-Entry；该计数只在 vCPU 真正进入 guest 后递增，暂停与失败进入不计数。
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="stage-head">
+        <span class="t">物理核划分</span>
+        <span class="m">${PCPUS} × ${esc(HOST.arch)}</span>
+        <span class="r">
+          <div><span class="n">${used}<span style="font-size:13px;color:var(--ink-4)">/${PCPUS}</span></span><span class="label">已划分</span></div>
+          <div><span class="n">${ratio}<span style="font-size:13px;color:var(--ink-4)">×</span></span><span class="label">超配比</span></div>
+          <div><span class="n">${PCPUS - used}</span><span class="label">空闲核</span></div>
+        </span>
+      </div>
+
+      <div class="track" id="track">${lanes}</div>
+
+      <div class="memlane">${memSegs}</div>
+      <div class="stage-note">
+        已分配 <span class="mono">${memStr(totalMem())}</span> 内存
+        <span class="q">· 宿主总量不由控制面导出，界面不做估算</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="section rise" style="--i:1">
+    <div class="section-head">
+      <span class="title">客户机</span>
+      <span class="count">${VMS.length}</span>
+      <span class="col-head" style="margin-left:auto">guest_entry_count</span>
+    </div>
+    <div class="rows">${rows}</div>
+  </section>`;
+}
+
+/* ---------- 其它视图 ---------- */
+function viewConsole() {
+  return `<div class="term">
+    <div class="term-head">
+      <span class="t">串口控制台</span>
+      <span class="m">arceos-shell · /ws/console/vm-1</span>
+      <span style="margin-left:auto"></span>
+      <button class="btn">断开</button>
+    </div>
+    <div class="term-body" id="termBody"></div>
+  </div>`;
+}
+
+function viewFiles() {
+  return `<div class="pane">
+    <h2>文件传输</h2>
+    <div class="sub">暂存区中的文件，可写入客户机文件系统。</div>
+    ${TRANSFERS.map(
+      (t) => `<div class="xfer${t.state === '传输中' ? ' active' : ''}">
+        <div>
+          <div style="font-size:13.5px">${esc(t.name)}</div>
+          <div class="bar"><i style="width:${((t.done / t.total) * 100).toFixed(1)}%"></i></div>
+        </div>
+        <span class="st">${t.state}</span>
+        <span class="pct">${bytes(t.done)} / ${bytes(t.total)}</span>
+      </div>`
+    ).join('')}
+  </div>`;
+}
+
+function viewShell() {
+  return `<div class="pane">
+    <h2>Shell</h2>
+    <div class="sub">在 Hypervisor 上直接执行命令。</div>
+    <div class="term-body" id="shBody" style="border:1px solid var(--line-soft);border-radius:7px;height:300px;padding:16px 18px">
+      <div><span class="ts">$</span> <span class="hi">uname -a</span></div>
+      <div style="color:var(--ink-2)">AxVisor 0.8.2 x86_64-qemu-q35</div>
+      <div><span class="ts">$</span> <span class="hi">help</span></div>
+      <div style="color:var(--ink-2)">可用命令：help · version · uname · ps · free · vm</div>
+      <div><span class="ts">$</span> <span class="caret" style="display:inline-block;width:6px;height:12px;background:var(--accent);vertical-align:-2px"></span></div>
+    </div>
+  </div>`;
+}
+
+function viewHost() {
+  const up = Math.floor((Date.now() - BOOT) / 1000);
+  const h = Math.floor(up / 3600);
+  const m = Math.floor((up % 3600) / 60);
+  const kv = (k, v) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+  return `<div class="pane">
+    <h2>宿主机</h2>
+    <div class="sub">运行 AxVisor 的物理机器。</div>
+    ${kv('版本', HOST.version)}
+    ${kv('架构', HOST.arch)}
+    ${kv('平台', HOST.platform)}
+    ${kv('物理核', PCPUS)}
+    ${kv('运行时长', `${h} 小时 ${m} 分`)}
+    ${kv('Web 控制台', HOST.web)}
+    ${kv('监听地址', HOST.listen)}
+    ${kv('构建特性', `<span class="chips">${HOST.features.map((f) => `<span class="chip">${f}</span>`).join('')}</span>`)}
+    ${kv('配置池', HOST.pool.map((p) => `<span class="chip">${esc(p)}</span>`).join(' '))}
+    ${kv('已划分核', `${usedCpus()} / ${PCPUS}`)}
+    ${kv('客户机 vCPU 合计', `${totalVcpus()}（超配比 ${(totalVcpus() / PCPUS).toFixed(1)}×）`)}
+    ${kv('已分配内存', memStr(totalMem()))}
+    ${kv('VM-Entry 累计', num(VMS.reduce((n, v) => n + v.entry, 0)))}
+    ${kv('宿主内存总量', '<span style="color:var(--ink-3)">不由控制面导出</span>')}
+  </div>`;
+}
+
+const RENDER = { vms: viewVms, console: viewConsole, files: viewFiles, shell: viewShell, host: viewHost };
+
+/* 高频动作：切换视图不加动画 */
+function switchView(id) {
+  if (!RENDER[id]) return;
+  state.view = id;
+  state.hover = null;
+  $$('#nav .nav-item').forEach((b) => b.setAttribute('aria-current', String(b.dataset.view === id)));
+  $('#workspace').innerHTML = RENDER[id]();
+  bindWorkspace();
+}
+
+function bindWorkspace() {
+  renderChips();
+  countUp();
+  pulseTick();
+  $$('.row').forEach((row) => {
+    const id = row.dataset.vm;
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('[data-act]')) return;
+      openDrawer(id);
+    });
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') openDrawer(id);
+    });
+    row.addEventListener('mouseenter', () => focusVm(id));
+    row.addEventListener('mouseleave', () => focusVm(null));
+  });
+  $$('[data-act]').forEach((b) => b.addEventListener('click', (e) => e.stopPropagation()));
+  if (state.view === 'console') startConsole();
+  if (state.view === 'files') tickTransfers();
+}
+
+/* 悬停客户机：它的核亮起，其余退让 */
+function focusVm(id) {
+  state.hover = id;
+  const track = $('#track');
+  if (!track) return;
+  track.classList.toggle('focusing', !!id);
+  $$('.lane', track).forEach((lane, cpu) => {
+    const owners = occupancy()[cpu];
+    lane.classList.toggle('lit', !!id && owners.some((v) => v.id === id));
+  });
+}
+
+/* 数字滚动：一次性的入场质感 */
+function countUp() {
+  $$('[data-count]').forEach((el) => {
+    const to = Number(el.dataset.count);
+    const dur = 620;
+    const t0 = performance.now();
+    const tick = (t) => {
+      const p = Math.min(1, (t - t0) / dur);
+      const eased = 1 - Math.pow(1 - p, 3);
+      el.textContent = Math.round(to * eased);
+      if (p < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
+/* ---------- 抽屉 ---------- */
+function openDrawer(id) {
+  const v = VMS.find((x) => x.id === id);
+  if (!v) return;
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `<div class="scrim" data-close></div>
+    <aside class="drawer" role="dialog" aria-label="${esc(v.name)}">
+      <div class="drawer-head">
+        <div style="flex:1">
+          <div class="t">${esc(v.name)}</div>
+          <div class="s"><span class="state ${v.status.toLowerCase()}"><span class="dot"></span>${STATE_CN[v.status]}</span></div>
+        </div>
+        <button class="icon-btn" data-close aria-label="关闭">${icon('i-close', 15)}</button>
+      </div>
+      <div class="drawer-body">
+        <div class="bignums">
+          <div class="bignum"><div class="n">${num(v.entry)}</div><div class="label">进入 guest 次数</div></div>
+          <div class="bignum"><div class="n">${num(v.park)}</div><div class="label">vCPU park 次数</div></div>
+        </div>
+        <div class="bignums">
+          <div class="bignum"><div class="n">${v.status === 'Running' ? num(v.rate) : '0'}</div><div class="label">VM-Entry / 秒</div></div>
+          <div class="bignum"><div class="n">${v.vcpus}</div><div class="label">vCPU</div></div>
+        </div>
+        ${[['ID', v.id], ['内存', memStr(v.mem)], ['镜像', v.image], ['内核参数', v.cmdline || '—']]
+          .map(([k, val]) => `<div class="field"><span class="k">${k}</span><span class="v">${esc(val)}</span></div>`)
+          .join('')}
+        <div class="field">
+          <span class="k">物理核亲和</span>
+          <span class="v"><span class="pin-grid">${Array.from(
+            { length: PCPUS },
+            (_, i) => `<span class="pin${v.cpus.includes(i) ? ' on' : ''}">${i}</span>`
+          ).join('')}</span></span>
+        </div>
+        ${v.issue ? `<div class="notice">配置问题：<span class="mono">${esc(v.issue)}</span> — 该客户机的 ID 与池中另一项重复，未加载。</div>` : ''}
+      </div>
+    </aside>`;
+  document.body.appendChild(wrap);
+  requestAnimationFrame(() => {
+    $('.scrim', wrap).classList.add('in');
+    $('.drawer', wrap).classList.add('in');
+  });
+  $$('[data-close]', wrap).forEach((el) => el.addEventListener('click', () => closeDrawer(wrap)));
+}
+
+function closeDrawer(wrap) {
+  $('.scrim', wrap)?.classList.remove('in');
+  $('.drawer', wrap)?.classList.remove('in');
+  setTimeout(() => wrap.remove(), 420);
+}
+
+/* ---------- 命令面板 ---------- */
+function openCmdk() {
+  if (state.cmdkOpen) return;
+  state.cmdkOpen = true;
+  state.query = '';
+  state.cmdkIndex = 0;
+  const wrap = document.createElement('div');
+  wrap.className = 'cmdk-wrap';
+  wrap.innerHTML = `<div class="cmdk" role="dialog" aria-label="命令面板">
+    <input id="cmdkInput" placeholder="跳转到面板或客户机…" />
+    <div class="cmdk-list" id="cmdkList"></div>
+  </div>`;
+  document.body.appendChild(wrap);
+  const close = () => {
+    wrap.remove();
+    state.cmdkOpen = false;
+  };
+  wrap.addEventListener('click', (e) => {
+    if (e.target === wrap) close();
+  });
+  $('#cmdkInput', wrap).addEventListener('input', (e) => {
+    state.query = e.target.value;
+    state.cmdkIndex = 0;
+    renderCmdk();
+  });
+  $('#cmdkInput', wrap).addEventListener('keydown', (e) => {
+    const items = cmdkItems();
+    if (e.key === 'Escape') return close();
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      state.cmdkIndex = (state.cmdkIndex + 1) % items.length;
+      renderCmdk();
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      state.cmdkIndex = (state.cmdkIndex - 1 + items.length) % items.length;
+      renderCmdk();
+    }
+    if (e.key === 'Enter') {
+      const it = items[state.cmdkIndex];
+      if (it) {
+        close();
+        it.run();
+      }
+    }
+  });
+  $('#cmdkInput', wrap).focus();
+  renderCmdk();
+}
+
+function cmdkItems() {
+  const q = state.query.trim().toLowerCase();
+  const views = [...VIEWS, ...SYS_VIEWS].map((v) => ({
+    icon: v.icon,
+    label: v.label,
+    hint: '面板',
+    run: () => switchView(v.id),
+  }));
+  const vms = VMS.map((v) => ({
+    icon: 'i-server',
+    label: v.name,
+    hint: STATE_CN[v.status],
+    run: () => {
+      switchView('vms');
+      setTimeout(() => openDrawer(v.id), 60);
+    },
+  }));
+  return [...views, ...vms].filter((i) => !q || i.label.toLowerCase().includes(q));
+}
+
+function renderCmdk() {
+  const list = $('#cmdkList');
+  if (!list) return;
+  const items = cmdkItems();
+  if (!items.length) {
+    list.innerHTML = `<div class="cmdk-empty">没有匹配项</div>`;
+    return;
+  }
+  list.innerHTML = items
+    .map(
+      (it, i) => `<button class="cmdk-item${i === state.cmdkIndex ? ' on' : ''}" data-i="${i}">
+        ${icon(it.icon, 14)}<span>${esc(it.label)}</span>
+        <span class="hint">${esc(it.hint)}</span>
+      </button>`
+    )
+    .join('');
+  $$('.cmdk-item', list).forEach((b) =>
+    b.addEventListener('click', () => {
+      const it = cmdkItems()[Number(b.dataset.i)];
+      document.querySelector('.cmdk-wrap')?.remove();
+      state.cmdkOpen = false;
+      it.run();
+    })
+  );
+}
+
+/* ---------- 控制台日志逐行流入 ---------- */
+function startConsole() {
+  const body = $('#termBody');
+  if (!body) return;
+  let i = 0;
+  const push = () => {
+    if (!document.body.contains(body)) return;
+    if (i < BOOTLOG.length) {
+      const div = document.createElement('div');
+      div.innerHTML = `<span class="ts">${String(i).padStart(3, '0')}</span> ${esc(BOOTLOG[i])}`;
+      body.appendChild(div);
+      i++;
+      setTimeout(push, 90 + Math.random() * 130);
+    }
+  };
+  push();
+}
+
+/* ---------- 文件传输推进 ---------- */
+function tickTransfers() {
+  const t = TRANSFERS.find((x) => x.state === '传输中');
+  if (!t) return;
+  const id = setInterval(() => {
+    if (state.view !== 'files') return clearInterval(id);
+    if (t.done >= t.total) {
+      t.state = '完成';
+      return clearInterval(id);
+    }
+    t.done = Math.min(t.total, t.done + 1_400_000);
+    if (state.view === 'files') switchView('files');
+  }, 700);
+}
+
+/* ---------- 底部事件流：逐字打出 ---------- */
+function streamEvents() {
+  const el = $('#evStream');
+  if (!el) return;
+  let i = 0;
+  let j = 0;
+  let cur = '';
+  const step = () => {
+    if (i >= EVENTS.length) i = 0;
+    const line = EVENTS[i];
+    if (j <= line.length) {
+      cur = line.slice(0, j);
+      el.innerHTML = `${esc(cur)}<span class="caret"></span>`;
+      j++;
+      setTimeout(step, 26);
+    } else {
+      j = 0;
+      i++;
+      setTimeout(step, 900);
+    }
+  };
+  step();
+}
+
+/* ---------- uptime ---------- */
+function tickTime() {
+  const up = Math.floor((Date.now() - BOOT) / 1000);
+  const h = Math.floor(up / 3600);
+  const m = Math.floor((up % 3600) / 60);
+  const s = up % 60;
+  $('#sbUp').textContent = `up ${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+}
+
+/* ---------- 主题 ---------- */
+function setTheme(name) {
+  state.theme = name;
+  document.documentElement.dataset.theme = name;
+  localStorage.setItem('axvisor.theme', name);
+  $$('#themeSwitch button').forEach((b) => b.classList.toggle('on', b.dataset.theme === name));
+}
+
+/* ---------- 启动 ---------- */
+function boot() {
+  $('#themeSwitch').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (b) setTheme(b.dataset.theme);
+  });
+  $('#cmdkBtn').addEventListener('click', openCmdk);
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      openCmdk();
+    }
+  });
+
+  renderNav();
+  setTheme(state.theme);
+  switchView('vms');
+  streamEvents();
+  tickTime();
+  setInterval(tickTime, 1000);
+  setInterval(pulseTick, TICK_MS);
+}
+
+boot();
+
+</script>
+  </body>
+</html>

@@ -59,6 +59,8 @@ use axum::routing::{head, patch};
 #[cfg(all(feature = "fs", feature = "http-axum"))]
 use crate::control::transport::api::files;
 #[cfg(feature = "http-axum")]
+use crate::control::transport::api::host;
+#[cfg(feature = "http-axum")]
 use crate::control::transport::api::vm;
 #[cfg(feature = "browser-console")]
 use crate::control::transport::browser_console;
@@ -104,6 +106,9 @@ pub fn resources() -> Vec<&'static Resource> {
 
     #[cfg(all(feature = "fs", feature = "http-axum"))]
     all.push(&FILES_RESOURCE);
+
+    #[cfg(feature = "http-axum")]
+    all.push(&HOST_RESOURCE);
 
     #[cfg(feature = "browser-console")]
     all.push(&CONSOLE_RESOURCE);
@@ -345,6 +350,31 @@ static CONSOLE_RESOURCE: Resource = Resource {
         },
     ],
 };
+
+/// The machine this hypervisor runs on.
+///
+/// It is a read-only resource, and it is the only panel that is not about a
+/// guest: the dashboard shows which build this is, what it is running on and
+/// how long it has been up. It is declared last because the panels before it
+/// are what an operator acts on — this one is what they are acting *from*, so
+/// the navigation keeps it at the bottom rather than opening on it.
+#[cfg(feature = "http-axum")]
+static HOST_RESOURCE: Resource = Resource {
+    kind: "host",
+    title: "宿主机",
+    root: "/api/host",
+    verbs: &[Verb::Read],
+    endpoints: HOST_ENDPOINTS,
+};
+
+#[cfg(feature = "http-axum")]
+static HOST_ENDPOINTS: &[Endpoint] = &[Endpoint {
+    name: "get",
+    verb: Verb::Read,
+    method: Method::Get,
+    path: "/api/host",
+    build: || get(host::host_info),
+}];
 
 /// The management lane.
 ///

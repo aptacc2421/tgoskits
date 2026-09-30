@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="industrial">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AxVisor 控制台</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <g id="i-brand"><rect x="3" y="3" width="18" height="18" rx="1"/><path d="M7 17l5-10 5 10M9.2 13.6h5.6"/></g>
+        <g id="i-server"><rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/><path d="M7 7.5h.01M7 16.5h.01"/></g>
+        <g id="i-cpu"><rect x="5" y="5" width="14" height="14" rx="1"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></g>
+        <g id="i-terminal"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></g>
+        <g id="i-shell"><path d="M8 6l-5 6 5 6"/><path d="M16 6l5 6-5 6"/></g>
+        <g id="i-file"><path d="M14 3v5h5"/><path d="M15 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/></g>
+        <g id="i-play"><path d="M6 4l13 8-13 8z"/></g>
+        <g id="i-pause"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></g>
+        <g id="i-stop"><rect x="5" y="5" width="14" height="14"/></g>
+        <g id="i-x"><path d="M6 6l12 12M18 6L6 18"/></g>
+        <g id="i-search"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></g>
+        <g id="i-refresh"><path d="M20.5 12a8.5 8.5 0 1 1-2.8-6.3"/><path d="M20.5 4v5h-5"/></g>
+        <g id="i-plus"><path d="M12 5v14M5 12h14"/></g>
+        <g id="i-chev"><path d="M9 6l6 6-6 6"/></g>
+      </defs>
+    </svg>
+
+    <header class="topbar">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+          <use href="#i-brand" />
+        </svg>
+        <span class="brand-name">AXVISOR</span>
+        <span class="brand-ver mono" id="ver">0.8.2</span>
+      </div>
+      <div class="hostline">
+        <i class="dot"></i>
+        <b id="hlArch">x86_64</b>
+        <span id="hlPlat">x86-pc</span>
+        <span id="hlCpu">8 pCPU</span>
+      </div>
+      <div class="topbar-actions">
+        <button class="cmdbar" id="cmdOpen">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><use href="#i-search" /></svg>
+          <span>搜索或执行命令</span>
+          <kbd>⌘K</kbd>
+        </button>
+        <button class="iconbtn" id="refresh" title="重新获取能力清单" aria-label="重新获取能力清单">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><use href="#i-refresh" /></svg>
+        </button>
+        <div class="themes" role="group" aria-label="外观方向">
+          <button data-theme-btn="industrial" aria-pressed="true">工业</button>
+          <button data-theme-btn="swiss" aria-pressed="false">瑞士</button>
+          <button data-theme-btn="console" aria-pressed="false">终端</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="shell">
+      <aside class="sidebar">
+        <nav id="nav" aria-label="功能"></nav>
+      </aside>
+      <main id="main" tabindex="-1"></main>
+    </div>
+
+    <footer class="statusbar">
+      <span id="sbConn"><i class="dot"></i> 控制面已连接</span>
+      <span class="sep">/</span>
+      <span id="sbUptime">运行 00:00:00</span>
+      <span class="sep">/</span>
+      <span id="sbPool">配置池 /guest</span>
+      <span class="right">
+        <span id="sbEv">事件通道 /ws/events</span>
+        <span class="sep">/</span>
+        <span id="sbClock">--:--:--</span>
+      </span>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -58,6 +58,12 @@ mod virq_regression;
 ///    guest boots, then the VM lifecycle waiter and the physical-console shell.
 ///
 fn main() {
+    // The boot instant is recorded before anything else so the control plane's
+    // uptime counts from the kernel entry point rather than from the first
+    // request that happens to ask for it.
+    #[cfg(any(feature = "browser-console", feature = "http-axum"))]
+    control::domain::host::mark_boot();
+
     guest_console::configure_host_console()
         .unwrap_or_else(|error| panic!("failed to configure host console: {error:#}"));
 
