@@ -1,0 +1,41 @@
+# Select the test shell on existing board images without replacing their init files.
+cmdline = 'root=/dev/mmcblk0p2 rootwait rw console=ttyS0,115200 earlycon=sbi riscv.fwsz=0x80000 release loglevel=0 init=/bin/sh HOME=/root USER=root HOSTNAME=starry -- -c "cd /root; export PS1=$USER@$HOSTNAME:~#; exec /bin/sh -i"'
+board_type = "AKA-00-SG2002"
+dtb_file = "os/StarryOS/configs/board/aka-00-sg2002.dtb"
+kernel_load_addr = "0x80200000"
+fit_load_addr = "0x82200000"
+bootm_addr = "0x82200000"
+fail_regex = [
+  '(?i)\bpanic(?:ked)?\b',
+  '(?i)segmentation fault|SIGSEGV',
+  '(?m)^STARRY_AKA_WIFI_DHCP_FAILED\s*$',
+  '(?m)^STARRY_AKA_WIFI_NETWORK_SMOKE_FAILED\s*$',
+  '(?i)(curl|wget|tar|chmod|ip|grep|sh): .*not found',
+  '(?i)WPA2 .*failed|AIC .*failed|DHCP .*failed',
+]
+timeout = 600
+
+[[shell_check_steps]]
+shell_prefix = "root@starry:"
+shell_cmd = '''
+marker=STARRY_AKA_WIFI_NETWORK_SMOKE
+ready=0
+attempt=1
+while [ "$attempt" -le 30 ]; do
+  if mkdir -p /tmp/network-smoke &&
+    wget -q -T 5 -O /tmp/network-smoke/curl-bundle.tar.gz '${sessionFile:share/curl-bundle.tar.gz}' &&
+    wget -q -T 5 -O /tmp/network-smoke/upload-source '${sessionFile:bin/upload-source}' &&
+    wget -q -T 5 -O /tmp/network-smoke/curl-smoke.sh '${sessionFile:bin/curl-smoke.sh}' &&
+    wget -q -T 5 -O /tmp/network-smoke/network-smoke.sh '${sessionFile:bin/network-smoke.sh}'; then ready=1; fi
+  if [ "$ready" = 1 ]; then break; fi
+  sleep 1
+  attempt=$((attempt + 1))
+done
+if [ "$ready" = 1 ] && tar -xzf /tmp/network-smoke/curl-bundle.tar.gz -C /tmp/network-smoke &&
+   chmod +x /tmp/network-smoke/curl /tmp/network-smoke/curl.bin /tmp/network-smoke/upload-source /tmp/network-smoke/*.sh; then
+  PATH="/tmp/network-smoke:$PATH" /tmp/network-smoke/network-smoke.sh '${boardServerIp}'
+else
+  echo "${marker}_FAILED"
+fi
+'''
+success_regex = ['(?m)^STARRY_AKA_WIFI_NETWORK_SMOKE_PASSED\s*$']

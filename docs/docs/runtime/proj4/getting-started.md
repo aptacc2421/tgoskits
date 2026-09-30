@@ -366,7 +366,7 @@ cat target/riscv64gc-unknown-linux-musl/release/akars | \
   ssh root@<板子IP> 'mkdir -p /usr/local/bin && cat > /usr/local/bin/akars && chmod +x /usr/local/bin/akars && sync'
 ```
 
-管道左边是本机文件的路径，右边引号里是板子上的目标路径，两者不一样，别照着左边去板子上找。装到 `/usr/local/bin` 是因为板子的 `PATH` 里只有它：`os/StarryOS/starryos/src/init.sh` 把 `PATH` 设成 `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`，里面没有 `/root`。装在别的目录就得每次写全路径，6.3 那张子命令表里的 `akars` 也就不能照着敲了。
+管道左边是本机文件的路径，右边引号里是板子上的目标路径，两者不一样，别照着左边去板子上找。装到 `/usr/local/bin` 是因为 Starry 磁盘根的 `/etc/profile.d/starry.sh` 把 `PATH` 设成 `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`，里面没有 `/root`。装在别的目录就得每次写全路径，6.3 那张子命令表里的 `akars` 也就不能照着敲了。
 
 `akars` 运行时需要的 `libcviruntime.so`、`libcvikernel.so`、`libstdc++.so.6` 和 `libgcc_s.so.1` 按同一条通道送进 `/lib`，送完 `sync`。这四个文件在 `apps/starry/aka00-tennis-yolo/install/sg2002_riscv64_musl/akars_tennis/lib/` 下，`build-validator.sh` 把 TPU SDK 里的 `.so` 和工具链里的 `libstdc++.so.6`、`libgcc_s.so.1` 一起收在这个目录。要跑 6.3 里的固定图片推理校验，还要把 `apps/starry/aka00-tennis-yolo/install/sg2002_riscv64_musl/akars_tennis/` 这个目录放到第二个分区根下的 `/akars_tennis`，`lib/`、`model/`、`validation/` 三份都要在。上面那条管道一次只送一个文件，装不下整个目录，先在开发机上打包再在板子上解开：
 
@@ -468,7 +468,7 @@ bootm 0x82200000 - $fdtcontroladdr
 
 这块板子没有保存环境变量的地方，所以**每次重启都要重新敲这几条命令**。"重启之后又回到旧系统了"不是故障，是这条默认链路本身的行为。
 
-启动成功的标志是串口出现 shell 提示符 `root@starry:~#`——这个串来自内核内置的 `init.sh`（`os/StarryOS/starryos/src/init.sh`，里面的 `PS1` 把 `$HOME` 缩写为 `~`），各块板子都一样。板级测试就是靠匹配它的前缀 `root@starry:` 来判断系统起来了，车板的 `os/StarryOS/configs/board/aka-00-sg2002-board.toml` 里的 `shell_prefix` 写的就是这个前缀。
+使用项目准备的 Starry 磁盘根时，启动成功的标志是串口出现 shell 提示符 `root@starry:~#`；`/etc/profile.d/starry.sh` 设置了 `PS1`。板级测试匹配其前缀 `root@starry:`，车板的 `os/StarryOS/configs/board/aka-00-sg2002-board.toml` 里的 `shell_prefix` 也是这个前缀。自定义磁盘根或内存根可以使用不同的 shell 配置，不能据此推断启动失败。
 
 ### 5.3 登录、配网与传文件
 
@@ -673,7 +673,7 @@ SG2002 上则要关注摄像头采集帧率和每帧的分段耗时，`akars` �
 
 改动完成并验证之后，提交到上游仓库的 `dev` 分支。提交信息的格式有固定要求：标题用英文，写成 `type(scope): 内容` 的形式，比如 `fix(ax-task): ...`（`ax-task` 这个软件包的目录名是 `axtask`，但 `Cargo.toml` 里的包名和提交历史里的 scope 都写 `ax-task`）；正文用中文，说明要解决的问题、实际改了什么、为什么这么改。
 
-提交之前尽量在本地把 CI 流程跑一遍，只有实板测试和自托管项可以跳过。另外两条注意事项：提交信息里不要加任何和 AI 助手相关的标记；推送代码和发布对外评论之前先和仓库维护者确认。
+提交拉取请求前，只需按改动范围运行相关软件包的 `cargo xtask clippy` 和受影响的 QEMU 或板卡用例；不必在本地复跑完整 CI。没有影响内核运行时的改动无需额外运行 QEMU 或板卡测试；无法本地执行受影响的实体板卡用例时，在拉取请求中说明缺口。提交信息不加入与代理相关的标记，推送和对外评论遵循仓库 `AGENTS.md` 的授权规则。
 
 ## 8. 故障速查
 

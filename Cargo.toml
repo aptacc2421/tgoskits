@@ -24,6 +24,7 @@ members = [
     "components/cpu-local",
     "components/ax-cgroup",
     "components/ax-lazyinit",
+    "components/host-boot-abi",
     "components/ax-task",
     "components/axbacktrace",
     "components/axcpu",
@@ -70,6 +71,8 @@ members = [
     "drivers/gpu/*",
     "drivers/intc/*",
     "drivers/interface/*",
+    "drivers/iommu/*",
+    "drivers/media/*",
     "drivers/net/*",
     "drivers/npu/*",
     "drivers/pci/*",
@@ -87,6 +90,7 @@ members = [
     "drivers/usb/usb-device/uvc",
     "drivers/usb/usb-host",
     "drivers/usb/usb-if",
+    "drivers/usb/uvc-if",
     "drivers/usb/usb-serial",
     "drivers/usb/utils/*",
 
@@ -96,6 +100,7 @@ members = [
     "os/StarryOS/vm",
     "os/arceos/api/*",
     "os/arceos/modules/axdisplay",
+    "os/arceos/modules/axgpu",
     "os/arceos/modules/axhal",
     "os/arceos/modules/axinput",
     "os/arceos/modules/axipi",
@@ -153,6 +158,7 @@ ax-cgroup = { version = "0.3", path = "components/ax-cgroup" }
 ax-ctor-bare = { version = "0.4", path = "components/ctor_bare/ctor_bare" }
 ax-ctor-bare-macros = { version = "0.4", path = "components/ctor_bare/ctor_bare_macros" }
 ax-display = { version = "0.7", path = "os/arceos/modules/axdisplay" }
+ax-gpu = { version = "0.1", path = "os/arceos/modules/axgpu" }
 ax-driver = { version = "0.18", path = "drivers/ax-driver" }
 virtio-drivers = { version = "0.13.0", default-features = false }
 virtio-gpu = { version = "0.1", path = "drivers/gpu/virtio-gpu" }
@@ -185,7 +191,6 @@ ax-task = { version = "0.8", path = "components/ax-task" }
 ax-tracepoint = { version = "0.6", path = "components/ax-tracepoint" }
 axtest = { version = "0.5", path = "components/axtest/axtest" }
 axtest-macros = { version = "0.5", path = "components/axtest/axtest_macros" }
-xcover = { version = "0.1.3", default-features = false, features = ["alloc"] }
 axaddrspace = { version = "0.6", path = "virtualization/axaddrspace" }
 axbacktrace = { version = "0.4", path = "components/axbacktrace" }
 axbuild = { version = "0.9.1", path = "scripts/axbuild" }
@@ -223,12 +228,15 @@ rdif-base = { version = "0.9", path = "drivers/interface/rdif-base" }
 rdif-block = { version = "0.13", path = "drivers/interface/rdif-block" }
 rdif-clk = { version = "0.5", path = "drivers/interface/rdif-clk" }
 rdif-def = { version = "0.4", path = "drivers/interface/rdif-def" }
-rdif-display = { version = "0.4", path = "drivers/interface/rdif-display" }
+rdif-display = { version = "0.5", path = "drivers/interface/rdif-display" }
+rdif-gpu = { version = "0.1", path = "drivers/interface/rdif-gpu" }
 rdif-eth = { version = "0.6", path = "drivers/interface/rdif-eth" }
 rdif-input = { version = "0.3", path = "drivers/interface/rdif-input" }
 rdif-intc = { version = "0.16", path = "drivers/interface/rdif-intc" }
 rdif-msi = { version = "0.3", path = "drivers/interface/rdif-msi" }
+rdif-iommu = { version = "0.1", path = "drivers/interface/rdif-iommu" }
 rdif-pcie = { version = "0.3", path = "drivers/interface/rdif-pcie" }
+arm-smmu-v3 = { version = "0.1", path = "drivers/iommu/arm-smmu-v3" }
 rdif-pinctrl = { version = "0.2", path = "drivers/interface/rdif-pinctrl" }
 rdif-pwm = { version = "0.2", path = "drivers/interface/rdif-pwm" }
 rdif-power = { version = "0.9", path = "drivers/interface/rdif-power" }
@@ -255,7 +263,10 @@ sdmmc-host = { version = "0.1", path = "drivers/blk/sdmmc-host" }
 aic8800 = { version = "0.3", path = "drivers/net/aic8800" }
 crab-usb = { version = "0.12", path = "drivers/usb/usb-host" }
 usb-if = { version = "0.8", path = "drivers/usb/usb-if" }
+uvc-if = { version = "0.1", path = "drivers/usb/uvc-if" }
 usb-serial = { version = "0.1", path = "drivers/usb/usb-serial" }
+ax-media = { version = "0.1", path = "drivers/media/ax-media" }
+media-uvc = { version = "0.1", path = "drivers/media/uvc" }
 dwmmc-host = { version = "0.4", path = "drivers/blk/dwmmc-host", default-features = false }
 phytium-mci-host = { version = "0.4", path = "drivers/blk/phytium-mci-host", default-features = false }
 cv181x-sdhci = { version = "0.1", path = "drivers/blk/cv181x-sdhci", default-features = false }
@@ -266,7 +277,8 @@ smoltcp = { version = "0.13.1", default-features = false }
 starry-kernel = { version = "0.12", path = "os/StarryOS/kernel" }
 starry-signal = { version = "0.10", path = "os/StarryOS/signal" }
 starry-vm = { version = "0.6", path = "os/StarryOS/vm" }
-httpboot-protocol = { version = "0.2.0", default-features = false, features = ["alloc", "json"] }
+httpboot-protocol = { version = "0.4.0", default-features = false, features = ["alloc", "json"] }
+host-boot-abi = { version = "0.1.0", path = "components/host-boot-abi" }
 x86_vlapic = { version = "0.5", path = "virtualization/x86_vlapic" }
 page-table-generic = { version = "0.9", path = "memory/page-table-generic" }
 someboot = { version = "0.7.2", path = "platforms/someboot" }
@@ -313,9 +325,10 @@ dma-api = { version = "0.10", path = "memory/dma-api" }
 mmio-api = { version = "0.3", path = "memory/mmio-api" }
 cvi-vdec-uapi = { version = "0.1", path = "drivers/interface/cvi-vdec-uapi" }
 lock_api = { version = "0.4", default-features = false }
+spinning_top = { version = "0.3", default-features = false }
 log = "0.4"
 loom = "0.7.2"
-ostool = { version = "0.29.4" }
+ostool = { version = "0.30" }
 riscv = { version = "0.16.1", default-features = false }
 sbi-rt = { version = "0.0.4", default-features = false }
 uefi = "0.37.0"

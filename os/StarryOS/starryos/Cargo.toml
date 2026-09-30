@@ -16,13 +16,12 @@ version = "0.5.39"
 [features]
 default = []
 nixos = []
-# Existing board and AxVisor guest images do not yet carry Starry's OpenRC assets.
-legacy-board-init = []
 # The profiling command selects this package-level preset; axbuild must not assemble the
 # individual driver feature list at runtime.
 qperf = ["ax-driver/nvme", "ax-driver/virtio-net", "ax-driver/virtio-socket"]
 qperf-metrics = ["starry-kernel/qperf-metrics"]
 lockdep = ["ax-std/lockdep"]
+axtest-coverage = ["starry-kernel/axtest-coverage"]
 
 k230 = [
   "starry-kernel/k230-kpu",
@@ -55,8 +54,9 @@ ax-std = { workspace = true, default-features = false, features = [
   "fs",
 ] }
 ax-driver.workspace = true
+ax-fs-ng = { workspace = true, features = ["vfs"] }
 ax-hal = { workspace = true, features = ["smp"] }
-ax-runtime = { workspace = true, features = ["ext-ld", "smp"] }
+ax-runtime = { workspace = true, features = ["ext-ld", "smp", "starry-init"] }
 axplat-dyn = { workspace = true, features = ["smp"] }
 starry-kernel = { workspace = true, features = ["dev-log", "ext4"] }
 

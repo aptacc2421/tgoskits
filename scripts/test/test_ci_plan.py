@@ -887,6 +887,85 @@ command = "true"
                 self.assertTrue(any(re.search(pattern, f"DUAL_PICK_CI_FAIL guest={guest} status=1\n")
                                     for pattern in step["fail_regex"]))
 
+    def test_ivc_benchmark_board_runs_benchmark_from_guest_shell(self) -> None:
+        root = MODULE_PATH.parents[2]
+        case_dir = (
+            root / "test-suit/axvisor/normal/board-orangepi-5-plus/ivc-benchmark"
+        )
+        vm_config = tomllib.loads(
+            (case_dir / "starry-axivc-benchmark.toml").read_text()
+        )
+        board_config = tomllib.loads(
+            (
+                case_dir / "benchmark/board-orangepi-5-plus-ivc-benchmark.toml"
+            ).read_text()
+        )
+
+        benchmark = "/usr/bin/ivc-starry-bench"
+        cmdline = vm_config["kernel"]["cmdline"]
+        # The board route waits for the default Starry init shell prompt, and
+        # StarryOS panics when init exits, so the VM must keep that shell as
+        # init and run the benchmark as its child.
+        self.assertNotIn(benchmark, cmdline)
+        self.assertNotIn("init=", cmdline)
+
+        steps = board_config["shell_check_steps"]
+        attach_indices = [
+            index
+            for index, step in enumerate(steps)
+            if step.get("shell_cmd", "").strip() == "vm console 1"
+        ]
+        launch_indices = [
+            index
+            for index, step in enumerate(steps)
+            if benchmark in step.get("shell_cmd", "")
+        ]
+        self.assertEqual(len(attach_indices), 1)
+        self.assertEqual(len(launch_indices), 1)
+        self.assertLess(attach_indices[0], launch_indices[0])
+
+        launch = steps[launch_indices[0]]
+        self.assertEqual(launch["shell_prefix"], "root@starry:")
+        pass_pattern = (
+            "(?m)^(?:\\[VM 1\\] )?AXVISOR_IVC_BENCH_RESULT=PASS "
+            "cases=4 testTime=100 bytes=1232076800 chunks=400\\s*$"
+        )
+        self.assertEqual(launch["success_regex"], [pass_pattern])
+        for pattern in launch["success_regex"]:
+            self.assertIsNone(re.search(pattern, launch["shell_cmd"]))
+        marker = (
+            "AXVISOR_IVC_BENCH_RESULT=PASS cases=4 testTime=100 "
+            "bytes=1232076800 chunks=400"
+        )
+        self.assertTrue(
+            any(
+                re.search(pattern, f"{marker}\n")
+                for pattern in launch["success_regex"]
+            )
+        )
+        self.assertTrue(
+            any(
+                re.search(pattern, f"[VM 1] {marker}\n")
+                for pattern in launch["success_regex"]
+            )
+        )
+        mismatch = marker.replace("bytes=1232076800", "bytes=1232076799")
+        self.assertIsNone(re.search(pass_pattern, f"{mismatch}\n"))
+
+        fail_patterns = board_config["fail_regex"]
+        for sample in (
+            "Kernel panic - not syncing\n",
+            "panicked at kernel/src/task/exit.rs: Attempted to kill init!\n",
+            "AXIVC Starry benchmark peer ready failed\n",
+            "AXIVC Starry benchmark send failed\n",
+            "AXIVC Starry benchmark recv failed\n",
+            "AXIVC Zephyr-Starry benchmark failed\n",
+        ):
+            with self.subTest(sample=sample):
+                self.assertTrue(
+                    any(re.search(pattern, sample) for pattern in fail_patterns)
+                )
+
     def test_fork_repository_filters_owner_checks_and_falls_back_from_qcs(
         self,
     ) -> None:
@@ -985,6 +1064,32 @@ command = "true"
         )
 
         self.assertTrue(any("self-hosted" in row["runs_on"] for row in rows.values()))
+
+    def test_orangepi_checks_queue_by_physical_board(self) -> None:
+        context = ci_plan.PlanContext(
+            repository="rcore-os/tgoskits",
+            repository_owner="rcore-os",
+            event_name="schedule",
+        )
+        main_rows = main_test_rows(ci_plan.build_main_plan(context))
+        nightly_rows = ci_plan.build_axvisor_nightly_plan(context)["axvisor_matrix"][
+            "include"
+        ]
+        catalog = {
+            check["id"]: check for check in ci_plan.load_catalog(ci_plan.MAIN_MANIFESTS)
+        }
+        for row in (*main_rows, *nightly_rows):
+            boards = {
+                registration["board"]
+                for registration in catalog[row["id"]].get("suite", ())
+                if "board" in registration
+            }
+            if any(board.startswith("orangepi-5-plus-robot") for board in boards):
+                self.assertEqual(row["resource_group"], "orangepi-5-plus-robot")
+            elif any(board.startswith("orangepi-5-plus") for board in boards):
+                self.assertEqual(row["resource_group"], "orangepi-5-plus")
+            else:
+                self.assertEqual(row["resource_group"], "")
 
     def test_event_and_boolean_input_select_checks_independently(self) -> None:
         check = {"events": ["schedule"], "enable_boolean_input": "run_optional"}

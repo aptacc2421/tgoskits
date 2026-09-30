@@ -5,6 +5,36 @@
 
 测试设计统一遵循 [test-quality](../../.agents/skills/test-quality/SKILL.md)：优先复用或增强完整功能验证，错误输入的拒绝、状态保持和资源回收并入所属功能，不逐参数或 errno 拆测。本指南中的 case 选择、成功标记和 LTP 完成数量用于运行可信度，不因去重而削弱。
 
+## 一次性外部 QEMU 运行
+
+需要运行已经准备好的独立 rootfs、但仍复用 Starry 构建、成功判定和覆盖率导出链路时，
+可以给 `starry test qemu` 同时提供三个外部输入：
+
+```bash
+cargo xtask starry test qemu \
+  --build-config /absolute/path/build.toml \
+  --qemu-config /absolute/path/qemu.toml \
+  --rootfs /absolute/path/rootfs.img
+```
+
+三个参数必须成组出现，并与 `--arch`、`--target`、`--test-case` 和 `--list` 互斥。
+构建配置负责给出目标；QEMU 配置负责成功、失败和超时判定。外部 rootfs 总是以
+`snapshot=on` 接入，客户机写入不会落回原镜像。
+
+如需复现某个既有内核制品，可再传入位于 Cargo target 目录之外的绝对路径
+`--fixed-elf /absolute/path/starryos`。运行器仍先完成当前源码构建与 `.kallsyms`
+后处理，再比较构建产物和固定 ELF 的架构、入口以及装载与覆盖率 section；验证成功后
+只从固定 ELF 的临时副本启动，因此不会改写固定文件本体。
+
+调用方需要直接观察 QEMU Machine Protocol 时，可在自己的外部 QEMU 配置中声明
+`-qmp` 参数。运行器不连接或解释该端点；socket 生命周期、协议协商、事件解释和命令
+发送均由调用方负责。
+
+构建配置显式设置 `AXTEST_COVERAGE = "y"` 时，运行器启用 Starry 的软件包级覆盖率
+feature，等待客户机写入测试专用 `/proc/starry-test-coverage`，由宿主导出
+`coverage/starryos-<target>.profraw` 后再结束 QEMU。这个入口不参与
+`test-suit/starryos` 的用例发现或 CI case 路由。
+
 ## 发现规则
 
 StarryOS test-suit 不再使用 `normal`、`stress` 等一级测试组。QEMU 和 board
@@ -73,7 +103,7 @@ test-suit/starryos/
       drm-test-drm-perbuf-dumb/
         CMakeLists.txt
         src/
-      evdev-test-evdev-event-primary/
+      evdev-test-evdev-minor/
         CMakeLists.txt
         src/
       usb-audio-iso/
@@ -88,7 +118,7 @@ test-suit/starryos/
       board-orangepi-5-plus.toml
     native-network-smoke/
       board-orangepi-5-plus.toml
-      iperf-smoke.sh
+      network-smoke.sh
 ```
 
 `qemu/system` 是统一的 SMP4 聚合 QEMU case。`qemu/` 根目录只放四架构 build
@@ -300,6 +330,13 @@ cargo xtask starry test qemu --arch loongarch64 -c qemu/system/test-tty-termios-
 `starry-autorun` 服务执行，终端由 BusyBox init 重新拉起；测试命令结束不再等同于
 根 PID 1 退出。`qemu/pid1`、`qemu/pid1-exit`、`qemu/pid1-exit-thread` 和 `qemu/pid1-fault` 安装专用
 `/sbin/init`，验证根 PID 1 的信号、回收语义、两种退出入口与同步缺页；`qemu/openrc` 验证服务管理和终端重新拉起。
+
+`qemu/host-initramfs` 与 `qemu/host-initramfs-disk-fallback` 在 case 目录放置
+`host-initramfs.toml`，其中 `source` 指向工作区内的归档目录；可选的
+`init_source` 指向 AArch64 `/init` 的 C 源码，同目录须有 `entry-aarch64.S`。
+axbuild 在运行前用 clang/lld 编译 `/init`、构建 `newc` 归档，再交给 QEMU。
+运行配置不要再写固定 `initramfs` 路径。内存根用例不接磁盘，磁盘回退用例
+显式配置主 rootfs drive；两者分别检查 `/init` 优先和无 `/init` 时的 `root=`。
 
 `python3 scripts/test/starry_openrc_boot.py --arch <arch> --output <目录>` 另外在私有镜像副本上
 通过 `cargo xtask starry qemu` 连续启动两次，检查服务注册持久化、正常关机及重启的 QMP
@@ -538,7 +575,7 @@ os/StarryOS/configs/board/<board>.toml
 
 ```toml
 session_files = [
-  "iperf-bench.sh",
+  "network-bench.sh",
   "tools/network/probe.sh",
 ]
 ```
@@ -604,70 +641,50 @@ App 的 `board-<name>.toml` 默认复用
 ```bash
 cargo xtask starry test board --board orangepi-5-plus
 cargo xtask starry test board -c native-hardware-smoke --board orangepi-5-plus
-cargo xtask starry app board -t iperf3 -b OrangePi-5-Plus
+cargo xtask starry app board -t network-throughput -b OrangePi-5-Plus --board-config board-orangepi-5-plus.toml
 ```
 
 `native-hardware-smoke` 在一次启动中依次验证启动、PCIe、USB2、PWM 和 NPU。
-`native-network-smoke` 执行一条短 TCP 双向命令，随后在 `eth1` 上验证 rtnetlink
-地址增删，适合作为 CI 连通性检查。完整吞吐测试位于 `apps/starry/iperf3`，直接通过
-上面的 `cargo xtask starry app board` 命令启动板测；ostool server 持续提供 iperf3
-服务，board 配置步骤内的 `shell_cmd` 通过活动 session 的 `${boardServerIp}` 和
-`${sessionFile:iperf-bench.sh}` 获取实际地址；app 的 `init.sh` 会按现有 xtask 流程追加
-到该步骤中，下载并启动测试脚本，不依赖固定网卡、固定 IP、固定网段或额外的板测
-启动脚本。
+`native-network-smoke` 在专用 TCP 3000 端口执行短时双向 HTTP 流式传输，随后在
+`eth1` 上验证 rtnetlink 地址增删，适合作为 CI 连通性检查。AKA Wi-Fi 的
+`wifi-network-smoke` 在取得 DHCP 地址后执行同样的双向传输。AKA 板端只有
+`wget` 时，测试会从本次 session 下载包含 `curl` 及其 musl 依赖的归档，再运行
+`upload-source` 和双向传输；无需预装 iperf 或 curl。
 
-真板卡 CI 的 AKA WiFi 与 OrangePi 网络冒烟统一使用 iperf2，共享 TCP 5001
-服务端口；iperf2 服务进程接受多个独立客户端。`board-common/iperf2` 提供公共脚本
-和打包规则，各 case 的 `c/prebuild.sh` 在 Alpine 暂存环境安装 `iperf`，CMake 将
-客户端、musl 加载器及匹配的 C++ 运行库打包为 `share/iperf2.tar.gz`。板卡通过
-`${sessionFile:share/iperf2.tar.gz}` 下载到 `/tmp`，不要求预装客户端或修改持久根文件系统。
+`board-common/network-test` 的 `upload-source.c` 以 128 KiB 固定块生成零数据，
+按单调时钟运行指定时长，不落盘；CMake 将其编译并把脚本安装到每次运行的 session
+upload root。AKA 板测的 CMake 同时从 staging root 打包 curl 的目标 ELF 依赖。
+板端从 `${sessionFile:bin/...}` 和 `${sessionFile:share/curl-bundle.tar.gz}` 下载资产，使用 `${boardServerIp}:3000`
+访问 ostool-server 的网络测试服务。管理 API 仍使用 2999；该测试是 HTTP 协议，
+不兼容 iperf2/iperf3。
 
-`iperf2-smoke` 使用 `--full-duplex` 同时收发，按 iperf2 的普通线程 ID 和带 `*`
-的接收线程 ID 分别检查进展。AKA 运行 22 秒，其中前 2 秒预热；OrangePi 运行
-4 秒，其中前 1 秒预热。任一方向在预热后连续 3 秒无进展、缺少接收报告、最终
-报告提前结束或命令非零退出均失败。最终汇总不能覆盖中间停滞。完整 iperf3
-benchmark 应用仍可手工运行，不属于这两个 CI 冒烟入口。
+每次 smoke 先用 `POST /v1/tests` 获取独立的测试 ID，然后并行运行
+`PUT /v1/tests/{id}/upload` 和 `GET /v1/tests/{id}/download?duration_secs=N`。
+脚本每秒查询 `GET /v1/tests/{id}`，按上传和下载的字节数分别检查进展，预热后
+任一方向连续三次查询没有进展，或预热后未观察到该方向进展即失败。
+OrangePi 运行 4 秒、预热 1 秒；AKA Wi-Fi
+运行 22 秒、预热 2 秒。只有两个 curl 命令均成功、两方向状态均为 `completed`、
+字节数大于零且服务端耗时覆盖预期时长才打印通过标记。网络或服务端错误会失败；
+结果与测试 ID 同时输出，便于按服务端记录排查。专用端口默认最多允许 64 个
+活动测试；容量满时创建请求返回 429，smoke 会失败而不是误报通过。
 
-在 runner 服务器安装并启用共享 iperf2 服务：
+完整吞吐矩阵位于 `apps/starry/network-throughput`，通过上面的
+`cargo xtask starry app board` 手工启动。它覆盖单流上传、单流下载、单流双向、
+2/4/8 流上传和 4 流下载，每场景三轮并取中位数。上传使用同一
+`upload-source`，下载由服务端流式生成。板端用 `curl` 与服务端的状态字节计数
+计算 Mbps；这是 HTTP 流式吞吐指标，不能和旧 iperf3 报告直接比较。
+
+可在 runner 上检查服务：
 
 ```bash
-sudo apt-get install -y iperf
-sudo install -m 644 .github/ci/iperf2.service /etc/systemd/system/iperf2.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now iperf2.service
+curl -fsS http://10.3.10.194:3000/healthz
+curl -fsS -X POST http://10.3.10.194:3000/v1/tests
 ```
 
-模板使用 systemd 动态用户，服务器防火墙需要允许板卡访问 TCP 5001。服务端和
-板端必须都是 iperf2；iperf3 不兼容该协议。无需为每块板分配独立的 iperf3 实例。
-
-完整 benchmark 固定执行 T01--T07：单流 TX、单流 RX、单流双向、2/4/8 流 TX 和
-4 流 RX。每个场景使用 `-t 10 -O 2 -l 128K` 运行 3 次，每个连接结束后固定冷却
-15 秒，避免上一轮 TCP teardown 干扰下一轮；脚本直接打印原始输出、中位数和最终
-汇总表：
-
-```text
-T01  Single-stream DUT TX
-Command: iperf3 -c <session-host> -t 10 -O 2 -P 1 -l 128K
-
-Run 1/3
-<native iperf3 output>
-Result  DUT TX: ... Mbps
-
-Run 2/3
-<native iperf3 output>
-Result  DUT TX: ... Mbps
-
-Run 3/3
-<native iperf3 output>
-Result  DUT TX: ... Mbps
-
-Median DUT TX: ... Mbps
-STARRY_IPERF3_BENCH_PASSED
-```
-
-每轮 iperf3 原始文本和机器可读汇总保存在板端 `/tmp/starry-iperf3-bench/`。
-benchmark 只要求所有场景完成并产生有效速率，不设置与机器绑定的吞吐门槛；端口和
-测试档位固定，避免不同运行使用不同参数。
+测试要求 `ostool-server` 0.8.0 或更新版本，并启用网络测试服务。该端口在 TOML 中
+可配置，默认 3000。若服务器更改端口，
+需同时更新板卡脚本中的 URL。无需重启或更改独立的 iperf2 服务；迁移后的
+TGOSKits 测试不再调用它。
 
 ROCK 4D 使用板卡服务名称 `Rock-4D`、仓库内的 RK3576 DTB 和 1,500,000 baud
 串口。维护的单核启动回归命令为：

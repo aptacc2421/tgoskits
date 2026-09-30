@@ -89,6 +89,18 @@ impl AppContext {
 
     pub(crate) fn new_with_target_dir(target_dir: Option<&Path>) -> anyhow::Result<Self> {
         let workspace = WorkspaceContext::discover(target_dir)?;
+        Self::from_workspace_context(workspace)
+    }
+
+    pub(crate) fn from_workspace_root(
+        workspace_root: &Path,
+        target_dir: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        let workspace = WorkspaceContext::from_root(workspace_root, target_dir)?;
+        Self::from_workspace_context(workspace)
+    }
+
+    fn from_workspace_context(workspace: WorkspaceContext) -> anyhow::Result<Self> {
         crate::support::logging::init_logging(workspace.root())?;
 
         info!("Workspace root: {}", workspace.root().display());
@@ -282,7 +294,8 @@ impl AppContext {
             cargo
                 .test
                 .as_deref()
-                .context("axtest coverage requires a Cargo test target")?,
+                .or(cargo.bin.as_deref())
+                .unwrap_or(&cargo.package),
             &cargo.target,
         )?;
         crate::support::axtest_coverage::apply_qemu_monitor(&mut qemu, &paths)?;
@@ -305,10 +318,14 @@ impl AppContext {
             cargo.package, cargo.target
         ));
         let result = self.run_qemu_captured(cargo, qemu, capture_backtrace).await;
-        capture.finish()?;
-        let result = crate::support::qemu_success::verify_qemu_success_contract(
+        let coverage_result = capture.finish();
+        let qemu_result = crate::support::qemu_success::verify_qemu_success_contract(
             result,
             Some(&success_output),
+        );
+        let result = crate::support::qemu_success::combine_qemu_and_coverage_results(
+            qemu_result,
+            coverage_result,
         );
         if result.is_ok() {
             stage.done();
@@ -544,6 +561,7 @@ impl AppContext {
             &mut self.invocation,
             &BuildConfig {
                 system: BuildSystem::Cargo(Box::new(cargo.clone())),
+                ..Default::default()
             },
             build_config_path.as_deref(),
         )

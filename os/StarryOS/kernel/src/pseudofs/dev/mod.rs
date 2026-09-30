@@ -4,9 +4,7 @@ mod axivc;
 pub(crate) mod card0;
 #[cfg(feature = "rknpu")]
 pub(crate) mod card1;
-// The real contiguous coherent dma-heap is shared by every accelerator that
-// exchanges buffers (JPU / NPU / RGA).
-#[cfg(any(feature = "jpeg", feature = "rknpu", feature = "rga"))]
+// The coherent dma-heap is shared by GPUs and other DMA devices.
 mod dmaheap;
 mod drm;
 mod vblank;
@@ -25,6 +23,7 @@ pub(crate) mod r#loop;
 mod memtrack;
 #[cfg(feature = "jpeg")]
 mod mpp_service;
+mod net;
 #[cfg(feature = "sg2002")]
 mod pinmux;
 pub(super) mod pwm;
@@ -44,6 +43,14 @@ mod cvi_usb_camera;
 
 #[cfg(feature = "sg2002-cvi-usb-camera")]
 mod cvi_vdec;
+#[cfg(feature = "uvc")]
+mod uvc_camera;
+#[cfg(feature = "uvc")]
+pub(crate) mod video;
+#[cfg(feature = "uvc")]
+mod video_allocator;
+#[cfg(feature = "uvc")]
+mod video_dir;
 
 use alloc::{format, sync::Arc};
 use core::{
@@ -654,11 +661,9 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     }
 
     // /dev/dma_heap — the real contiguous, DMA-coherent allocator that the
-    // accelerators share buffers from (zero-copy across JPU / NPU / RGA). Every
-    // heap name maps to the same allocator. Available under any accelerator
-    // feature, not just `jpeg`.
-    #[cfg(any(feature = "jpeg", feature = "rknpu", feature = "rga"))]
-    {
+    // accelerators and GPUs share buffers from. Every heap name maps to the
+    // same allocator. GPU PRIME import also accepts these direct-domain pages.
+    if ax_gpu::has_gpu() || cfg!(any(feature = "jpeg", feature = "rknpu", feature = "rga")) {
         let mut dma_heap_dir = DirMapping::new();
         for name in dmaheap::HEAP_NAMES {
             dma_heap_dir.add(
@@ -687,6 +692,10 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         "mqueue",
         SimpleDir::new_maker(fs.clone(), Arc::new(DirMapping::new())),
     );
+    root.add(
+        "net",
+        SimpleDir::new_maker(fs.clone(), Arc::new(net::net_dir(fs.clone()))),
+    );
     {
         let mut bus_dir = DirMapping::new();
         bus_dir.add(
@@ -696,29 +705,28 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         root.add("bus", SimpleDir::new_maker(fs.clone(), Arc::new(bus_dir)));
     }
 
-    // /dev/dri/card0 — simpledrm-class DRM character device. Advertised
-    // unconditionally so libdrm/libudev see the DRM node even before
-    // there's a display device behind it.
-    let dri_card0 = card0::Card0::new();
     let mut dri_dir = DirMapping::new();
-    dri_dir.add(
-        "card0",
-        Device::new(
-            fs.clone(),
-            NodeType::CharacterDevice,
-            DeviceId::new(226, 0),
-            dri_card0.clone(),
-        ),
-    );
-    dri_dir.add(
-        "renderD128",
-        Device::new(
-            fs.clone(),
-            NodeType::CharacterDevice,
-            DeviceId::new(226, 128),
-            dri_card0,
-        ),
-    );
+    if ax_gpu::has_gpu() {
+        let dri_card0 = card0::Card0::new();
+        dri_dir.add(
+            "card0",
+            Device::new(
+                fs.clone(),
+                NodeType::CharacterDevice,
+                DeviceId::new(226, 0),
+                dri_card0.clone(),
+            ),
+        );
+        dri_dir.add(
+            "renderD128",
+            Device::new(
+                fs.clone(),
+                NodeType::CharacterDevice,
+                DeviceId::new(226, 128),
+                dri_card0,
+            ),
+        );
+    }
 
     #[cfg(feature = "rga")]
     root.add(
@@ -824,7 +832,15 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             );
         }
     }
-    SimpleDir::new_maker(fs, Arc::new(root))
+    #[cfg(feature = "uvc")]
+    {
+        SimpleDir::new_maker(fs.clone(), Arc::new(video_dir::UvcDevRoot::new(root, fs)))
+    }
+
+    #[cfg(not(feature = "uvc"))]
+    {
+        SimpleDir::new_maker(fs, Arc::new(root))
+    }
 }
 
 fn descriptor_symlink(fs: Arc<SimpleFs>, target: &'static str) -> Arc<SimpleFile> {

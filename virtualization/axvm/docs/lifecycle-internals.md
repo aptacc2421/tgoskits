@@ -44,7 +44,7 @@ VMM/控制面）。本文档回答四类实现问题：**状态到底带着什�
 | `Stopped { resources, runtime, reason }` | `Stopped` | `Option` | `Option` | **两个字段独立变化，见 §1.2** |
 | `Destroying` | `Destroying` | 无 | 无 | `take_resources_for_destroy` 的入口占位（machine.rs:515）；每个分支随即改写为 `Destroyed` 或还原原状态，锁释放后不可观测（§4） |
 | `Destroyed` | `Destroyed` | 无 | 无 | 终态 |
-| `Failed(String, Option<R>)` | `Failed` | `Option` | 无 | resources 仅在失败时保留：`Ready`/`Running`/`Paused`/`Stopped` 的失败转换都会把它存进状态（`start_with`/`stop_with` 的闭包失败分支，machine.rs:128/:225）。锁内不可取，只能经 `take_resources_for_destroy` 交给锁外回收（§3.3）；`resources()`/`resources_mut()` 对它一律返回 `None`，因此失败的 VM 无法 prepare/start |
+| `Failed(String, Option<R>)` | `Failed` | `Option` | 无 | resources 仅在失败时保留：`start_with`（从 `Ready`）、`stop_with`（从 `Ready`）与 `reset_with`（从 `Ready`/`Stopped{runtime: None}`）的闭包失败分支把它存进状态（machine.rs:128/:225/:426/:440）；`start_with` 从 `Stopped` 失败则还原 `Stopped`（machine.rs:141-147），不写本状态。锁内不可取，只能经 `take_resources_for_destroy` 交给锁外回收（§3.3）；`resources()`/`resources_mut()` 对它一律返回 `None`，因此失败的 VM 无法 prepare/start |
 | `Switching` | `Failed` | 无 | 无 | 转换入口占位（§4） |
 
 ### 1.2 `Stopped` 的双维度是"拒绝还是允许 destroy"的根源
@@ -127,13 +127,15 @@ stateDiagram-v2
 > 因此 vm 层 `start` 会先 `take_stopped_runtime`（vm/mod.rs:1774）清空 runtime，再调
 > `start_with`（详见 §3）。
 >
-> **转换闭包失败统一进入 `Failed` 并保留资源集**：`start_with`/`stop_with`/`reset_with` 的闭包失败都
-> 在同一临界区内写入 `Failed`（machine.rs:128/:225 与 `reset_with` 的对应分支），并把该转换持有的
-> resources 一起存进状态。保留而不是就地 drop 有两个原因：闭包在 `start_with`/`reset_with` 调用者
-> 持有的 IRQ-safe 锁内运行（§4），就地 drop 会在临界区触发设备析构，而设备析构可能 join worker
-> 线程；并且 `Failed` 是"不可复用、须 `destroy()` 后重建"的终态，调用者需要一条能把这批资源交给
-> 锁外清理的路径（§3.3）。`Switching` 是唯一的例外：它不带资源，因此**只有**在锁语义被破坏、
-> `Switching` 泄漏时才不可观测地映出 `failed`（§4），正常失败路径都落在可销毁的 `Failed` 上。
+> **闭包失败分路径落点**：`start_with`（从 `Ready`）、`stop_with`（从 `Ready`）与 `reset_with`（从
+> `Ready`/`Stopped{runtime: None}`）的闭包失败都在同一临界区内写入 `Failed`（machine.rs:128/:225/:426/:440），
+> 并把该转换持有的 resources 一起存进状态；`start_with` 从 `Stopped{runtime: None}` 失败则还原为
+> `Stopped{resources: Some, runtime: None}`（machine.rs:141-147），不进入 `Failed`，可重试或
+> `destroy()`。资源保留而不是就地 drop 的原因对两类落点相同：闭包在调用者持有的 IRQ-safe 锁内
+> 运行（§4），就地 drop 会在临界区触发设备析构，而设备析构可能 join worker 线程；对 `Failed`
+> 还因为它是"不可复用、须 `destroy()` 后重建"的终态，调用者需要一条能把这批资源交给锁外清理的
+> 路径（§3.3）。`Switching` 不带资源，因此**只有**在锁语义被破坏、`Switching` 泄漏时才不可观测地
+> 映出 `failed`（§4），正常失败路径都落在可销毁的 `Failed` 或可重试的 `Stopped` 上。
 
 **destroy 不是 `Machine` 的一步转换**：`Machine` 只直接接受 `Ready`/`Stopped{runtime: None}`/
 `Failed` 的 `take_resources_for_destroy`（见 §3.3）；运行态先由 `vm::destroy` 强制静默到 `Stopped` 并

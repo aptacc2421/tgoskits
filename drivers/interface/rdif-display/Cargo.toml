@@ -7,10 +7,11 @@ keywords = ["os", "driver"]
 license = "MIT"
 name = "rdif-display"
 repository.workspace = true
-version = "0.4.0"
+version = "0.5.0"
 
 [dependencies]
 rdif-base = { workspace = true }
+rdif-gpu = { workspace = true }
 thiserror = { version = "2", default-features = false }
 
 [features]

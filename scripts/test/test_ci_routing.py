@@ -2,11 +2,13 @@
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from scripts.test.check_ci_routing import mapping_block, named_step_block
 
@@ -17,6 +19,7 @@ REUSABLE_CHECK_MATRIX = (
     WORKSPACE_ROOT / ".github/workflows/reusable-check-matrix.yml"
 )
 PR_CLEANUP_WORKFLOW = WORKSPACE_ROOT / ".github/workflows/ci-pr-cleanup.yml"
+AXVISOR_NIGHTLY_WORKFLOW = WORKSPACE_ROOT / ".github/workflows/axvisor-nightly.yml"
 
 
 class ReleasePrerequisiteTests(unittest.TestCase):
@@ -113,6 +116,75 @@ class ConcurrencyRoutingTests(unittest.TestCase):
         )
         self.assertIn("queue: max", concurrency)
 
+    def test_board_jobs_only_share_groups_on_protected_or_manual_runs(self) -> None:
+        workflow = REUSABLE_CHECK_MATRIX.read_text(encoding="utf-8")
+        job = mapping_block(mapping_block(workflow, "jobs", 0), "run", 2)
+        concurrency = mapping_block(job, "concurrency", 4)
+        match = re.search(
+            r"group:\s*(?:>-\s*)?ci-resource-\${{(.*?)}}", concurrency, re.S
+        )
+        self.assertIsNotNone(match)
+        expression = " ".join(match.group(1).split())
+        expression = expression.replace("&&", " and ").replace("||", " or ")
+
+        def group(
+            event: str,
+            ref: str,
+            run_id: int,
+            resource: str = "board",
+            check_id: str = "check",
+        ) -> str:
+            # GitHub's &&/|| and format() use the same truthy short-circuit
+            # behavior as Python's and/or and str.format for this expression.
+            context = {
+                "github": SimpleNamespace(event_name=event, ref=ref, run_id=run_id),
+                "matrix": SimpleNamespace(id=check_id, resource_group=resource),
+                "format": lambda template, *args: template.format(*args),
+            }
+            return "ci-resource-" + eval(expression, {"__builtins__": {}}, context)
+
+        for event, ref in (
+            ("push", "refs/heads/dev"),
+            ("push", "refs/heads/main"),
+            ("schedule", "refs/heads/dev"),
+            ("workflow_dispatch", "refs/heads/topic"),
+        ):
+            with self.subTest(event=event, ref=ref):
+                self.assertEqual(group(event, ref, 1), "ci-resource-board")
+                self.assertEqual(group(event, ref, 2), "ci-resource-board")
+
+        for event, ref in (
+            ("push", "refs/heads/topic"),
+            ("pull_request", "refs/pull/123/merge"),
+        ):
+            with self.subTest(event=event, ref=ref):
+                self.assertEqual(group(event, ref, 1), "ci-resource-run-1-check")
+                self.assertEqual(group(event, ref, 2), "ci-resource-run-2-check")
+                self.assertEqual(
+                    group(event, ref, 1, check_id="other"), "ci-resource-run-1-other"
+                )
+
+        self.assertEqual(
+            group("push", "refs/heads/dev", 1, ""), "ci-resource-run-1-check"
+        )
+        self.assertIn("queue: max", concurrency)
+        self.assertIn("cancel-in-progress: false", concurrency)
+
+
+class AxvisorNightlyWorkflowTests(unittest.TestCase):
+    def test_manual_dispatch_uses_the_selected_revision(self) -> None:
+        workflow = AXVISOR_NIGHTLY_WORKFLOW.read_text(encoding="utf-8")
+        plan = mapping_block(workflow, "plan", 2)
+        concurrency = mapping_block(workflow, "concurrency", 0)
+        perf_history = mapping_block(workflow, "perf-history", 2)
+
+        self.assertNotIn("ref: dev", plan)
+        self.assertIn("- name: Pin triggering revision", plan)
+        self.assertIn('echo "sha=$(git rev-parse HEAD)"', plan)
+        self.assertIn("axvisor-nightly-${{ github.ref }}", concurrency)
+        self.assertIn("tested revision: ${REVISION}", workflow)
+        self.assertIn("github.ref == 'refs/heads/dev'", perf_history)
+
 
 class MatrixParallelismTests(unittest.TestCase):
     def test_self_hosted_matrix_waits_for_preflight_then_runs_in_parallel(
@@ -204,8 +276,8 @@ class DuplicateEventRoutingTests(unittest.TestCase):
             any("actions/runs/101/jobs" in call for call in result.gh_calls)
         )
 
-    def test_waiting_and_requested_pushes_suppress_pull_request(self) -> None:
-        for status in ("waiting", "requested"):
+    def test_pending_waiting_and_requested_pushes_suppress_pull_request(self) -> None:
+        for status in ("pending", "waiting", "requested"):
             with self.subTest(status=status):
                 result = run_route(
                     event_name="pull_request",
