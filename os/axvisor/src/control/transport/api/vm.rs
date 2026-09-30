@@ -84,14 +84,17 @@ pub async fn vm_schema() -> Json<Value> {
              "default": "fs", "options": ["fs"],
              "description": "内核从哪里来。表单创建的客户机只支持 fs：从客户机文件系统读上面那个内核文件。"},
             {"name": "entry_point", "type": "address", "required": true,
-             "description": "CPU 从哪个客户机物理地址开始执行内核，要和内核自己链接的入口一致；QEMU virt 上的 Linux 惯例是 0x8020_0000。",
-             "example": "0x8020_0000"},
+             "default": FORM_ENTRY_POINT,
+             "description": "CPU 从哪个客户机物理地址开始执行内核，要和内核自己链接的入口一致；默认值是该架构官方镜像的惯例值。",
+             "example": FORM_ENTRY_POINT},
             {"name": "kernel_load_addr", "type": "address", "required": true,
+             "default": FORM_KERNEL_LOAD_ADDR,
              "description": "内核镜像被装载到的客户机物理地址，通常与入口地址相同。",
-             "example": "0x8020_0000"},
+             "example": FORM_KERNEL_LOAD_ADDR},
             {"name": "memory_base", "type": "address", "required": true,
-             "description": "客户机内存的起始地址（客户机物理地址）。QEMU virt 从 0x8000_0000 开始划分客户机内存。",
-             "example": "0x8000_0000"},
+             "default": FORM_MEMORY_BASE,
+             "description": "客户机内存的起始地址（客户机物理地址）。默认值是该架构官方镜像的惯例值；x86 固件要求从 0 开始。",
+             "example": FORM_MEMORY_BASE},
             {"name": "memory_mb", "type": "integer", "required": true,
              "description": "客户机内存大小（MiB）。不要超过宿主机实际可用的内存。",
              "example": 256},
@@ -103,9 +106,9 @@ pub async fn vm_schema() -> Json<Value> {
              "description": "给客户机几个 vCPU。",
              "example": 1},
             {"name": "cmdline", "type": "string", "required": false,
-             "default": "root=/dev/vda ro rootwait console=ttyAMA0 init=/bin/sh",
+             "default": FORM_CMDLINE_DEFAULT,
              "description": "传给内核的命令行。默认值把控制台接到模拟串口（浏览器终端的输入输出走它）并从 virtio-blk 盘的根启动；换客户机镜像时按它的布局改。",
-             "example": "root=/dev/vda ro rootwait console=ttyAMA0 init=/bin/sh"},
+             "example": FORM_CMDLINE_DEFAULT},
         ],
     }))
 }
@@ -114,7 +117,36 @@ pub async fn vm_schema() -> Json<Value> {
 /// field empty: a console wired to the emulated UART (which the browser
 /// terminal reads and writes) and a root on the virtio-blk disk the form's
 /// rootfs names. The workspace's own images boot from exactly this shape.
+///
+/// The console device name follows the virtual serial model the machine
+/// factory instantiates for axvisor's own architecture: PL011 on aarch64,
+/// the 16550 UART elsewhere.
+#[cfg(target_arch = "aarch64")]
 const FORM_CMDLINE_DEFAULT: &str = "root=/dev/vda ro rootwait console=ttyAMA0 init=/bin/sh";
+#[cfg(not(target_arch = "aarch64"))]
+const FORM_CMDLINE_DEFAULT: &str = "root=/dev/vda ro rootwait console=ttyS0 init=/bin/sh";
+
+/// The address defaults follow each architecture's own boot convention: the
+/// QEMU virt RAM split on aarch64 and riscv64, and the x86 firmware's rule
+/// that guest RAM starts at GPA 0 with the kernel loaded low.
+#[cfg(target_arch = "aarch64")]
+const FORM_ENTRY_POINT: &str = "0x8020_0000";
+#[cfg(target_arch = "aarch64")]
+const FORM_KERNEL_LOAD_ADDR: &str = "0x8020_0000";
+#[cfg(target_arch = "aarch64")]
+const FORM_MEMORY_BASE: &str = "0x8000_0000";
+#[cfg(target_arch = "riscv64")]
+const FORM_ENTRY_POINT: &str = "0x9020_0000";
+#[cfg(target_arch = "riscv64")]
+const FORM_KERNEL_LOAD_ADDR: &str = "0x9020_0000";
+#[cfg(target_arch = "riscv64")]
+const FORM_MEMORY_BASE: &str = "0x9000_0000";
+#[cfg(target_arch = "x86_64")]
+const FORM_ENTRY_POINT: &str = "0x8000";
+#[cfg(target_arch = "x86_64")]
+const FORM_KERNEL_LOAD_ADDR: &str = "0x20_0000";
+#[cfg(target_arch = "x86_64")]
+const FORM_MEMORY_BASE: &str = "0x0";
 
 /// Reads one creation request's `fields` into template parameters.
 ///
