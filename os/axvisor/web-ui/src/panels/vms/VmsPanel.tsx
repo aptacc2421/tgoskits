@@ -10,7 +10,8 @@
 //!   action took effect, so every mutation is followed by a settle poll instead
 //!   of trusting the 200 that only means "request accepted".
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Pause, Play, RefreshCw, Square, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -40,20 +41,39 @@ import {
   type VmStatus,
   type VmSummary,
 } from '@/api/types'
-import { describeCpuAffinity } from '@/lib/vcpu'
 import {
   countersOf,
   settleToTerminalState,
   type LifecycleOp,
 } from '@/lib/lifecycle'
-import { STATUS_TONE } from '@/lib/status'
+import { STATUS_DOT, STATUS_TONE } from '@/lib/status'
 import { cn } from '@/lib/utils'
+import { AffinityMatrix } from './AffinityMatrix'
 import { CreateForm } from './CreateForm'
+import { DetailDrawer } from './DetailDrawer'
+import { Overview } from './Overview'
 
 /** How long the registry is polled while no event socket is available. */
 const REGISTRY_REFRESH_MS = 2000
 
-export default function VmsPanel({ api, link, files = null, resources = [], focusVm = null }: PanelProps) {
+/**
+ * How often the per-guest details are re-read.
+ *
+ * Slower than the registry, because a detail carries what changes slowly: the
+ * affinity mask is fixed for the life of the guest, and the entry counters are
+ * read for a trend rather than for a transition — a lifecycle action polls the
+ * one guest it is waiting for instead of waiting for this loop.
+ */
+const DETAIL_REFRESH_MS = 5000
+
+export default function VmsPanel({
+  api,
+  link,
+  files = null,
+  resources = [],
+  focusVm = null,
+  host = null,
+}: PanelProps) {
   const [registry, setRegistry] = useState<VmSummary[]>(resources)
   const [pool, setPool] = useState<PoolInfo | null>(null)
   const [poolError, setPoolError] = useState<string | null>(null)
@@ -72,6 +92,17 @@ export default function VmsPanel({ api, link, files = null, resources = [], focu
   const [browsePath, setBrowsePath] = useState('')
   const [browseInfo, setBrowseInfo] = useState<BrowseInfo | null>(null)
   const [browseError, setBrowseError] = useState<string | null>(null)
+  // Detail of every guest listed, keyed by id. The registry carries neither the
+  // affinity mask nor the entry counters, and both are what the overview and
+  // the matrix below are drawn from.
+  const [details, setDetails] = useState<Record<number, VmDetail>>({})
+  // The loop below is keyed on *which* guests exist rather than on the array:
+  // the registry is a new array on every poll, and re-reading every detail on
+  // each of those would be one request per guest per two seconds.
+  const registryRef = useRef(registry)
+  registryRef.current = registry
+  const registryKey = registry.map((vm) => vm.id).join(',')
+  const physCpuCount = host?.phys_cpu_count ?? null
 
   // The id a fresh form should pre-fill: one past every id the registry and the
   // pool already hold, so the operator starts from a value that cannot collide
@@ -130,6 +161,34 @@ export default function VmsPanel({ api, link, files = null, resources = [], focu
     }, REGISTRY_REFRESH_MS)
     return () => window.clearInterval(timer)
   }, [refreshRegistry, refreshPool])
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      const loaded = await Promise.all(
+        registryRef.current.map(async (vm) => {
+          try {
+            const detail = await api.get<VmDetail>(link.url('detail', { id: vm.id }))
+            return { id: vm.id, detail }
+          } catch {
+            // A guest that went away between the list and this read is simply
+            // absent from the matrix; the next poll drops it from both.
+            return null
+          }
+        }),
+      )
+      if (cancelled) return
+      const next: Record<number, VmDetail> = {}
+      for (const entry of loaded) if (entry !== null) next[entry.id] = entry.detail
+      setDetails(next)
+    }
+    void load()
+    const timer = window.setInterval(() => void load(), DETAIL_REFRESH_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [api, link, registryKey])
 
   const showDetail = useCallback(
     async (id: number) => {
@@ -316,6 +375,10 @@ export default function VmsPanel({ api, link, files = null, resources = [], focu
       )}
       {note && <Banner tone="info">{busy ? `${note}（等待真实状态收敛）` : note}</Banner>}
 
+      <Overview vms={registry} details={details} physCpuCount={physCpuCount} />
+
+      <AffinityMatrix vms={registry} details={details} physCpuCount={physCpuCount} />
+
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <div>
@@ -326,6 +389,7 @@ export default function VmsPanel({ api, link, files = null, resources = [], focu
           </div>
           <div className="flex gap-2">
             <Button size="sm" variant="outline" onClick={() => void refreshRegistry()}>
+              <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
               刷新
             </Button>
             <Button size="sm" onClick={() => setFormOpen(true)}>
@@ -337,96 +401,71 @@ export default function VmsPanel({ api, link, files = null, resources = [], focu
           </div>
         </CardHeader>
         <CardContent>
-          <table className="w-full text-sm">
-            <thead className="text-left text-xs uppercase text-muted-foreground">
-              <tr>
-                <th className="py-1">ID</th>
-                <th className="py-1">名称</th>
-                <th className="py-1">状态</th>
-                <th className="py-1">vCPU</th>
-                <th className="py-1">内存</th>
-                <th className="py-1 text-right">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {registry.map((vm) => (
-                <tr key={vm.id} className="border-t">
-                  <td className="py-1 font-mono">{vm.id}</td>
-                  <td className="py-1">{vm.name}</td>
-                  <td className="py-1">
-                    <StatusBadge status={vm.status} />
-                  </td>
-                  <td className="py-1">{vm.cpu_num}</td>
-                  <td className="py-1">{vm.memory_mb} MiB</td>
-                  <td className="flex flex-wrap justify-end gap-1 py-1">
-                    <Button size="sm" variant="outline" onClick={() => void showDetail(vm.id)}>
-                      详情
+          <ul className="flex flex-col gap-1.5">
+            {registry.map((vm) => (
+              <li
+                key={vm.id}
+                className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border px-3 py-2.5 transition-colors hover:bg-accent/40"
+              >
+                <span
+                  className={cn('h-2 w-2 shrink-0 rounded-full', STATUS_DOT[vm.status] ?? 'bg-muted-foreground')}
+                  title={describeStatus(vm.status)}
+                />
+                <span className="font-mono text-xs text-muted-foreground">VM[{vm.id}]</span>
+                <span className="min-w-0 flex-1 truncate text-sm font-medium">{vm.name}</span>
+                <span
+                  className={cn('rounded-full border px-2 py-0.5 text-xs', STATUS_TONE[vm.status] ?? '')}
+                >
+                  {describeStatus(vm.status)}
+                </span>
+                <span className="tabular text-xs text-muted-foreground">
+                  {vm.cpu_num} vCPU · {vm.memory_mb} MiB
+                </span>
+                <span className="flex flex-wrap justify-end gap-1">
+                  <Button size="sm" variant="ghost" onClick={() => void showDetail(vm.id)}>
+                    详情
+                  </Button>
+                  {canStart(vm.status) && (
+                    <Button size="sm" disabled={busy !== null} onClick={() => void start(vm.id)}>
+                      <Play className="mr-1 h-3 w-3" />
+                      启动
                     </Button>
-                    {canStart(vm.status) && (
-                      <Button size="sm" disabled={busy !== null} onClick={() => void start(vm.id)}>
-                        启动
-                      </Button>
-                    )}
-                    {canStop(vm.status) && (
-                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void stop(vm.id)}>
-                        停止
-                      </Button>
-                    )}
-                    {vm.status === 'running' && (
-                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void pause(vm.id)}>
-                        暂停
-                      </Button>
-                    )}
-                    {vm.status === 'paused' && (
-                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void resume(vm.id)}>
-                        恢复
-                      </Button>
-                    )}
-                    <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => void close(vm.id)}>
-                      关闭
+                  )}
+                  {canStop(vm.status) && (
+                    <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void stop(vm.id)}>
+                      <Square className="mr-1 h-3 w-3" />
+                      停止
                     </Button>
-                  </td>
-                </tr>
-              ))}
-              {registry.length === 0 && (
-                <tr>
-                  <td colSpan={6} className="py-3 text-center text-muted-foreground">
-                    注册表中没有客户机——从下面的候选配置启动一台，或粘贴一份配置创建。
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+                  )}
+                  {vm.status === 'running' && (
+                    <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void pause(vm.id)}>
+                      <Pause className="mr-1 h-3 w-3" />
+                      暂停
+                    </Button>
+                  )}
+                  {vm.status === 'paused' && (
+                    <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void resume(vm.id)}>
+                      <Play className="mr-1 h-3 w-3" />
+                      恢复
+                    </Button>
+                  )}
+                  <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => void close(vm.id)}>
+                    <Trash2 className="mr-1 h-3 w-3" />
+                    关闭
+                  </Button>
+                </span>
+              </li>
+            ))}
+            {registry.length === 0 && (
+              <li className="rounded-lg border border-dashed px-3 py-8 text-center text-sm text-muted-foreground">
+                注册表中没有客户机——从下面的候选配置启动一台，或粘贴一份配置创建。
+              </li>
+            )}
+          </ul>
         </CardContent>
       </Card>
 
-      {detail && (
-        <Card>
-          <CardHeader>
-            <CardTitle>
-              详情 VM[{detail.id}] {detail.name}
-            </CardTitle>
-            <CardDescription>
-              vCPU 状态与进度计数：`guest_entry_count` 只在 vCPU 真的进入 guest 后增长，
-              `guest_park_count` 只在 vCPU 真的 park 后增长——它们才是动作生效的证据。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-2 text-sm">
-            <p>
-              status=<span className="font-mono">{detail.status}</span> · entry=
-              <span className="font-mono">{detail.guest_entry_count ?? '-'}</span> · park=
-              <span className="font-mono">{detail.guest_park_count ?? '-'}</span>
-            </p>
-            <ul className="flex flex-wrap gap-2">
-              {(detail.vcpu_states ?? []).map((vcpu) => (
-                <li key={vcpu.id} className="rounded border px-2 py-1 font-mono text-xs">
-                  vCPU {vcpu.id} · {vcpu.state} · 物理 {describeCpuAffinity(vcpu.phys_cpu_set)}
-                </li>
-              ))}
-            </ul>
-          </CardContent>
-        </Card>
-      )}
+      <DetailDrawer detail={detail} onClose={() => setDetail(null)} />
 
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
@@ -493,7 +532,7 @@ export default function VmsPanel({ api, link, files = null, resources = [], focu
               </ul>
               <ul className="flex flex-col gap-1">
                 {pool.issues.map((issue) => (
-                  <li key={`${issue.kind}-${issue.path}`} className="text-xs text-amber-600">
+                  <li key={`${issue.kind}-${issue.path}`} className="text-xs text-warn">
                     无法使用 <span className="font-mono">{issue.path}</span>（{issue.kind}）：{issue.detail}
                   </li>
                 ))}
@@ -578,7 +617,7 @@ export default function VmsPanel({ api, link, files = null, resources = [], focu
                 </ul>
                 <ul className="flex flex-col gap-1">
                   {browseInfo.issues.map((issue) => (
-                    <li key={`${issue.kind}-${issue.path}`} className="text-xs text-amber-600">
+                    <li key={`${issue.kind}-${issue.path}`} className="text-xs text-warn">
                       无法使用 <span className="font-mono">{issue.path}</span>（{issue.kind}）：{issue.detail}
                     </li>
                   ))}
@@ -680,13 +719,6 @@ export function canStop(status: VmStatus): boolean {
   return status === 'running' || status === 'paused'
 }
 
-function StatusBadge({ status }: { status: VmStatus }) {
-  return (
-    <span className={cn('rounded-full border px-2 py-0.5 text-xs', STATUS_TONE[status] ?? '')}>
-      {describeStatus(status)}
-    </span>
-  )
-}
 
 function Banner({ tone, children }: { tone: 'info' | 'error'; children: ReactNode }) {
   return (

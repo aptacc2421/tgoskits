@@ -75,7 +75,7 @@ export function TerminalView({ path, title, subtitle, occupied, onClosed, classN
       // CRLF output is unaffected.
       convertEol: true,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-      theme: { background: '#0b1021', foreground: '#c8d3f5', cursor: '#c8d3f5' },
+      theme: { background: '#131217', foreground: '#d9d9de', cursor: '#f2c14e' },
     })
     const fit = new FitAddon()
     terminal.loadAddon(fit)
@@ -130,12 +130,12 @@ export function TerminalView({ path, title, subtitle, occupied, onClosed, classN
   }, [path, generation])
 
   return (
-    <div className={cn('flex h-full min-w-0 flex-col overflow-hidden bg-[#0b1021]', className)}>
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-zinc-800 px-2 py-1 text-xs text-zinc-400">
+    <div className={cn('flex h-full min-w-0 flex-col overflow-hidden bg-[#131217]', className)}>
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-2 py-1 text-xs text-muted-foreground">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate font-mono text-zinc-200">{title}</span>
-          {subtitle && <span className="truncate text-zinc-500">{subtitle}</span>}
-          <span className={status === 'open' ? 'text-emerald-400' : 'text-zinc-500'}>
+          <span className="truncate font-mono text-foreground">{title}</span>
+          {subtitle && <span className="truncate text-muted-foreground">{subtitle}</span>}
+          <span className={status === 'open' ? 'text-signal' : 'text-muted-foreground'}>
             {STATUS_TEXT[status]}
           </span>
         </div>
@@ -148,7 +148,7 @@ export function TerminalView({ path, title, subtitle, occupied, onClosed, classN
           </span>
           <button
             type="button"
-            className="rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+            className="rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={reconnect}
           >
             重连
@@ -157,13 +157,13 @@ export function TerminalView({ path, title, subtitle, occupied, onClosed, classN
       </div>
 
       {occupied && status !== 'open' && (
-        <p className="bg-amber-950/60 px-2 py-1 text-xs text-amber-300">
+        <p className="bg-warn/10 px-2 py-1 text-xs text-warn">
           该通道已被一个活动会话占用（通道为独占订阅）：可能是本页另一个终端面板，也可能是另一个
           浏览器页面。关掉占用它的那处后点「重连」。
         </p>
       )}
       {status === 'closed' && detail && (
-        <p className="bg-zinc-900 px-2 py-1 text-xs text-zinc-400">{detail}</p>
+        <p className="bg-muted px-2 py-1 text-xs text-muted-foreground">{detail}</p>
       )}
 
       <div ref={hostRef} className="min-h-0 flex-1 p-1" />

@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AxVisor 管理台 · 视觉方案原型 v2</title>
+    <link rel="stylesheet" href="console.css" />
+  </head>
+  <body>
+    <svg style="display: none" aria-hidden="true">
+      <symbol id="i-server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="7" rx="2" /><rect x="3" y="13" width="18" height="7" rx="2" />
+        <path d="M7 7.5h.01M7 16.5h.01" />
+      </symbol>
+      <symbol id="i-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m5 8 4 4-4 4M12 16h7" />
+      </symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 20V6a2 2 0 0 1 2-2h3.6a2 2 0 0 1 1.7.9l.9 1.4H18a2 2 0 0 1 2 2V20a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z" />
+      </symbol>
+      <symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M7 5.5 19 12 7 18.5V5.5Z" />
+      </symbol>
+      <symbol id="i-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 5v14M15 5v14" />
+      </symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="6" y="6" width="12" height="12" rx="2" />
+      </symbol>
+      <symbol id="i-more" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M6 12h.01M12 12h.01M18 12h.01" />
+      </symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 5v14M5 12h14" />
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 11a8 8 0 1 0-2.3 5.7" /><path d="M20 5v6h-6" />
+      </symbol>
+      <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" />
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M19 5l-1.5 1.5M6.5 17.5 5 19" />
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z" />
+      </symbol>
+      <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M6 6l12 12M18 6 6 18" />
+      </symbol>
+      <symbol id="i-upload" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 16V4M7 9l5-5 5 5" /><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+      </symbol>
+      <symbol id="i-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 12h4l3-8 4 16 3-8h4" />
+      </symbol>
+      <symbol id="i-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="6" y="6" width="12" height="12" rx="2" /><rect x="10" y="10" width="4" height="4" rx="1" />
+        <path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3" />
+      </symbol>
+      <symbol id="i-memory" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="7" width="18" height="10" rx="2" /><path d="M7 7v10M12 7v10M17 7v10" />
+      </symbol>
+      <symbol id="i-bolt" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13 2 5 14h6l-1 8 8-12h-6l1-8Z" />
+      </symbol>
+      <symbol id="i-host" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="4" width="20" height="12" rx="2" /><path d="M8 20h8M12 16v4" />
+      </symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+      </symbol>
+      <symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18Z" />
+      </symbol>
+    </svg>
+
+    <div class="app">
+      <!-- ============ 顶栏 ============ -->
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 19 12 5l8 14" /><path d="M8.5 14h7" />
+            </svg>
+          </div>
+          <div>
+            <div class="brand-name">AxVisor</div>
+            <div class="brand-sub">HYPERVISOR CONSOLE</div>
+          </div>
+        </div>
+
+        <button class="omni" id="openCmdk">
+          <svg width="14" height="14"><use href="#i-search" /></svg>
+          <span data-i18n="omni">搜索客户机、配置、操作…</span>
+          <span class="kbd">⌘K</span>
+        </button>
+
+        <div class="topbar-right">
+          <span class="chip live" title="/ws/events">
+            <span class="dot s-running pulse" style="width: 6px; height: 6px"></span>
+            <span data-i18n="evtConnected">事件通道已连接</span>
+          </span>
+          <span class="chip" data-i18n="manifestChip">manifest proto 1 · 4 面板</span>
+          <span class="chip" title="宿主机" style="padding-left: 4px">
+            <svg width="13" height="13" style="color: var(--accent)"><use href="#i-host" /></svg>
+            <span class="mono" style="font-size: 11px">aarch64 · qemu-virt · 8 pCPU</span>
+          </span>
+          <div class="lang-switch" id="langSwitch">
+            <button data-lang="zh" class="on">中文</button>
+            <button data-lang="en">EN</button>
+          </div>
+          <button class="icon-btn" id="themeToggle" title="切换深浅色">
+            <svg width="16" height="16"><use href="#i-moon" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="body">
+        <!-- ---- 侧栏 ---- -->
+        <aside class="sidebar">
+          <div class="side-group" data-i18n="navCapabilities">能力 · 来自 manifest</div>
+          <button class="nav-item active" data-view="overview">
+            <svg width="15" height="15"><use href="#i-server" /></svg>
+            <span data-i18n="navGuests">客户机</span>
+            <span class="nav-count">5</span>
+          </button>
+          <button class="nav-item" data-view="host">
+            <svg width="15" height="15"><use href="#i-host" /></svg>
+            <span data-i18n="navHost">宿主机</span>
+          </button>
+          <button class="nav-item" data-view="console">
+            <svg width="15" height="15"><use href="#i-terminal" /></svg>
+            <span data-i18n="navConsole">网页控制台</span>
+            <span class="nav-count">3</span>
+          </button>
+          <button class="nav-item" data-view="files">
+            <svg width="15" height="15"><use href="#i-folder" /></svg>
+            <span data-i18n="navFiles">文件传输</span>
+          </button>
+          <button class="nav-item" data-view="shell">
+            <svg width="15" height="15"><use href="#i-terminal" /></svg>
+            <span data-i18n="navShell">Shell</span>
+          </button>
+
+          <div class="side-group" data-i18n="navLiveGuests">客户机 · 实时</div>
+          <div id="navVms"></div>
+
+          <div class="side-foot">
+            <div data-i18n="sideFeatures">构建特性 · http-axum, fs, browser-console</div>
+            <div class="mono" style="font-size: 10.5px">axvisor 0.8.2 · aarch64</div>
+          </div>
+        </aside>
+
+        <!-- ---- 内容 ---- -->
+        <main class="main">
+          <!-- ===== 客户机 ===== -->
+          <section class="view active fill" id="view-overview">
+            <div class="page-head">
+              <div>
+                <h1 class="page-title" data-i18n="guestsTitle">客户机</h1>
+                <p class="page-desc">
+                  <span data-i18n="guestsDesc">注册表来自</span>
+                  <span class="mono">GET /api/vms</span>
+                  <span data-i18n="guestsDesc2">；启动、暂停等动作返回后继续轮询，直到计数器或状态证明它真的生效。</span>
+                </p>
+              </div>
+              <div class="head-actions">
+                <button class="btn ghost" data-toast="已刷新注册表|Registry refreshed">
+                  <svg width="14" height="14"><use href="#i-refresh" /></svg>
+                  <span data-i18n="refresh">刷新</span>
+                </button>
+                <button class="btn" data-toast="打开「粘贴配置创建」|Paste-config dialog">
+                  <span data-i18n="pasteConfig">粘贴配置</span>
+                </button>
+                <button class="btn primary" data-toast="打开创建表单（字段来自 /api/vms/schema）|Create form (fields from /api/vms/schema)">
+                  <svg width="14" height="14"><use href="#i-plus" /></svg>
+                  <span data-i18n="newGuest">新建客户机</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="kpis">
+              <div class="kpi">
+                <div class="kpi-label">
+                  <svg width="13" height="13"><use href="#i-activity" /></svg>
+                  <span data-i18n="kpiRunning">运行中 / 已注册</span>
+                </div>
+                <div class="kpi-value">–</div>
+                <div class="kpi-foot">
+                  <span data-i18n="kpiRunningFoot">近 5 分钟 +1</span>
+                  <svg class="spark" viewBox="0 0 76 22" fill="none">
+                    <path d="M2 16 L14 14 L26 15 L38 9 L50 11 L62 5 L74 4" stroke="var(--ok)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </div>
+              </div>
+              <div class="kpi">
+                <div class="kpi-label">
+                  <svg width="13" height="13"><use href="#i-cpu" /></svg>
+                  <span data-i18n="kpiVcpu">vCPU 已分配</span>
+                </div>
+                <div class="kpi-value">–</div>
+                <div class="kpi-foot">
+                  <span data-i18n="kpiVcpuFoot">物理 8 核 · 亲和 6</span>
+                  <svg class="spark" viewBox="0 0 76 22" fill="none">
+                    <path d="M2 18 L14 16 L26 12 L38 13 L50 8 L62 7 L74 3" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </div>
+              </div>
+              <div class="kpi">
+                <div class="kpi-label">
+                  <svg width="13" height="13"><use href="#i-memory" /></svg>
+                  <span data-i18n="kpiMem">客户机内存</span>
+                </div>
+                <div class="kpi-value">–</div>
+                <div class="kpi-foot">
+                  <span data-i18n="kpiMemFoot">不含宿主自身开销</span>
+                  <svg class="spark" viewBox="0 0 76 22" fill="none">
+                    <path d="M2 15 L14 13 L26 14 L38 10 L50 12 L62 9 L74 8" stroke="var(--accent-2)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </div>
+              </div>
+              <div class="kpi">
+                <div class="kpi-label">
+                  <svg width="13" height="13"><use href="#i-bolt" /></svg>
+                  <span data-i18n="kpiEntry">guest 进入次数</span>
+                </div>
+                <div class="kpi-value">–</div>
+                <div class="kpi-foot">
+                  <span class="trend-up" data-i18n="kpiEntryFoot">entry 计数持续增长</span>
+                  <svg class="spark" viewBox="0 0 76 22" fill="none">
+                    <path d="M2 19 L14 15 L26 16 L38 11 L50 9 L62 6 L74 2" stroke="var(--ok)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </div>
+              </div>
+            </div>
+
+            <div class="grid-2">
+              <div class="stack">
+                <div class="panel">
+                  <div class="panel-head">
+                    <span class="panel-title" data-i18n="registered">已注册客户机</span>
+                    <span class="tag">GET /api/vms</span>
+                    <span class="spacer"></span>
+                    <div class="sub-tabs">
+                      <button class="sub-tab active" data-i18n="all">全部</button>
+                      <button class="sub-tab" data-i18n="runningOnly">运行中</button>
+                      <button class="sub-tab" data-i18n="stoppedOnly">已停止</button>
+                    </div>
+                  </div>
+                  <div class="vm-list" id="vmList"></div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-head">
+                    <span class="panel-title" data-i18n="poolTitle">候选配置</span>
+                    <span class="tag">GET /api/vms/pool</span>
+                    <span class="panel-note" data-i18n="poolNote">条目只是候选，start 时才真正创建</span>
+                    <span class="spacer"></span>
+                    <button class="btn sm ghost" data-toast="打开目录浏览（/guest）|Browse (/guest)">
+                      <span data-i18n="browse">浏览目录…</span>
+                    </button>
+                  </div>
+                  <div id="poolList"></div>
+                </div>
+              </div>
+
+              <div class="stack">
+                <div class="panel">
+                  <div class="panel-head">
+                    <span class="panel-title" data-i18n="hostTitle">宿主机</span>
+                    <span class="spacer"></span>
+                    <button class="btn sm ghost" data-goto="host" data-i18n="detail">详情</button>
+                  </div>
+                  <div style="padding: 4px 15px 12px">
+                    <div class="field"><span class="k" data-i18n="fArch">架构 / 平台</span><span class="v">aarch64 · qemu-virt</span></div>
+                    <div class="field"><span class="k" data-i18n="fPcpu">物理核</span><span class="v">8</span></div>
+                    <div class="field"><span class="k" data-i18n="fControl">控制面</span><span class="v">http-axum · :8080</span></div>
+                    <div class="field"><span class="k" data-i18n="fPool">配置池</span><span class="v">/guest</span></div>
+                    <div class="field" style="border-bottom: none"><span class="k" data-i18n="fUptime">运行时长</span><span class="v" id="uptimeMini">2d 04:12:33</span></div>
+                  </div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-head">
+                    <span class="panel-title" data-i18n="activityTitle">最近动作</span>
+                    <span class="panel-note" data-i18n="activityNote">事件通道实时推送</span>
+                  </div>
+                  <div style="padding: 8px 15px 12px" id="activity"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ===== 宿主机 ===== -->
+          <section class="view" id="view-host">
+            <div class="page-head">
+              <div>
+                <h1 class="page-title" data-i18n="hostTitle">宿主机</h1>
+                <p class="page-desc" data-i18n="hostDesc">
+                  静态字段来自编译期常量与 manifest 的 host 段；运行时长与占用为本次请求的读数。
+                </p>
+              </div>
+            </div>
+
+            <div class="host-grid">
+              <div class="stack">
+                <div class="panel">
+                  <div class="panel-head">
+                    <span class="panel-title" data-i18n="hostSystem">系统</span>
+                    <span class="tag">manifest.host</span>
+                  </div>
+                  <div style="padding: 4px 15px 12px">
+                    <div class="field"><span class="k" data-i18n="fProduct">产品</span><span class="v">AxVisor</span></div>
+                    <div class="field"><span class="k" data-i18n="fVersion">版本</span><span class="v">0.8.2</span></div>
+                    <div class="field"><span class="k" data-i18n="fArch">架构 / 平台</span><span class="v">aarch64 · qemu-virt</span></div>
+                    <div class="field"><span class="k" data-i18n="fPcpu">物理核</span><span class="v">8 · axvm::host::cpu::count()</span></div>
+                    <div class="field"><span class="k" data-i18n="fSmp">SMP</span><span class="v">8</span></div>
+                    <div class="field" style="border-bottom: none"><span class="k" data-i18n="fBuild">构建</span><span class="v">aarch64-unknown-none-softfloat</span></div>
+                  </div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-head">
+                    <span class="panel-title" data-i18n="hostAlloc">资源分配</span>
+                    <span class="panel-note" data-i18n="hostAllocNote">合计自 VM 注册表</span>
+                  </div>
+                  <div class="alloc" id="allocBox"></div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-head"><span class="panel-title" data-i18n="hostFeatures">构建特性</span></div>
+                  <div style="padding: 12px 15px; display: flex; gap: 6px; flex-wrap: wrap">
+                    <span class="tag accent">http-axum</span>
+                    <span class="tag accent">fs</span>
+                    <span class="tag accent">browser-console</span>
+                    <span class="tag">web-ui</span>
+                    <span class="tag">no-auto-start</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="stack">
+                <div class="panel">
+                  <div class="panel-head">
+                    <span class="panel-title" data-i18n="hostRuntime">运行状况</span>
+                    <span class="spacer"></span>
+                    <span class="chip live" style="height: 22px">
+                      <span class="dot s-running pulse" style="width: 6px; height: 6px"></span>
+                      <span data-i18n="evtConnected">事件通道已连接</span>
+                    </span>
+                  </div>
+                  <div style="padding: 4px 15px 12px">
+                    <div class="field">
+                      <span class="k" data-i18n="fUptime">运行时长</span>
+                      <span class="v"><svg width="12" height="12" style="vertical-align: -1px; color: var(--accent)"><use href="#i-clock" /></svg> <span id="uptimeFull">2d 04:12:33</span></span>
+                    </div>
+                    <div class="field"><span class="k" data-i18n="fWeb">Web 控制台地址</span><span class="v">http://10.0.2.15:8080</span></div>
+                    <div class="field"><span class="k" data-i18n="fBind">监听</span><span class="v">0.0.0.0:8080</span></div>
+                    <div class="field"><span class="k" data-i18n="fManifest">清单</span><span class="v">GET /api/manifest</span></div>
+                    <div class="field" style="border-bottom: none"><span class="k" data-i18n="fEvents">事件通道</span><span class="v">/ws/events</span></div>
+                  </div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-head">
+                    <span class="panel-title" data-i18n="hostAffinity">vCPU 亲和矩阵</span>
+                    <span class="panel-note" data-i18n="hostAffinityNote">来自 phys_cpu_set</span>
+                  </div>
+                  <div style="padding: 12px 15px 14px">
+                    <div id="matrix"></div>
+                    <div class="matrix-legend">
+                      <span class="legend-item"><span class="legend-swatch" style="background: linear-gradient(180deg, var(--accent-2), var(--accent))"></span><span data-i18n="legendPinned">已绑定物理核</span></span>
+                      <span class="legend-item"><span class="legend-swatch" style="background: var(--surface-3); border: 1px solid var(--border)"></span><span data-i18n="legendFree">空闲</span></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ===== 控制台 ===== -->
+          <section class="view fill" id="view-console">
+            <div class="term-wrap">
+              <div class="lane-list" id="laneList"></div>
+              <div class="term-main">
+                <div class="term-bar">
+                  <span class="dot s-running pulse" style="width: 6px; height: 6px"></span>
+                  <span class="mono">/ws/console/vm-1</span>
+                  <span class="tag" data-i18n="exclusive">独占通道</span>
+                  <span class="spacer" style="margin-left: auto"></span>
+                  <span style="color: var(--text-mute)">115200 8N1</span>
+                  <button class="btn sm ghost" data-toast="已清空回滚缓冲|Scrollback cleared"><span data-i18n="clear">清空</span></button>
+                  <button class="btn sm ghost" data-toast="断开连接并释放通道|Disconnected, lane released"><span data-i18n="disconnect">断开</span></button>
+                </div>
+                <div class="term" id="term"></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ===== 文件 ===== -->
+          <section class="view" id="view-files">
+            <div class="page-head">
+              <div>
+                <h1 class="page-title" data-i18n="filesTitle">文件传输</h1>
+                <p class="page-desc">
+                  <span data-i18n="filesDesc">先把字节传到宿主暂存区，再由</span>
+                  <span class="mono">place</span>
+                  <span data-i18n="filesDesc2">落到目标目录——配置里引用的路径必须是已经落地的文件。</span>
+                </p>
+              </div>
+            </div>
+
+            <div class="drop" style="margin-bottom: 14px">
+              <svg width="22" height="22" style="color: var(--accent)"><use href="#i-upload" /></svg>
+              <h4 data-i18n="dropTitle">拖入镜像、内核或客户机配置</h4>
+              <p data-i18n="dropDesc">支持断点续传：重开同名会话会从已写入的字节继续</p>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head">
+                <span class="panel-title" data-i18n="transfers">传输</span>
+                <span class="tag">GET /api/files</span>
+              </div>
+              <div id="transferList"></div>
+            </div>
+          </section>
+
+          <!-- ===== Shell ===== -->
+          <section class="view" id="view-shell">
+            <div class="page-head">
+              <div>
+                <h1 class="page-title" data-i18n="navShell">Shell</h1>
+                <p class="page-desc" data-i18n="shellDesc">宿主机 Shell 通道，与控制台同源的 WebSocket 终端。</p>
+              </div>
+            </div>
+            <div class="panel" style="overflow: hidden">
+              <div class="term-bar">
+                <span class="dot s-running pulse" style="width: 6px; height: 6px"></span>
+                <span class="mono">/ws/shell</span>
+                <span class="spacer" style="margin-left: auto"></span>
+                <span style="color: var(--text-mute)">root@axvisor</span>
+              </div>
+              <div class="term" style="height: 420px" id="shellTerm"></div>
+            </div>
+          </section>
+        </main>
+      </div>
+
+      <footer class="statusbar">
+        <span class="dot s-running pulse" style="width: 6px; height: 6px"></span>
+        <span data-i18n="sbEvents">事件通道 /ws/events 已连接</span>
+        <span class="sep"></span>
+        <span class="mono" id="sbRes">5 客户机 · 12 vCPU · 3.3 GiB</span>
+        <div class="right">
+          <span class="mono">manifest proto 1</span>
+          <span class="sep"></span>
+          <span class="mono">axvisor 0.8.2</span>
+          <span class="sep"></span>
+          <span id="clock" class="mono">--:--:--</span>
+        </div>
+      </footer>
+    </div>
+
+    <!-- 详情抽屉 -->
+    <div class="scrim" id="scrim"></div>
+    <aside class="drawer" id="drawer">
+      <div class="drawer-head">
+        <div style="flex: 1">
+          <div style="display: flex; align-items: center; gap: 8px">
+            <span class="dot s-running pulse" id="dDot"></span>
+            <span style="font-size: 15px; font-weight: 620" id="dTitle">VM[1]</span>
+            <span class="tag" id="dStatus">running</span>
+          </div>
+          <div class="mono" style="font-size: 11.5px; color: var(--text-mute); margin-top: 3px" id="dSub"></div>
+        </div>
+        <button class="icon-btn" id="closeDrawer"><svg width="16" height="16"><use href="#i-x" /></svg></button>
+      </div>
+      <div class="drawer-body">
+        <div class="counter-grid">
+          <div class="counter">
+            <div class="n" id="dEntry">0</div>
+            <div class="l" data-i18n="dEntryLabel">guest_entry_count · 真正进入 guest 的次数</div>
+          </div>
+          <div class="counter">
+            <div class="n" id="dPark">0</div>
+            <div class="l" data-i18n="dParkLabel">guest_park_count · 真正 park 的次数</div>
+          </div>
+        </div>
+        <div>
+          <div class="panel-note" style="margin-bottom: 8px" data-i18n="dVcpuLabel">vCPU 状态与亲和（每个格子一个 vCPU）</div>
+          <div class="vcpu-cells" id="dVcpu" style="gap: 5px"></div>
+          <div class="panel-note" style="margin-top: 8px" data-i18n="dVcpuLegend">蓝=已启动，青=已绑定物理核，灰=未启动</div>
+        </div>
+        <div>
+          <div class="field"><span class="k">ID</span><span class="v" id="dId">1</span></div>
+          <div class="field"><span class="k" data-i18n="thStatus">状态</span><span class="v" id="dState">running</span></div>
+          <div class="field"><span class="k">vCPU</span><span class="v" id="dCpu">4</span></div>
+          <div class="field"><span class="k" data-i18n="thMem">内存</span><span class="v" id="dMem">1024 MiB</span></div>
+          <div class="field" style="border-bottom: none"><span class="k" data-i18n="detailApi">详情接口</span><span class="v" id="dUrl">GET /api/vms/1</span></div>
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap">
+          <button class="btn sm" data-toast="暂停后等待状态收敛…|Pause requested, waiting to settle" data-i18n="actPause">暂停</button>
+          <button class="btn sm" data-toast="停止后等待状态收敛…|Stop requested, waiting to settle" data-i18n="actStop">停止</button>
+          <button class="btn sm" data-toast="打开该客户机的网页控制台|Opening guest console" data-i18n="actConsole">打开控制台</button>
+          <button class="btn sm danger" data-toast="销毁请求已提交|Destroy requested" data-i18n="actDestroy">销毁</button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 命令面板 -->
+    <div class="cmdk" id="cmdk">
+      <div class="cmdk-input">
+        <svg width="15" height="15"><use href="#i-search" /></svg>
+        <span id="cmdkText"></span>
+      </div>
+      <div class="cmdk-list" id="cmdkList"></div>
+    </div>
+
+    <div class="toasts" id="toasts"></div>
+
+    <script src="console.js"></script>
+  </body>
+</html>

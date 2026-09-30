@@ -12,10 +12,13 @@
 //! - [`events`]: registry change events consumed by `/ws/events`. The watcher
 //!   only runs where that route exists, so the `http-axum` and
 //!   `browser-console` features are both required for it.
+//! - [`host`]: the machine this hypervisor runs on, read by the host panel.
 
 #[cfg(all(feature = "browser-console", feature = "http-axum"))]
 pub mod events;
 #[cfg(all(feature = "fs", feature = "http-axum"))]
 pub mod files;
+#[cfg(any(feature = "browser-console", feature = "http-axum"))]
+pub mod host;
 #[cfg(feature = "fs")]
 pub mod pool;

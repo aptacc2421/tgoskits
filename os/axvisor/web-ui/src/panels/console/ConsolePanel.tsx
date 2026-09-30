@@ -249,7 +249,7 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
         {vm !== undefined && vm.status !== 'running' && (
           <p
             role="status"
-            className="shrink-0 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+            className="shrink-0 rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn"
           >
             客户机「{vm.name}」当前为{describeStatus(vm.status)}：终端已连上通道，
             但输入不会送达客户机。先到「虚拟机」面板点「启动」，再回到这里输入。
@@ -351,7 +351,7 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
                   <span
                     className={cn(
                       'inline-block h-1.5 w-1.5 rounded-full',
-                      held ? 'bg-emerald-500' : 'bg-muted-foreground/40',
+                      held ? 'bg-signal' : 'bg-muted-foreground/40',
                     )}
                   />
                   {label}
@@ -359,7 +359,7 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
                       another browser page, or another tab of this panel. */}
                   {busy && (
                     <span
-                      className="text-amber-500"
+                      className="text-warn"
                       title="该通道已被一个活动会话占用（本页另一个标签，或另一个浏览器页面）"
                     >
                       ●
@@ -370,14 +370,14 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
             })}
           </div>
           {blocked && (
-            <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
               <span>
                 这个标签的终端通道都已被占用（本页另一个标签，或另一个浏览器页面）。
                 通道为独占订阅，本面板不再抢连；关掉占用它的那处，或点「重试」。
               </span>
               <button
                 type="button"
-                className="rounded border border-amber-400 px-2 py-0.5 hover:bg-amber-100"
+                className="rounded border border-warn/40 px-2 py-0.5 hover:bg-warn/10"
                 onClick={retry}
               >
                 重试

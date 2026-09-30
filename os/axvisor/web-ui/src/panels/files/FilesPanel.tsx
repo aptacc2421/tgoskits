@@ -483,11 +483,11 @@ const FILE_STATE_TEXT: Record<FileState, string> = {
 }
 
 const FILE_STATE_TONE: Record<FileState, string> = {
-  uploading: 'border-sky-300 bg-sky-50 text-sky-700',
-  uploaded: 'border-amber-300 bg-amber-50 text-amber-700',
-  placing: 'border-amber-300 bg-amber-50 text-amber-700',
-  placed: 'border-emerald-300 bg-emerald-50 text-emerald-700',
-  failed: 'border-red-300 bg-red-50 text-red-700',
+  uploading: 'border-warn/30 bg-warn/10 text-warn',
+  uploaded: 'border-warn/30 bg-warn/10 text-warn',
+  placing: 'border-warn/30 bg-warn/10 text-warn',
+  placed: 'border-signal/30 bg-signal/10 text-signal',
+  failed: 'border-alert/30 bg-alert/10 text-alert',
 }
 
 function StateBadge({ state }: { state: FileState }) {

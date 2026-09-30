@@ -295,7 +295,7 @@ export function CreateForm({
           </Button>
         </DialogFooter>
         {unplaced.length > 0 && (
-          <p className="text-xs text-amber-600">
+          <p className="text-xs text-warn">
             这些文件还没就位，传完才能创建：{unplaced.join('、')}
           </p>
         )}
@@ -436,7 +436,7 @@ function FileField({
       <div
         className={cn(
           'flex flex-wrap items-center gap-2 rounded-md border p-2',
-          dragOver && 'border-sky-400 bg-sky-50',
+          dragOver && 'border-primary bg-primary/10',
         )}
         onDragOver={(event) => {
           event.preventDefault()
@@ -504,9 +504,9 @@ function FileField({
       <p
         className={cn(
           'text-xs',
-          state.tone === 'placed' && 'text-emerald-600',
+          state.tone === 'placed' && 'text-signal',
           state.tone === 'pending' && 'text-muted-foreground',
-          state.tone === 'failed' && 'text-red-600',
+          state.tone === 'failed' && 'text-alert',
         )}
       >
         {state.text}

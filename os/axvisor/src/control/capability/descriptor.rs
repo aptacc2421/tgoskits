@@ -23,6 +23,16 @@
 //! two are not the same list: a console socket is one `stream` link that reads,
 //! writes, and streams.
 //!
+//! The response also carries a `host` object, the machine facts of
+//! [`crate::control::domain::host`]. It rides along with the panels because the
+//! shell needs it and must not name a panel kind to get it; the host panel
+//! refreshes the same object through its own route instead.
+//!
+//! The response also carries a `host` object, the machine facts of
+//! [`crate::control::domain::host`]. It rides along with the panels because the
+//! shell needs it and must not name a panel kind to get it; the host panel
+//! refreshes the same object through its own route instead.
+//!
 //! VM links are not narrowed per VM status — `GET /api/vms/{id}` reports the
 //! status and the control plane rejects a transition the state machine does not
 //! allow, so a panel decides which controls to offer from the status it already
@@ -32,6 +42,8 @@ use alloc::vec::Vec;
 
 use axum::Json;
 use serde_json::{Value, json};
+
+use crate::control::domain::host;
 
 use super::table;
 
@@ -43,6 +55,7 @@ pub(crate) async fn get_manifest() -> Json<Value> {
     Json(json!({
         "proto": PROTO,
         "panels": panels(),
+        "host": host::describe(),
     }))
 }
 
