@@ -46,7 +46,8 @@ export function releaseLane(open: readonly string[], route: string): string[] {
 }
 
 /**
- * The lanes of one tab to keep connected: its own lanes that no session holds.
+ * The lanes to keep connected: every opened tab's own lanes, plus the lanes
+ * this page already holds.
  *
  * A tab is the only thing that decides which lanes are connected, so a tab whose
  * lanes are all held opens nothing and the panel reports the tab as blocked.
@@ -54,6 +55,12 @@ export function releaseLane(open: readonly string[], route: string): string[] {
  * panel render a merged view nobody asked for: the panel connected a lane the
  * operator was not looking at, and the tab on screen then had to adopt it to
  * show what it had opened.
+ *
+ * `held` lists lanes this page's own sessions are attached to. The lane table
+ * counts those as attached too, so they are kept open on that basis alone —
+ * dropping them would close a working terminal on every registry event. Only
+ * `unavailable` (lost races and explicit releases) and a lane another session
+ * holds take a lane out of the open set.
  *
  * `unavailable` lists lanes this page already lost or released. Two pages can
  * read the same lane as free and race for it, and only the loser learns; without
@@ -63,13 +70,17 @@ export function lanesToOpen(
   target: readonly string[],
   lanes: readonly LaneOccupancy[],
   unavailable: readonly string[] = [],
+  held: readonly string[] = [],
 ): string[] {
   const free = new Set(
     lanes
       .filter((lane) => !lane.attached && !unavailable.includes(lane.route))
       .map((lane) => lane.route),
   )
-  return target.filter((route) => free.has(route))
+  return target.filter(
+    (route) =>
+      !unavailable.includes(route) && (held.includes(route) || free.has(route)),
+  )
 }
 
 /**

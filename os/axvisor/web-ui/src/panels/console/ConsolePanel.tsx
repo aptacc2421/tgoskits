@@ -6,19 +6,23 @@
 //! reports a change — that is the whole reason the shell injects the feed here —
 //! and drops the terminals whose lane is gone instead of retrying them forever.
 //!
-//! Every console is its own tab, and a tab connects only its own lanes. Entering
-//! the panel therefore opens at most the lane of the tab the operator lands on —
-//! never a free lane belonging to some other tab, which is how a merged view
-//! nobody asked for used to appear. Dragging one tab onto another merges them:
-//! both lanes are then shown side by side in one tab, and each pane of a merged
-//! tab offers 「分离」 to go back to its own tab. This is the same gesture the demo
-//! uses, and the reason the split is not a separate mode: what is shown together
-//! is what was put together.
+//! Every console is its own tab, and each tab connects its own lanes. Entering
+//! the panel opens the lanes of the tab the operator lands on — never a free
+//! lane belonging to some other tab, which is how a merged view nobody asked
+//! for used to appear. Dragging one tab onto another merges them: both lanes
+//! are then shown side by side in one tab, and each pane of a merged tab offers
+//! 「分离」 to go back to its own tab. This is the same gesture the demo uses, and
+//! the reason the split is not a separate mode: what is shown together is what
+//! was put together.
 //!
-//! Lanes are exclusive on the host, so only the *active* tab's lanes are
-//! connected. Mounting every tab would hold every lane at once and starve any
-//! other page; the layout therefore never decides occupancy, and a lane that was
-//! released is shown as released rather than silently reconnected.
+//! Lanes are exclusive on the host, and every opened tab keeps its lanes
+//! connected while it is hidden too: a terminal that unmounted would lose its
+//! buffer, and switching tabs must not cost the operator the history they
+//! already read. The host side retains each lane's output up to its queue
+//! capacity, so a hidden terminal misses nothing and a re-entered one replays
+//! what the operator has not seen. A lane is given away only explicitly, via
+//! 「释放」, and a lane another session holds is shown as occupied rather than
+//! silently reconnected.
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { TerminalView } from '@/components/Terminal'
@@ -101,15 +105,18 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
     setActive(Math.max(0, groups.length - 1))
   }, [groups, active])
 
-  /** Lanes the active tab wants, in tab order. */
+  /** Lanes every opened tab holds, in tab order. */
   const target = useMemo(
-    () => (groups[active] ?? []).filter((route) => routes.includes(route)),
-    [groups, active, routes],
+    () => groups.flat().filter((route) => routes.includes(route)),
+    [groups, routes],
   )
 
   useEffect(() => {
     setOpen((current) => {
-      const next = lanesToOpen(target, laneTable, [...failed, ...released])
+      // `current` is the held set: the lane table counts this page's own
+      // sessions as attached, so held lanes must survive the recomputation
+      // instead of being dropped and reconnected on every registry event.
+      const next = lanesToOpen(target, laneTable, [...failed, ...released], current)
       return sameSet(current, next) ? current : next
     })
   }, [target, laneTable, failed, released])
@@ -201,15 +208,18 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
   }
 
   const activeGroup = groups[active] ?? []
-  const panes = activeGroup.filter((route) => routes.includes(route))
-  const blocked = open.length === 0 && panes.some((route) => !released.includes(route))
+  const activeOpen = activeGroup.filter((route) => open.includes(route))
+  const blocked =
+    activeGroup.length > 0 &&
+    activeOpen.length === 0 &&
+    activeGroup.some((route) => !released.includes(route))
 
   /**
    * One lane of the active tab. A connected WebSocket only means the lane is
    * open: input still needs a running guest, and a stopped one drops it silently,
    * so the pane says which of the two is missing instead of looking broken.
    */
-  const pane = (route: string) => {
+  const pane = (route: string, groupPanes: number) => {
     const console = (consoles ?? []).find((item) => item.route === route)
     const vmId = laneVmId(route)
     const vm = vmId === null ? undefined : resources.find((item) => item.id === vmId)
@@ -223,7 +233,7 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
         className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-1"
       >
         <div className="absolute right-1 top-1 z-10 flex items-center gap-1">
-          {panes.length > 1 && (
+          {groupPanes > 1 && (
             <button
               type="button"
               aria-label={`分离 ${label}`}
@@ -384,15 +394,29 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
               </button>
             </div>
           )}
-          {/* Only the active tab's lanes stay mounted: the lanes are exclusive, so
-              mounting every tab would hold every one of them. */}
+          {/* Every opened tab stays mounted, hidden ones included: unmounting a
+              tab would drop its terminal buffer, and switching tabs must not
+              cost the operator the history they already read. */}
           <div className="flex min-h-0 flex-1 gap-2">
-            {panes.map((route) => pane(route))}
-            {panes.length === 0 && (
-              <p className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                这个标签没有可连接的通道。
-              </p>
-            )}
+            {groups.map((group, index) => {
+              const panes = group.filter((route) => routes.includes(route))
+              return (
+                <div
+                  key={group.join('+')}
+                  className={cn(
+                    'flex min-h-0 min-w-0 flex-1 gap-2',
+                    index === active ? 'flex' : 'hidden',
+                  )}
+                >
+                  {panes.map((route) => pane(route, panes.length))}
+                  {index === active && panes.length === 0 && (
+                    <p className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                      这个标签没有可连接的通道。
+                    </p>
+                  )}
+                </div>
+              )
+            })}
           </div>
         </>
       )}
