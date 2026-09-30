@@ -118,7 +118,16 @@ export function TerminalView({ path, title, subtitle, occupied, onClosed, classN
       return false
     })
 
-    const observer = new ResizeObserver(() => fitSafely(fit))
+    const observer = new ResizeObserver((entries) => {
+      // A hidden tab reports a zero-sized container. Fitting there would
+      // resize the terminal to a degenerate geometry and rewrap the buffer
+      // away, so a hidden lane keeps its fitted size untouched and a lane
+      // coming back into view repaints everything the buffer still holds.
+      const rect = entries[entries.length - 1]?.contentRect
+      if (!rect || rect.width === 0 || rect.height === 0) return
+      fitSafely(fit)
+      terminal.refresh(0, terminal.rows - 1)
+    })
     observer.observe(host)
 
     return () => {
