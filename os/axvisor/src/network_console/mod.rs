@@ -114,37 +114,38 @@ impl NetworkOutputLane {
     }
 
     fn submit(&self, bytes: &[u8]) {
-        if bytes.is_empty() || !self.connected.load(Ordering::Acquire) {
+        if bytes.is_empty() {
             return;
         }
-        let submitted = {
+        // The lane queue retains its bytes with or without a connected
+        // browser: a session that attaches later replays this backlog, so a
+        // closed tab, a page reload, or a panel switch never loses terminal
+        // history. The fixed capacity bounds the retention by dropping the
+        // oldest bytes.
+        let has_consumer = {
             let mut queue = self.queue.lock();
-            if !self.connected.load(Ordering::Acquire) {
-                false
-            } else {
-                queue.enqueue(bytes);
-                true
-            }
+            queue.enqueue(bytes);
+            self.connected.load(Ordering::Acquire)
         };
-        if submitted {
+        if has_consumer {
             let _result = self.ready.notify();
         }
     }
 
     fn begin_session(&self) -> Option<usize> {
-        let mut queue = self.queue.lock();
+        let _queue = self.queue.lock();
         self.connected
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()?;
-        *queue = HostOutputQueue::new();
+        // The backlog stays queued on purpose: the dispatcher replays it to
+        // the browser that just attached before it waits for live output.
         Some(self.session.fetch_add(1, Ordering::AcqRel).wrapping_add(1))
     }
 
     fn end_session(&self, session: usize) {
-        let mut queue = self.queue.lock();
+        let queue = self.queue.lock();
         if self.session.load(Ordering::Acquire) == session {
             self.connected.store(false, Ordering::Release);
-            *queue = HostOutputQueue::new();
             drop(queue);
             let _result = self.ready.notify();
         }
@@ -371,12 +372,6 @@ pub(crate) struct ConsoleDescription {
 /// Copies Axvisor shell bytes into its fixed browser queue.
 pub(crate) fn submit_management_output(bytes: &[u8]) {
     OUTPUT_HUB.submit(ConsoleLane::MANAGEMENT, bytes);
-}
-
-/// Returns whether one guest currently has an attached browser session.
-pub(crate) fn guest_output_connected(vm_id: VMId) -> bool {
-    let lane = LAYOUT.lock().guest(vm_id).map(|endpoint| endpoint.lane);
-    lane.is_some_and(|lane| OUTPUT_HUB.is_connected(lane))
 }
 
 /// Copies current guest output into its VM-specific fixed browser queue.
