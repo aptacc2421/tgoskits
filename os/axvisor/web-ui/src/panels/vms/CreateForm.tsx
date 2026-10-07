@@ -40,7 +40,16 @@ import {
 import { isMoving, sessionId, useFiles } from '@/domain/files'
 import { cn } from '@/lib/utils'
 import { FilePicker } from './FilePicker'
-import { acceptMatches, creationBody, fileFields, initialValues, splitGuestPath, unplacedFiles, type FormValues } from './schema'
+import {
+  acceptMatches,
+  creationBody,
+  fileFields,
+  initialValues,
+  joinGuestPath,
+  splitGuestPath,
+  unplacedFiles,
+  type FormValues,
+} from './schema'
 
 /** Matches the field controls' look; there is no select primitive in `ui/`. */
 const SELECT_CLASS =
@@ -383,8 +392,10 @@ function FileField({
     const id = sessionId(file)
     setActiveId(id)
     // The destination keeps the file's own name; the field value becomes the
-    // path the placed file will answer to.
-    const placed = `${destination}/${file.name}`
+    // path the placed file will answer to. Joining rather than concatenating is
+    // what keeps a root destination honest: `//name` is not a path anything can
+    // open, and the form would then never see its own transfer as placed.
+    const placed = joinGuestPath(destination, file.name)
     if (value.trim() !== placed) onChange(placed)
     void files.upload(file, destination)
   }

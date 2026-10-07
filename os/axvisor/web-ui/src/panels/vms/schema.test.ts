@@ -13,6 +13,7 @@ import {
   creationBody,
   fileFields,
   initialValues,
+  joinGuestPath,
   splitGuestPath,
   unplacedFiles,
 } from './schema'
@@ -202,6 +203,27 @@ describe('splitGuestPath', () => {
     expect(splitGuestPath('/guest/linux/')).toBeNull()
     expect(splitGuestPath('/')).toBeNull()
     expect(splitGuestPath('')).toBeNull()
+  })
+})
+
+describe('joinGuestPath', () => {
+  it('names the path a transfer into a directory answers to', () => {
+    expect(joinGuestPath('/guest/linux', 'linux-qemu')).toBe('/guest/linux/linux-qemu')
+  })
+
+  it('does not double the separator at the root', () => {
+    // `//name` is not a path anything can open: the transfer places the file
+    // under `/name` while the field would hold `//name`, so the form's own
+    // "is it in place" lookup never matches.
+    expect(joinGuestPath('/', 'linux-qemu')).toBe('/linux-qemu')
+  })
+
+  it('round-trips with splitGuestPath', () => {
+    for (const path of ['/linux-qemu', '/guest/linux/linux-qemu', '/guest/rootfs.img']) {
+      const parts = splitGuestPath(path)
+      expect(parts).not.toBeNull()
+      expect(joinGuestPath(parts!.directory, parts!.name)).toBe(path)
+    }
   })
 })
 

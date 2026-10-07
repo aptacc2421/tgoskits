@@ -131,6 +131,21 @@ export function splitGuestPath(path: string): { directory: string; name: string 
 }
 
 /**
+ * The path a transfer into `directory` ends up answering to.
+ *
+ * The inverse of [`splitGuestPath`], and the reason a form joins rather than
+ * concatenates: the root directory already ends in its own separator, so
+ * `${directory}/${name}` would name `//name` there. That is not a path anything
+ * can open, and the mismatch is invisible — the transfer places the file
+ * correctly under `/name` while the field holds `//name`, so the form's own
+ * "is it in place" lookup never matches and the file reads as never placed.
+ */
+export function joinGuestPath(directory: string, name: string): string {
+  const base = directory.endsWith('/') ? directory.slice(0, -1) : directory
+  return `${base}/${name}`
+}
+
+/**
  * The guest paths a submit would reference that are not known to be in place.
  *
  * `inPlace` is the predicate the transfer's placement and the create gate read —
