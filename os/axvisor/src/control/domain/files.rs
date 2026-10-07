@@ -292,16 +292,33 @@ pub fn resume(id: &str) -> Result<usize, FileError> {
 /// reconnects mid-flight has a stale idea of where it stopped, and answering
 /// with [`FileError::Conflict`] plus the real offset is what makes the retry
 /// land in the right place.
+///
+/// Only a session still receiving bytes takes more. Once a session has left
+/// that stage there is no staging file left to append to — a placed one was
+/// renamed into the guest filesystem — and opening the path would create a
+/// fresh file next to it, leaving an orphan behind while reporting the object
+/// as still transferring. A failed session is the exception: its bytes stay
+/// valid and the caller resumes it after making room.
 pub fn send(id: &str, start: usize, bytes: &[u8]) -> Result<usize, FileError> {
     let id = checked_id(id)?;
-    let (directory, total) = {
+    let (directory, total, state) = {
         let sessions = SESSIONS.lock();
         let session = sessions.get(id).ok_or_else(|| unknown(id))?;
-        (session.directory.clone(), session.total)
+        (
+            session.directory.clone(),
+            session.total,
+            session.state.clone(),
+        )
     };
 
     let path = staging_path(&directory, id);
     let written = disk_len(&path);
+    if !matches!(state, State::Uploading | State::Failed(_)) {
+        return Err(FileError::Conflict {
+            reason: format!("{id} is {}", state.name()),
+            offset: written,
+        });
+    }
     if start != written {
         return Err(FileError::Conflict {
             reason: format!("chunk starts at {start} but {written} bytes are on disk"),
