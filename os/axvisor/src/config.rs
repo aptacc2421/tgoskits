@@ -172,15 +172,25 @@ pub fn init_guest_vm_from_config(vm_create_config: GuestConfig) -> Result<usize>
     // lane table must fail this creation (the HTTP control plane reports it as
     // 503) instead of producing a VM no browser can attach to; on that path the
     // local handle is dropped, destroying the VM before it is ever registered.
+    //
+    // The allocation outcome decides the failure path below, so it is kept
+    // rather than discarded.
     #[cfg(feature = "browser-console")]
-    crate::network_console::register_guest(vm_id, &vm.name())
+    let lane = crate::network_console::register_guest(vm_id, &vm.name())
         .with_context(|| format!("register browser console for VM[{vm_id}]"))?;
 
     if !axvm::register_vm(vm.clone()) {
         // The id is taken after all: release the lane again so a rejected
         // registration does not consume a console slot forever.
+        //
+        // Only a lane this call took may be given back. When the id already had
+        // one, `allocate` handed out `Reused` and the lane belongs to the VM
+        // that is using it — releasing that would take a live VM's console away
+        // because an unrelated creation failed.
         #[cfg(feature = "browser-console")]
-        crate::network_console::release_guest(vm_id);
+        if lane == crate::network_console::LaneAllocation::Allocated {
+            crate::network_console::release_guest(vm_id);
+        }
         bail!("register VM[{vm_id}]: a VM with this ID already exists");
     }
 
