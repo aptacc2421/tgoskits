@@ -88,9 +88,13 @@ export function Tabs(props: TabsProps) {
               <button
                 type="button"
                 aria-label={`关闭 ${meta.title}`}
+                title={`关闭 ${meta.title}`}
                 className={cn(
                   'rounded p-0.5 text-muted-foreground transition-opacity hover:bg-accent hover:text-foreground',
-                  active ? 'opacity-70' : 'opacity-0 group-hover:opacity-70',
+                  // Always visible: a close control that only appears on hover is
+                  // not a close control most operators ever find, and the tab it
+                  // belongs to is the only place a panel can be dismissed from.
+                  active ? 'opacity-100' : 'opacity-60 hover:opacity-100',
                 )}
                 onClick={() => onClose(tab.id)}
               >

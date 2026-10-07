@@ -25,6 +25,7 @@
 //! silently reconnected.
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { X } from 'lucide-react'
 import { TerminalView } from '@/components/Terminal'
 import { describeError, describeStatus, type ConsoleInfo, type PanelProps } from '@/api/types'
 import {
@@ -52,6 +53,14 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
   const [released, setReleased] = useState<string[]>([])
   /** One entry per tab; several lanes in one entry means a merged view. */
   const [groups, setGroups] = useState<string[][]>([])
+  /**
+   * Lanes whose tab the operator closed, so the lane table's next refresh does
+   * not hand them straight back. The lane table is the source of truth for which
+   * lanes exist, and it still lists a live guest's lane after the tab is gone —
+   * a closed tab that came back on the next registry event would make the close
+   * control look like it had done nothing.
+   */
+  const [dismissed, setDismissed] = useState<string[]>([])
   const [active, setActive] = useState(0)
   const [draggedTab, setDraggedTab] = useState<number | null>(null)
 
@@ -89,6 +98,12 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
 
   const routes = useMemo(() => guestLanes.map((console) => console.route), [guestLanes])
 
+  /** Routes a tab may still be built from: everything except what was closed. */
+  const liveRoutes = useMemo(
+    () => routes.filter((route) => !dismissed.includes(route)),
+    [routes, dismissed],
+  )
+
   const laneTable = useMemo(
     () => guestLanes.map((console) => ({ route: console.route, attached: console.attached })),
     [guestLanes],
@@ -97,8 +112,8 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
   // Each console is its own tab; merged tabs survive a table change as long as at
   // least one of their lanes is alive, and a new console arrives as its own tab.
   useEffect(() => {
-    setGroups((current) => syncGroups(current, routes))
-  }, [routes])
+    setGroups((current) => syncGroups(current, liveRoutes))
+  }, [liveRoutes])
 
   useEffect(() => {
     if (active < groups.length) return
@@ -205,6 +220,29 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
   const split = (route: string) => {
     setGroups((current) => splitGroup(current, route))
     setActive(groups.length)
+  }
+
+  /**
+   * Close one tab: let go of every lane it holds and stop offering it again.
+   *
+   * Closing a tab is not the same as releasing a lane. Releasing keeps the tab
+   * and says so, which is what an operator wants for a lane another page may
+   * take. Closing says the tab itself is not wanted, so its lanes are released
+   * on the way out and then held in `dismissed` — otherwise the next lane table
+   * refresh rebuilds the tab from a lane that never went away.
+   */
+  const closeGroup = (index: number) => {
+    const group = groups[index]
+    if (group === undefined) return
+    setOpen((current) => group.reduce((lanes, route) => releaseLane(lanes, route), current))
+    setReleased((current) => [...new Set([...current, ...group])])
+    setDismissed((current) => [...new Set([...current, ...group])])
+    setGroups((current) => current.filter((_, at) => at !== index))
+    load()
+  }
+
+  const restoreDismissed = () => {
+    setDismissed([])
   }
 
   const activeGroup = groups[active] ?? []
@@ -328,9 +366,12 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
                   (guestLanes.find((item) => item.route === route)?.attached ?? false),
               )
               return (
-                <button
+                // The wrapper carries the drag gesture and holds two controls side
+                // by side: a close control cannot be a child of the button that
+                // activates the tab, so the tab is a container rather than one
+                // control.
+                <div
                   key={group.join('+')}
-                  type="button"
                   draggable
                   title="拖动这个标签到另一个标签上可以融合为同屏分列"
                   onDragStart={(event) => {
@@ -349,22 +390,26 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
                     if (draggedTab !== null && draggedTab !== index) merge(draggedTab, index)
                     setDraggedTab(null)
                   }}
-                  onClick={() => setActive(index)}
                   className={cn(
-                    'flex cursor-grab items-center gap-1.5 rounded-md px-2.5 py-1 font-mono text-xs',
+                    'flex cursor-grab items-center rounded-md font-mono text-xs',
                     index === active
                       ? 'bg-secondary text-secondary-foreground'
                       : 'text-muted-foreground hover:bg-accent',
                     draggedTab === index && 'opacity-40',
                   )}
                 >
-                  <span
-                    className={cn(
-                      'inline-block h-1.5 w-1.5 rounded-full',
-                      held ? 'bg-signal' : 'bg-muted-foreground/40',
-                    )}
-                  />
-                  {label}
+                  <button
+                    type="button"
+                    onClick={() => setActive(index)}
+                    className="flex items-center gap-1.5 px-2.5 py-1"
+                  >
+                    <span
+                      className={cn(
+                        'inline-block h-1.5 w-1.5 rounded-full',
+                        held ? 'bg-signal' : 'bg-muted-foreground/40',
+                      )}
+                    />
+                    {label}
                   {/* Held by some session that is not this tab's own lane: either
                       another browser page, or another tab of this panel. */}
                   {busy && (
@@ -375,9 +420,32 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
                       ●
                     </span>
                   )}
-                </button>
+                  </button>
+                  {/* Always visible rather than hover-only: a tab that cannot be
+                      dismissed from the tab itself leaves the operator with no
+                      way to give a lane back without hunting for 「释放」. */}
+                  <button
+                    type="button"
+                    aria-label={`关闭 ${label}`}
+                    title={`关闭 ${label}：释放它占用的通道`}
+                    onClick={() => closeGroup(index)}
+                    className="mr-1.5 rounded p-0.5 text-muted-foreground transition-opacity hover:bg-accent hover:text-foreground opacity-60 hover:opacity-100"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
               )
             })}
+            {dismissed.length > 0 && (
+              <button
+                type="button"
+                onClick={restoreDismissed}
+                className="rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+                title="把关闭过的终端通道重新放回标签栏"
+              >
+                已关闭 {dismissed.length} 条通道 · 恢复
+              </button>
+            )}
           </div>
           {blocked && (
             <div className="flex flex-wrap items-center gap-2 rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
