@@ -49,8 +49,13 @@ pub mod vmcfg {
 
     /// Read the configs that the startup path creates as the default guest set.
     ///
-    /// Unlike the pool ([`crate::control::domain::pool`]), this directory is not a candidate
-    /// list: every config here is created before the management plane starts.
+    /// Unlike a free-standing pool folder, this directory feeds the startup set
+    /// directly, and it is read through [`crate::control::domain::pool`] so a
+    /// config saved by the control plane is a candidate the same way a
+    /// hand-placed one is. A file the pool reports as an issue — a config that
+    /// does not parse, or one naming an image the guest filesystem does not have
+    /// — is not a candidate and does not reach the creation path;
+    /// [`crate::control::domain::pool::log_issues`] reports each one at startup.
     #[cfg(feature = "fs")]
     pub fn filesystem_vm_configs() -> Vec<String> {
         use crate::control::domain::pool;

@@ -37,14 +37,6 @@ pub async fn vm_detail(Path(id_str): Path<String>) -> Result<Json<Value>, Status
     }
 }
 
-/// `POST /api/vms/create` — create a VM from a TOML config.
-///
-/// Body: `{"toml": "<完整 TOML 配置>"}` or `{"path": "<guest 文件系统中的 .toml>"}`.
-/// The path form is what the folder browser uses: the file is read on the host
-/// and the VM is created from exactly the bytes that are there, so a config can
-/// live in any directory instead of being pasted. The guest kernel is read from
-/// the guest filesystem (`image_location = "fs"`, the only supported source), and
-/// the config's `base.id` must not currently be registered. An exhausted host
 /// `GET /api/vms/schema` — the fields a creation request may carry.
 ///
 /// The field set is the template's, not this interface's: `VmTemplateParams` is
@@ -243,6 +235,14 @@ fn address_field(fields: &Value, name: &str) -> Result<usize, String> {
     }
 }
 
+/// `POST /api/vms/create` — create a VM from a TOML config.
+///
+/// Body: `{"toml": "<完整 TOML 配置>"}` or `{"path": "<guest 文件系统中的 .toml>"}`.
+/// The path form is what the folder browser uses: the file is read on the host
+/// and the VM is created from exactly the bytes that are there, so a config can
+/// live in any directory instead of being pasted. The guest kernel is read from
+/// the guest filesystem (`image_location = "fs"`, the only supported source), and
+/// the config's `base.id` must not currently be registered. An exhausted host
 /// resource (memory, or the browser console lane table of a `browser-console`
 /// build) is a 503, so a caller can tell "try later" from "this config is wrong".
 pub async fn vm_create(Json(payload): Json<Value>) -> Response {

@@ -698,7 +698,6 @@ impl core::fmt::Display for SaveError {
 /// reports "recursive directory creation is not supported"), so the pool only
 /// ever ensures one level. An existing directory is left untouched, which is
 /// what makes this callable on every start and on every save.
-/// Creates one directory level if it is not there yet.
 ///
 /// Shared with the file transfer ([`super::files`]), which stages bytes in a
 /// namespace of its own inside the target directory and therefore needs the same
@@ -743,7 +742,7 @@ pub fn save_in(directory: &str, name: &str, toml: &str) -> Result<String, SaveEr
     ax_std::fs::write(&path, toml).map_err(|error| SaveError::Unwritable(error.to_string()))?;
     Ok(path)
 }
-///
+
 /// The first guest image a config names but that is missing from the guest
 /// filesystem.
 ///

@@ -318,7 +318,7 @@ active admission/stable identity 语义一致。
 | 单 vCPU guest | `notify_vm()` 设置 Release 发布的 pending device-poll flag 并唤醒；vCPU0 用 Acquire/AcqRel 消费 | flag 只表达“需要 poll”，不计数；队列才保存字节 |
 | SMP guest | 与单 vCPU guest 一样先发布 pending device-poll flag，再通过线程世代绑定的 capability 定向 kick vCPU0 | flag 只表达“需要 poll”，不计数；队列才保存字节 |
 | 输出并发 | `output_lock` 覆盖 active admission、record 入队、`retained_tx` 记/清与 retry drain；ordered record queue 保持 guest 写入顺序，固定 64 KiB transport 保持直接 replay 的事务边界，只有 output worker 等待 UART | guest record queue 满时 `try_write()` 返回 0 且不丢弃已排队记录，由 PL011 重试，并由 pop 路径锁外 `notify_vm()` 唤醒；直接 host transport 事务满时整事务回滚并报告摘要；per-guest ring 淘汰最旧字节；这些路径都不阻塞 vCPU writer |
-| 网络输出 | 每端点独立 64 KiB 固定队列；有连接时 vCPU 只复制原始字节并通过 `IrqNotify` 唤醒对应网页输出任务 | 无连接时不保留历史也不获取网络队列锁；慢客户端只影响自身通道并最终触发该端点队列丢弃摘要 |
+| 网络输出 | 每端点独立 64 KiB 固定队列；有连接时 vCPU 只复制原始字节并通过 `IrqNotify` 唤醒对应网页输出任务 | 无连接时输出仍进入该端点队列（容量淘汰最旧字节，构成重连时的回放积压），期间同样获取队列锁但不唤醒任何投递任务；慢客户端只影响自身通道并最终触发该端点队列丢弃摘要 |
 
 `browser-console` 只提供控制台字节流的 WebSocket 网关，不再内嵌网页。网页界面由 `web-ui`
 功能提供：它以编译期内嵌的静态资源发布管理台，并通过 HTTP 管理 API 读取 VM registry；
@@ -433,7 +433,7 @@ disabled = [
 - 第一次前台输入进入 Interactive、切换时回放后台 ring、detach 后全部缓存；
 - foreground 或 background 未结束物理行在切换时正确补行。
 - VM 2 网络输入不改变物理 VM 1 foreground，并拒绝 stopped 或 stale backend；
-- 有连接的 VM 输出只进入对应网络通道，无连接时跳过网络输出路径；
+- 有连接的 VM 输出只进入对应网络通道，无连接时输出仍入该通道队列（容量淘汰最旧字节），供后来接入的会话回放；
 - 运行期登记与释放客户机通道，客户机可以出现在任意槽位，并使用配置名称。
 
 `os/axvisor/tests/axtest.rs` 另有一组只在该 kernel harness 中运行的用例：它们编译真实的
