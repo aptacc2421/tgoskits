@@ -401,30 +401,13 @@ pub async fn vm_create(Json(payload): Json<Value>) -> Response {
 ///
 /// The registry holds the guest only for this boot; the file is what a later
 /// scan lists as a candidate, which is what makes the guest reproducible after
-/// a reboot. The file name comes from the guest's own name, reduced to one
-/// plain component, with the id as the fallback when nothing survives the
-/// reduction. A failure is reported to the caller as `None` — the guest is
-/// registered either way — and logged, because "created but not written" is a
-/// state the operator should be able to see.
+/// a reboot. The file name comes from [`candidate_file_name`]. A failure is
+/// reported to the caller as `None` — the guest is registered either way — and
+/// logged, because "created but not written" is a state the operator should be
+/// able to see.
 #[cfg(feature = "fs")]
 fn persist_candidate(id: usize, guest_name: &str, config_toml: &str) -> Option<String> {
-    let stem: String = guest_name
-        .trim()
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let stem = stem.trim_matches(|character| character == '-' || character == '.');
-    let file = if stem.is_empty() {
-        format!("guest-{id}.toml")
-    } else {
-        format!("{stem}.toml")
-    };
+    let file = axvmconfig::candidate_file_name(id, guest_name);
     match crate::control::domain::pool::save_in(
         crate::control::domain::pool::directory(),
         &file,
