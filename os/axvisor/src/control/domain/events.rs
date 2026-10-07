@@ -182,9 +182,9 @@ fn publish_diff(baseline: &VmSnapshot, current: &VmSnapshot) {
             });
         }
     }
-    if !events.is_empty() {
-        publish(&events);
-    }
+    // Publish even when nothing changed: the retain inside prunes subscribers
+    // whose browser already left, so an idle registry still frees them.
+    publish(&events);
 }
 
 fn publish(events: &[VmEvent]) {
@@ -196,6 +196,12 @@ fn publish(events: &[VmEvent]) {
         return;
     };
     subscribers.retain(|sender| {
+        // A receiver that is already gone counts as dead even when there is
+        // nothing to send: without this probe an idle registry would keep a
+        // closed browser in the list forever.
+        if sender.is_closed() {
+            return false;
+        }
         for event in events {
             match sender.try_send(event.clone()) {
                 Ok(()) => {}
