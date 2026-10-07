@@ -16,7 +16,7 @@ use {
     ax_std::os::arceos::modules::ax_runtime::task::sync::irq::IrqWaitCell,
     ax_std::os::arceos::modules::ax_runtime::task::sync::irq::IrqWorkerWaiter,
     ax_std::os::arceos::modules::ax_runtime::task::thread::current::current_thread_handle,
-    ax_std::os::arceos::sync::NoPreemptMutex,
+    ax_std::os::arceos::sync::NoPreemptMutex, ax_std::thread,
 };
 
 mod layout;
@@ -35,7 +35,38 @@ const OUTPUT_DELIVERY_QUEUE_CAPACITY: usize = 64 * 1024;
 const OUTPUT_DELIVERY_BATCH_CAPACITY: usize = 4096;
 const OUTPUT_COALESCE_WINDOW: Duration = Duration::from_millis(10);
 const MANAGEMENT_LINE_CAPACITY: usize = 256;
-const MANAGEMENT_CPU_ID: usize = 0;
+pub(crate) const MANAGEMENT_CPU_ID: usize = 0;
+/// CPU the browser-console output dispatchers run on, or `None` to leave the
+/// scheduler free to place them.
+///
+/// The default is [`MANAGEMENT_CPU_ID`], the core the console output task
+/// already runs on, because a dispatcher and that task are producer and consumer
+/// of the same frame: the dispatcher fills the delivery queue and notifies, the
+/// output task drains it into the socket. Sharing a core makes that handoff a
+/// same-core wakeup with no remote IPI and no cross-core transfer of the queue.
+///
+/// The traffic that decides the cost either way is earlier and unavoidable: lane
+/// bytes are written by the guest's own vCPU, so they cross a core boundary no
+/// matter where the dispatcher sits.
+///
+/// A core chosen by a number is a guess about a layout this code cannot see —
+/// `AXVISOR_DISPATCHER_CPU` exists so a deployment that knows where its guests
+/// run can say so. A value outside this build's CPUs falls back to unpinned
+/// rather than failing.
+const DEFAULT_DISPATCHER_CPU_ID: usize = MANAGEMENT_CPU_ID;
+
+/// The CPU a new output dispatcher pins itself to, if any.
+///
+/// Reads `[env] AXVISOR_DISPATCHER_CPU`: an absent value uses
+/// [`DEFAULT_DISPATCHER_CPU_ID`], and `off` leaves the dispatcher unpinned so
+/// the scheduler chooses.
+fn dispatcher_cpu_id() -> Option<usize> {
+    match option_env!("AXVISOR_DISPATCHER_CPU") {
+        Some("off") => None,
+        Some(value) => value.parse::<usize>().ok(),
+        None => Some(DEFAULT_DISPATCHER_CPU_ID),
+    }
+}
 
 static OUTPUT_HUB: NetworkOutputHub = NetworkOutputHub::new();
 /// Which lane each guest owns. The table is written when a VM is created and
@@ -339,6 +370,36 @@ pub(crate) fn pin_current_task() {
         .expect("web console management CPU affinity must be valid");
 }
 
+/// Pins one output dispatcher to the CPU this build asks for.
+///
+/// The dispatcher waits on a lane and assembles WebSocket frames, so it runs
+/// for every console session. Leaving it unpinned lets the scheduler place it
+/// wherever it likes: measured on a four-core demo, that put successive
+/// sessions on CPU 0, 2 and 3 and made the same keystroke cost anywhere from
+/// 17 ms to 398 ms, because where the timer-driven task lands decides what its
+/// wake-up waits behind.
+///
+/// The pin is a placement hint, not a requirement: a build whose CPU count does
+/// not include the requested core keeps the dispatcher unpinned rather than
+/// failing, so the same binary runs on a smaller machine.
+fn pin_dispatcher_task() {
+    let Some(cpu) = dispatcher_cpu_id() else {
+        return;
+    };
+    let Ok(cpus) = thread::available_parallelism() else {
+        return;
+    };
+    if cpu >= cpus.get() {
+        warn!(
+            "browser console dispatcher CPU {cpu} is outside this build's {cpus} CPUs; leaving it unpinned"
+        );
+        return;
+    }
+    if let Err(error) = ax_set_current_affinity(AxCpuMask::one_shot(cpu)) {
+        warn!("browser console dispatcher CPU {cpu} affinity failed: {error:?}");
+    }
+}
+
 /// Returns whether this browser route exists in the current layout.
 pub(crate) fn has_console_route(route: &str) -> bool {
     endpoint_for_route(route).is_some()
@@ -371,6 +432,9 @@ pub(crate) struct ConsoleDescription {
 
 /// Copies Axvisor shell bytes into its fixed browser queue.
 pub(crate) fn submit_management_output(bytes: &[u8]) {
+    // The management shell's echo enters the lane here rather than through a
+    // guest input queue, so this is the only mark of where a shell keystroke
+    // started. Without it the shell's console path cannot be timed.
     OUTPUT_HUB.submit(ConsoleLane::MANAGEMENT, bytes);
 }
 
@@ -425,6 +489,7 @@ fn start_output_dispatcher(
     std::thread::Builder::new()
         .name(task_name.clone())
         .spawn(move || {
+            pin_dispatcher_task();
             if let Err(error) = run_output_dispatcher(lane, session, &dispatcher_delivery) {
                 warn!("{worker_name} stopped: {error:#}");
             }
