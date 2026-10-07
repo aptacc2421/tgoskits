@@ -17,7 +17,7 @@ networking hostfwd. Nothing in the hypervisor knows a test is running.
 Environment (set by the generic runner):
 
     AXVISOR_HTTP_BASE            http://127.0.0.1:<host_port> (forwarded)
-    AXVISOR_HTTP_CASE_DIR        case directory of this `case-alpine.toml`
+    AXVISOR_HTTP_CASE_DIR        directory containing this `case-alpine.toml`
                                  (default: this file's directory)
     AXVISOR_HTTP_CONNECT_TIMEOUT seconds for the initial reachability wait
     AXVISOR_HTTP_REQUEST_TIMEOUT seconds per HTTP request
