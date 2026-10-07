@@ -105,8 +105,64 @@ management HTTP server (axum) listening on 0.0.0.0:8080
 | 页面返回 404 但日志显示监听成功 | 该构建没有启用 `web-ui` | 在构建配置里启用该特性 |
 | 浏览器无法连接 | QEMU 配置没有 `hostfwd` | 加入端口转发参数 |
 | 界面看不到终端面板 | 该构建没有启用 `browser-console` | 启用该特性 |
+| 改了前端源码但页面行为没变 | `cargo xtask axvisor build` 只读现成的 `dist`，不调用 npm（见 1.4） | 先 `npm run build`，再重建 Axvisor；只跑 `tsc --noEmit` 或 `npm test` 不更新`dist` |
+| 构建进程被杀、失败信息与代码无关 | 内存不足时 OOM killer 静默终止 cargo | 用 `CARGO_BUILD_JOBS=2` 限制并行度 |
+| `--qemu-config` 报No such file | 该参数相对**仓库根**，而用例注释里写的是相对用例目录 | 用 `test-suit/axvisor/normal/qemu-web-ui/web-ui/qemu-<arch>-hostfwd.toml` |
 
-五种现象分别落在产物、端口与特性配置三处，按处理栏的提示逐项排查即可。
+这些现象分别落在产物、端口、特性配置和构建环境四类，按处理栏逐项排查即可。
+
+### 1.5 本地演示配置
+
+`test-suit/axvisor/normal/qemu-web-ui/` 下有两类配置，用途不同：
+
+| 配置 | 用途 |
+| :-- | :-- |
+| `build-<target>.toml` | **测试用例**。命名匹配用例发现规则，会出现在 `cargo xtask axvisor test` 的运行里 |
+| `demo-fs-build*.toml` | **本地演示**。命名不匹配发现规则，因此不会出现在任何测试运行中 |
+
+四个演示配置都启用 `web-ui` + `browser-console` + `fs` + `ax-driver/nvme` + `no-auto-start`，并且**故意不带 `vm_configs`**：启动时不注册任何客户机，页面上的每一个客户机都来自操作者放进 `/guest` 的配置。池子递归读取 `/guest` 下所有 `.toml`，而控制台保存的配置也写回 `/guest`。
+
+三个架构各有一份官方 target 的演示配置，riscv64 另开 `sstc` 扩展开关：
+
+```bash
+# aarch64
+cargo xtask axvisor qemu \
+  -c test-suit/axvisor/normal/qemu-web-ui/demo-fs-build.toml \
+  --qemu-config test-suit/axvisor/normal/qemu-web-ui/web-ui/qemu-aarch64-hostfwd.toml \
+  --arch aarch64
+
+# riscv64
+cargo xtask axvisor qemu \
+  -c test-suit/axvisor/normal/qemu-web-ui/demo-fs-build-riscv64.toml \
+  --qemu-config test-suit/axvisor/normal/qemu-web-ui/web-ui/qemu-riscv64-hostfwd.toml \
+  --arch riscv64
+
+# x86_64 —— 见下节的 TODO
+cargo xtask axvisor qemu \
+  -c test-suit/axvisor/normal/qemu-web-ui/demo-fs-build-x86_64.toml \
+  --qemu-config test-suit/axvisor/normal/qemu-web-ui/web-ui/qemu-x86_64-hostfwd.toml \
+  --arch x86_64
+```
+
+不加 `--rootfs` 时 rootfs 按1.1 的顺序自动获取；已经有一份镜像时用 `--rootfs <path>` 跳过下载。
+
+### 1.6 x86_64 上的网页管理台（TODO）
+
+x86_64 的 Axvisor 本身能在这套流程下正常起来：OVFI 引导、两路 pflash、控制面监听、
+Web UI 五个面板、客户机创建与生命周期操作都可用。**缺的是能在可接受时间内启动的客户机。**
+
+实测：同一份 Linux 内核与 initramfs，riscv64 走 Axvisor 约 4 秒进 shell，x86_64 要 140 秒
+以上仍在半途，而裸 QEMU 跑同一份只要 0.7 秒——所以不是环境或镜像的问题。
+
+根因是 Axvisor 没有为 x86 客户提供 paravirt 时钟。x86 没有"读时间"这条指令，时间只能从设备
+寄存器读，每一次读都 trap 回 hypervisor；客户机因此退回到最慢的 `refined-jiffies` 时钟源，
+而它每次 `read()` 都要读一次定时器，于是启动过程的每次时钟读取都成了一次 VM 退出。RISC-V
+不受影响，因为它的 `time` CSR 用 `rdtime` 一条普通指令读，不 trap。
+
+待办的修法是实现 kvm-clock——KVM 既有的 paravirt 时钟接口，Linux 原生识别，不需要改客户机。
+
+在这一项完成之前，x86_64 上可以验证控制面、客户机注册表和前端，但**不要把客户机启动耗时
+当作 hypervisor 或本次改动的问题**。
 
 ## 2. U-Boot 启动
 
