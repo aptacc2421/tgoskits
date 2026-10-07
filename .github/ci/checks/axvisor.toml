@@ -53,6 +53,8 @@ node -v
 npm -v
 echo "==> build the dashboard bundle (cargo never invokes npm)"
 (cd os/axvisor/web-ui && npm ci && npm run build)
+echo "==> dashboard unit tests (npm run build is tsc + vite only)"
+(cd os/axvisor/web-ui && npm test)
 echo "==> axvisor aarch64 dashboard"
 cargo xtask axvisor test qemu --arch aarch64 --test-case web-ui
 echo "==> axvisor aarch64 VM pool"
