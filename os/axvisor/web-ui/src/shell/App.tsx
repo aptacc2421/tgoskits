@@ -63,10 +63,18 @@ export default function App({ registry }: { registry: PanelRegistry }) {
   // built here rather than in a panel because panels do not import each other —
   // the composition root hands the same store to both. A build without the
   // `files` panel has no transfers and therefore no store.
-  const files = useMemo(
-    () => (capabilities.panel('files') ? new FilesService(api, capabilities.bind('files')) : null),
-    [api, capabilities],
-  )
+  //
+  // Held in a ref rather than derived from `capabilities`, because re-reading the
+  // manifest replaces that object. Building a new store on every refresh would
+  // silently drop every in-flight transfer: the panels would go back to an empty
+  // list with no error anywhere. The links a store was built with stay valid —
+  // the descriptor is fixed for a given build — so the refresh that this does
+  // not react to is the one thing a store has to outlive.
+  const filesRef = useRef<FilesService | null>(null)
+  if (filesRef.current === null && capabilities.panel('files')) {
+    filesRef.current = new FilesService(api, capabilities.bind('files'))
+  }
+  const files = filesRef.current
 
   useEffect(() => {
     const controller = new AbortController()
