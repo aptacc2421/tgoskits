@@ -462,29 +462,34 @@ export default function ConsolePanel({ api, link, resources = [], focusVm = null
               </button>
             </div>
           )}
-          {/* Every opened tab stays mounted, hidden ones included: unmounting a
-              tab would drop its terminal buffer, and switching tabs must not
-              cost the operator the history they already read. */}
+          {/* Every lane is mounted once, hidden ones included: unmounting a
+              terminal would drop its buffer, and switching tabs — or merging
+              two of them — must not cost the operator the history they already
+              read. So the lanes are hoisted out of their tab and keyed by lane
+              alone; a tab is only which lanes are visible. Keying the wrappers
+              by the tab's contents instead (the obvious `group.join('+')`)
+              remounts every terminal in the tab the moment a merge changes
+              that string, which is what it used to do. */}
           <div className="flex min-h-0 flex-1 gap-2">
-            {groups.map((group, index) => {
-              const panes = group.filter((route) => routes.includes(route))
-              return (
+            {groups.flatMap((group, index) => {
+              const lanes = group.filter((route) => routes.includes(route))
+              return lanes.map((route) => (
                 <div
-                  key={group.join('+')}
+                  key={route}
                   className={cn(
                     'flex min-h-0 min-w-0 flex-1 gap-2',
                     index === active ? 'flex' : 'hidden',
                   )}
                 >
-                  {panes.map((route) => pane(route, panes.length))}
-                  {index === active && panes.length === 0 && (
-                    <p className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                      这个标签没有可连接的通道。
-                    </p>
-                  )}
+                  {pane(route, lanes.length)}
                 </div>
-              )
+              ))
             })}
+            {groups[active]?.filter((route) => routes.includes(route)).length === 0 && (
+              <p className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                这个标签没有可连接的通道。
+              </p>
+            )}
           </div>
         </>
       )}
