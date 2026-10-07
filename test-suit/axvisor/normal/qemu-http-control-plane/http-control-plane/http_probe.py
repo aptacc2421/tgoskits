@@ -788,8 +788,10 @@ def check_create_form():
     # The form's guest is also a file on the guest tree: the same configuration
     # the registry holds is what the candidate scan reads, so it survives a
     # reboot. The response names the file; the pool is what proves it is there.
+    # The name is the guest's own, reduced to one plain component, with the id
+    # appended — a component alone is not unique, and the writer truncates.
     saved = body.get("config")
-    if saved != "/guest/probe-fields.toml":
+    if saved != "/guest/probe-fields-4243.toml":
         raise AssertionError("the form's config was not written to the guest tree: %r" % (body,))
     status, body = request("GET", "/api/vms/pool")
     check("GET /api/vms/pool (form config persisted)", status, 200)
