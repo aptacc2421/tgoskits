@@ -40,13 +40,11 @@ pub(crate) use error::block_error_to_vfs_error;
 pub use error::{BlockError, BlockResult};
 pub(crate) use error::{io_error_to_vfs_error, vfs_error_to_io_error};
 
-static MOUNTED_FILESYSTEMS: os::sync::IrqMutex<Vec<axfs_ng_vfs::WeakFilesystem>> =
-    os::sync::IrqMutex::new(Vec::new());
+static MOUNTED_FILESYSTEMS: os::sync::RawSpinLock<Vec<Filesystem>> =
+    os::sync::RawSpinLock::new(Vec::new());
 
 fn register_mounted_filesystem(fs: Filesystem) {
-    let mut registry = MOUNTED_FILESYSTEMS.lock();
-    registry.retain(axfs_ng_vfs::WeakFilesystem::is_alive);
-    registry.push(fs.downgrade());
+    MOUNTED_FILESYSTEMS.lock_irqsave().push(fs);
 }
 
 #[cfg(any(feature = "ext4", feature = "fat"))]
@@ -77,12 +75,11 @@ pub enum FilesystemKind {
     Fat,
 }
 
-/// Initializes the filesystem subsystem from a runtime-selected block region.
 fn finish_filesystem_init(fs: axfs_ng_vfs::Filesystem, source: &str) -> Location {
     info!("  filesystem type: {:?}", fs.name());
 
-    // A namespace keeps an immutable anchor; the actual root is a normal mount
-    // above it and can therefore be pivoted and detached like Linux rootfs.
+    // Keep an immutable namespace anchor; the actual root mount can then be
+    // pivoted and detached without invalidating the namespace itself.
     let anchor = axfs_ng_vfs::Mountpoint::new_root_with_source(&MemoryFs::new(), "nullfs");
     anchor.set_readonly(true);
     let mp = anchor
@@ -103,13 +100,9 @@ pub fn shutdown_filesystems() -> axfs_ng_vfs::VfsResult {
 
 /// Shuts down the registered filesystems in reverse mount order.
 fn shutdown_registered_filesystems() -> axfs_ng_vfs::VfsResult {
-    let filesystems = core::mem::take(&mut *MOUNTED_FILESYSTEMS.lock());
+    let filesystems = core::mem::take(&mut *MOUNTED_FILESYSTEMS.lock_irqsave());
     let mut first_error = None;
-    for fs in filesystems
-        .into_iter()
-        .rev()
-        .filter_map(|entry| entry.upgrade())
-    {
+    for fs in filesystems.into_iter().rev() {
         if let Err(error) = fs.shutdown() {
             first_error.get_or_insert(error);
         }

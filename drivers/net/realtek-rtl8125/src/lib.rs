@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use ax_sync::SpinLock as Mutex;
+use ax_sync::RawSpinLock;
 use descriptor::{RING_END, RxDesc, TxDesc};
 use dma_api::DeviceDma;
 use log::info;
@@ -59,7 +59,7 @@ pub(crate) struct RxFilter {
     _mmio: Arc<Mmio>,
     /// Receive policy for this device instance.  The default accepts the
     /// device MAC plus multicast/broadcast traffic.
-    mode: Mutex<NetRxMode>,
+    mode: RawSpinLock<NetRxMode>,
 }
 
 impl RxFilter {
@@ -67,7 +67,7 @@ impl RxFilter {
         Arc::new(Self {
             regs,
             _mmio: mmio,
-            mode: Mutex::new(NetRxMode::normal()),
+            mode: RawSpinLock::new(NetRxMode::normal()),
         })
     }
 
@@ -208,7 +208,7 @@ impl Rtl8125 {
             mac: [0; 6],
             chip,
             phy_ocp_base: OCP_STD_PHY_BASE,
-            queue_start: Arc::new(Mutex::new(QueueStartState::default())),
+            queue_start: Arc::new(RawSpinLock::new(QueueStartState::default())),
             link_up: Arc::new(AtomicBool::new(false)),
         };
         dev.init()?;

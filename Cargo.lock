@@ -595,8 +595,6 @@ dependencies = [
 name = "arm_vgic"
 version = "0.6.2"
 dependencies = [
- "aarch64-cpu 11.2.0",
- "aarch64_sysreg",
  "ax-crate-interface",
  "ax-sync",
  "axdevice_base",
@@ -604,7 +602,6 @@ dependencies = [
  "bitmaps",
  "log",
  "thiserror 2.0.21",
- "tock-registers 0.10.1",
 ]
 
 [[package]]
@@ -852,6 +849,7 @@ dependencies = [
 name = "ax-cgroup"
 version = "0.3.0"
 dependencies = [
+ "ax-crate-interface",
  "ax-lazyinit",
  "ax-sync",
  "thiserror 2.0.21",
@@ -1471,11 +1469,10 @@ dependencies = [
 name = "axdevice"
 version = "0.8.5"
 dependencies = [
- "ax-runtime",
+ "ax-crate-interface",
  "ax-sync",
  "axdevice_base",
  "axvm-types",
- "cfg-if",
  "divan",
  "log",
  "paste",
@@ -1680,8 +1677,8 @@ dependencies = [
 name = "axvirtio-blk"
 version = "0.4.2"
 dependencies = [
+ "ax-crate-interface",
  "ax-memory-addr",
- "ax-runtime",
  "ax-sync",
  "axaddrspace",
  "axdevice_base",
@@ -1694,8 +1691,8 @@ dependencies = [
 name = "axvirtio-common"
 version = "0.2.7"
 dependencies = [
+ "ax-crate-interface",
  "ax-memory-addr",
- "ax-runtime",
  "ax-sync",
  "axaddrspace",
  "axdevice_base",
@@ -1708,6 +1705,7 @@ dependencies = [
 name = "axvirtio-net"
 version = "0.2.1"
 dependencies = [
+ "ax-crate-interface",
  "ax-memory-addr",
  "ax-sync",
  "axaddrspace",
@@ -9994,6 +9992,8 @@ dependencies = [
 name = "x86_vlapic"
 version = "0.5.4"
 dependencies = [
+ "ax-crate-interface",
+ "ax-sync",
  "bit",
  "log",
  "paste",

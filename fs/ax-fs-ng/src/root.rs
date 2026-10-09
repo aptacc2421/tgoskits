@@ -24,8 +24,8 @@ use crate::{
 };
 
 const VOLUME_METADATA_READ_RETRIES: usize = 3;
-static ROOT_BLOCK_IDENTITY: crate::os::sync::IrqMutex<Option<RootBlockIdentity>> =
-    crate::os::sync::IrqMutex::new(None);
+static ROOT_BLOCK_IDENTITY: crate::os::sync::RawSpinLock<Option<RootBlockIdentity>> =
+    crate::os::sync::RawSpinLock::new(None);
 static ROOT_KIND: AtomicU8 = AtomicU8::new(0);
 #[cfg(axtest)]
 static ROOT_BLOCK_HANDLE: OnceLock<usize> = OnceLock::new();
@@ -68,7 +68,7 @@ const DEFAULT_ROOT_BLOCK_IDENTITY: RootBlockIdentity = RootBlockIdentity {
 
 /// Returns the identity selected while mounting the root filesystem.
 pub fn root_block_identity() -> RootBlockIdentity {
-    (*ROOT_BLOCK_IDENTITY.lock()).unwrap_or(DEFAULT_ROOT_BLOCK_IDENTITY)
+    (*ROOT_BLOCK_IDENTITY.lock_irqsave()).unwrap_or(DEFAULT_ROOT_BLOCK_IDENTITY)
 }
 
 /// Root filesystem selector parsed from boot arguments.
@@ -232,21 +232,28 @@ impl PreparedRoot {
     pub fn commit(self) -> axfs_ng_vfs::VfsResult<()> {
         let context = crate::highlevel::ROOT_FS_CONTEXT
             .get()
-            .ok_or(VfsError::InvalidInput)?;
-        let old_root = context.lock().root_dir().clone();
-        let mount_dir = ensure_mountpoint_dir_result(&old_root, "/.rootfs")?;
-        // Preserve the complete tree that resource installation validated,
-        // including mounts on other partitions and their open filesystem owners.
-        let mount = mount_dir.bind_mount(self.context.root_dir(), true)?;
-        let new_root = mount.root_location();
+            .ok_or(VfsError::InvalidInput)?
+            .clone();
+        let old_root;
+        let new_root;
         #[cfg(feature = "vfs")]
-        let namespace = context.lock().mount_namespace().clone();
-        if let Err(error) = context
-            .lock()
-            .pivot_root(new_root.clone(), new_root.clone())
+        let namespace;
         {
-            new_root.detach_mount()?;
-            return Err(error);
+            let mut context_guard = context.lock();
+            old_root = context_guard.root_dir().clone();
+            let mount_dir = ensure_mountpoint_dir_result(&old_root, "/.rootfs")?;
+            // Preserve the complete tree that resource installation validated,
+            // including mounts on other partitions and their open filesystem owners.
+            let mount = mount_dir.bind_mount(self.context.root_dir(), true)?;
+            new_root = mount.root_location();
+            #[cfg(feature = "vfs")]
+            {
+                namespace = context_guard.mount_namespace().clone();
+            }
+            if let Err(error) = context_guard.pivot_root(new_root.clone(), new_root.clone()) {
+                new_root.detach_mount()?;
+                return Err(error);
+            }
         }
         crate::highlevel::FsContext::propagate_pivot_root(
             #[cfg(feature = "vfs")]
@@ -256,7 +263,7 @@ impl PreparedRoot {
         );
         old_root.detach_mount()?;
         crate::register_mounted_filesystem(self.filesystem.clone());
-        *ROOT_BLOCK_IDENTITY.lock() = Some(block_identity(
+        *ROOT_BLOCK_IDENTITY.lock_irqsave() = Some(block_identity(
             self.selected.handle.device_info(),
             self.selected.disk_index,
         ));
@@ -1925,7 +1932,7 @@ mod tests {
 
     impl Drop for MountedRegistryGuard {
         fn drop(&mut self) {
-            core::mem::take(&mut *crate::MOUNTED_FILESYSTEMS.lock());
+            core::mem::take(&mut *crate::MOUNTED_FILESYSTEMS.lock_irqsave());
         }
     }
 
