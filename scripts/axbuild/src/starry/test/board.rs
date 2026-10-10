@@ -26,6 +26,11 @@ struct PreparedBoardBuild {
     elf_path: PathBuf,
 }
 
+struct PreparedBoardBuildGroup {
+    cargo: ostool::build::config::Cargo,
+    result: Result<PreparedBoardBuild, String>,
+}
+
 pub(crate) fn collect_board_test_groups(
     _workspace_root: &Path,
     test_suite_dir: &Path,
@@ -93,14 +98,24 @@ impl Starry {
         }
 
         let mut build_groups = BTreeMap::<PathBuf, Vec<usize>>::new();
+        let mut resolved_build_configs = HashMap::<usize, PathBuf>::new();
+        let mut build_config_errors = HashMap::<usize, String>::new();
         for (position, (_, _, group)) in runnable.iter().enumerate() {
-            let build_config = group.build_config_path.canonicalize().with_context(|| {
-                format!(
-                    "failed to resolve Starry board build config `{}`",
-                    group.build_config_path.display()
-                )
-            })?;
-            build_groups.entry(build_config).or_default().push(position);
+            match group.build_config_path.canonicalize() {
+                Ok(build_config) => {
+                    resolved_build_configs.insert(position, build_config.clone());
+                    build_groups.entry(build_config).or_default().push(position);
+                }
+                Err(error) => {
+                    build_config_errors.insert(
+                        position,
+                        format!(
+                            "failed to resolve Starry board build config `{}`: {error}",
+                            group.build_config_path.display()
+                        ),
+                    );
+                }
+            }
         }
 
         // Board TOMLs only select runtime checks and session files. Build each
@@ -117,10 +132,11 @@ impl Starry {
             .prefix("starry-board-artifacts-")
             .tempdir_in(&artifact_parent)
             .context("failed to create temporary Starry board artifact directory")?;
-        let mut prepared_builds = HashMap::<PathBuf, Result<PreparedBoardBuild, String>>::new();
+        let mut prepared_builds = Vec::<PreparedBoardBuildGroup>::new();
+        let mut config_to_build = HashMap::<PathBuf, usize>::new();
         for (build_config, positions) in build_groups {
-            let result = async {
-                let group = &runnable[positions[0]].2;
+            let group = &runnable[positions[0]].2;
+            let prepared = async {
                 let request = self.prepare_request(
                     Self::test_board_build_args(group),
                     None,
@@ -128,39 +144,77 @@ impl Starry {
                     SnapshotPersistence::Discard,
                 )?;
                 let cargo = build::load_cargo_config(&request, self.app.workspace_context())?;
+                Ok::<_, anyhow::Error>((request, cargo))
+            }
+            .await;
+
+            let (request, cargo) = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let index = prepared_builds.len();
+                    prepared_builds.push(PreparedBoardBuildGroup {
+                        cargo: Default::default(),
+                        result: Err(format!("{error:#}")),
+                    });
+                    config_to_build.insert(build_config, index);
+                    continue;
+                }
+            };
+            if let Some(index) = prepared_builds
+                .iter()
+                .position(|existing| existing.result.is_ok() && existing.cargo == cargo)
+            {
+                config_to_build.insert(build_config, index);
+                continue;
+            }
+
+            let result = async {
                 let output = self.build_artifact(&request, cargo.clone()).await?;
                 let elf_path = qemu_test::preserve_build_artifact(
                     output.elf_path(),
                     artifact_directory.path(),
-                    positions[0],
+                    prepared_builds.len(),
                 )?;
                 Ok::<_, anyhow::Error>(PreparedBoardBuild {
-                    cargo,
+                    cargo: cargo.clone(),
                     request,
                     elf_path,
                 })
             }
             .await;
-            prepared_builds.insert(build_config, result.map_err(|error| format!("{error:#}")));
+            let index = prepared_builds.len();
+            prepared_builds.push(PreparedBoardBuildGroup {
+                cargo,
+                result: result.map_err(|error| format!("{error:#}")),
+            });
+            config_to_build.insert(build_config, index);
         }
 
-        for (_, group_label, group) in runnable {
+        for (position, (_, group_label, group)) in runnable.into_iter().enumerate() {
             let board_test_config = group.board_test_config_path.clone();
             let board_test_config_summary = board_test_config.display().to_string();
-            let build_config = group.build_config_path.canonicalize().with_context(|| {
-                format!(
-                    "failed to resolve Starry board build config `{}`",
-                    group.build_config_path.display()
-                )
-            })?;
-            let Some(build_result) = prepared_builds.get(&build_config) else {
+            if let Some(error) = build_config_errors.get(&position) {
+                run_state.fail_group(group_label, anyhow::anyhow!("{error}"));
+                continue;
+            }
+            let Some(build_config) = resolved_build_configs.get(&position) else {
+                run_state.fail_group(
+                    group_label,
+                    anyhow::anyhow!(
+                        "missing resolved build config for `{}`",
+                        group.build_config_path.display()
+                    ),
+                );
+                continue;
+            };
+            let Some(build_index) = config_to_build.get(build_config) else {
                 run_state.fail_group(
                     group_label,
                     anyhow::anyhow!("missing prepared build for `{}`", build_config.display()),
                 );
                 continue;
             };
-            let prepared = match build_result {
+            let prepared = match &prepared_builds[*build_index].result {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     run_state.fail_group(
@@ -172,6 +226,8 @@ impl Starry {
             };
 
             let result = async {
+                let mut request = prepared.request.clone();
+                request.build_info_path = group.build_config_path.clone();
                 let (mut board_config, board_config_path) = self
                     .load_board_config(&prepared.cargo, Some(board_test_config.as_path()))
                     .await?;
@@ -214,7 +270,7 @@ impl Starry {
                     .board_prepared_elf_with_request(
                         prepared.elf_path.clone(),
                         prepared.cargo.to_bin,
-                        prepared.request.build_info_path.clone(),
+                        request.build_info_path.clone(),
                         board_request,
                     )
                     .await

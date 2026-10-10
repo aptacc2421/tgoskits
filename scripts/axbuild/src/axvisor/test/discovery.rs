@@ -163,8 +163,8 @@ fn load_qemu_case(case: test_qemu::DiscoveredQemuCase) -> anyhow::Result<Axvisor
 pub(crate) fn discover_board_test_groups(
     workspace_root: &Path,
     group: &str,
-    selected_case: Option<&str>,
-    board: Option<&str>,
+    selected_cases: &[String],
+    boards: &[String],
 ) -> anyhow::Result<Vec<BoardTestGroup>> {
     let roots = board_test_group_roots(workspace_root, group)?;
     let mut groups = Vec::new();
@@ -176,9 +176,13 @@ pub(crate) fn discover_board_test_groups(
         .map(|dir| dir.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    board_test::filter_board_test_groups(groups, selected_case, board, "axvisor", || {
-        format!("no Axvisor board test groups found under {searched}")
-    })
+    board_test::filter_board_test_groups_by_board_names(
+        groups,
+        selected_cases,
+        boards,
+        "axvisor",
+        || format!("no Axvisor board test groups found under {searched}"),
+    )
 }
 
 /// Suite roots that hold AxVisor board cases. Discovery searches each suite
@@ -247,12 +251,9 @@ pub(super) fn discover_uboot_test_group(
     guest: &str,
 ) -> anyhow::Result<BoardTestGroup> {
     let board_name = format!("{board}-{guest}");
-    let mut groups = discover_board_test_groups(
-        workspace_root,
-        AXVISOR_NORMAL_GROUP,
-        None,
-        Some(&board_name),
-    )?;
+    let selected_boards = vec![board_name];
+    let mut groups =
+        discover_board_test_groups(workspace_root, AXVISOR_NORMAL_GROUP, &[], &selected_boards)?;
 
     if groups.len() == 1 {
         return Ok(groups.remove(0));

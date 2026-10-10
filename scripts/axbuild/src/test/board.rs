@@ -48,30 +48,30 @@ pub(crate) fn labeled_board_cases<T: BoardTestGroupInfo>(groups: Vec<T>) -> Vec<
         .collect()
 }
 
-pub(crate) fn filter_board_test_groups<T: BoardTestGroupInfo>(
+pub(crate) fn filter_board_test_groups_by_names<T: BoardTestGroupInfo>(
     groups: Vec<T>,
-    selected_case: Option<&str>,
+    selected_cases: &[String],
     selected_board: Option<&str>,
     suite_name: &str,
     empty_message: impl FnOnce() -> String,
 ) -> anyhow::Result<Vec<T>> {
-    let selected_cases = selected_case
+    let selected_boards = selected_board
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    filter_board_test_groups_by_names(
+    filter_board_test_groups_by_board_names(
         groups,
-        &selected_cases,
-        selected_board,
+        selected_cases,
+        &selected_boards,
         suite_name,
         empty_message,
     )
 }
 
-pub(crate) fn filter_board_test_groups_by_names<T: BoardTestGroupInfo>(
+pub(crate) fn filter_board_test_groups_by_board_names<T: BoardTestGroupInfo>(
     mut groups: Vec<T>,
     selected_cases: &[String],
-    selected_board: Option<&str>,
+    selected_boards: &[String],
     suite_name: &str,
     empty_message: impl FnOnce() -> String,
 ) -> anyhow::Result<Vec<T>> {
@@ -113,16 +113,43 @@ pub(crate) fn filter_board_test_groups_by_names<T: BoardTestGroupInfo>(
         });
     }
 
-    if let Some(board_name) = selected_board {
+    if !selected_boards.is_empty() {
         if groups.is_empty() {
             bail!("{}", empty_message());
         }
         let available = available_values(groups.iter().map(BoardTestGroupInfo::board_name));
-        groups.retain(|group| group.board_name() == board_name);
-        if groups.is_empty() {
+        let missing = selected_boards
+            .iter()
+            .filter(|board_name| !groups.iter().any(|group| group.board_name() == *board_name))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let noun = if selected_boards.len() == 1 {
+                "board"
+            } else {
+                "boards"
+            };
             return Err(anyhow!(
-                "unsupported {suite_name} board test board `{board_name}`. Supported boards are: \
+                "unsupported {suite_name} board test {noun} `{}`. Supported boards are: \
                  {available}",
+                missing.join(","),
+            ));
+        }
+        groups.retain(|group| {
+            selected_boards
+                .iter()
+                .any(|board_name| group.board_name() == board_name)
+        });
+        if groups.is_empty() {
+            let noun = if selected_boards.len() == 1 {
+                "board"
+            } else {
+                "boards"
+            };
+            return Err(anyhow!(
+                "unsupported {suite_name} board test {noun} `{}`. Supported boards are: \
+                 {available}",
+                selected_boards.join(","),
             ));
         }
     }
