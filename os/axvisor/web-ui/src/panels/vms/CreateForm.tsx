@@ -99,6 +99,9 @@ export function CreateForm({
   const [help, setHelp] = useState(false)
   const [placements, setPlacements] = useState<Record<string, Placement>>({})
   const snapshot = useFiles(files ?? null)
+  const suggestedIdRef = useRef(suggestedId)
+  suggestedIdRef.current = suggestedId
+  const seededIdRef = useRef<string | null>(null)
 
   // The declaration is read when the form is opened, not when the panel loads:
   // a panel nobody creates from should not ask for a field set at all.
@@ -111,11 +114,13 @@ export function CreateForm({
         if (cancelled) return
         setSchema(declared)
         // The declaration drives every field, but the id one opens with is a live
-        // fact (what ids are already taken), not a static default. Pre-fill it
-        // with a free id so the operator starts from a non-colliding value.
+        // fact (what ids are already taken), not a static default. Read the latest
+        // suggestion when the request resolves so a slow schema response cannot
+        // seed an id from before the registry's first refresh.
         const seeded = initialValues(declared)
         if (declared.fields.some((field) => field.name === 'id')) {
-          seeded.id = String(suggestedId)
+          seeded.id = String(suggestedIdRef.current)
+          seededIdRef.current = seeded.id
         }
         setValues(seeded)
         setError(null)
@@ -127,6 +132,23 @@ export function CreateForm({
       cancelled = true
     }
   }, [api, link, open])
+
+  // Registry polling may discover a higher id while the schema request is in
+  // flight or just after the form seeded itself. Move the untouched suggestion
+  // forward, but preserve an id the operator has edited explicitly.
+  useEffect(() => {
+    if (!open || schema === null || seededIdRef.current === null) return
+    const next = String(suggestedId)
+    setValues((current) => {
+      if (current.id !== seededIdRef.current || current.id === next) return current
+      seededIdRef.current = next
+      return { ...current, id: next }
+    })
+  }, [open, schema, suggestedId])
+
+  useEffect(() => {
+    if (!open) seededIdRef.current = null
+  }, [open])
 
   // A transfer that has just landed changes what the guest filesystem holds, so
   // the lookups below run again even though no text changed.
