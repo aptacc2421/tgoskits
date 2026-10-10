@@ -13,7 +13,7 @@ the QEMU hostfwd port is reachable, then treats the exit code as the verdict:
 management API running *inside* AxVisor through QEMU user-mode networking
 hostfwd. Nothing in the hypervisor knows a test is running.
 
-This build is `web-ui` + `browser-console` with `no-auto-start`, so the
+This build is `web-ui` + unified `web` with `no-auto-start`, so the
 dashboard, the terminal gateway and the VM registry are all live at once and
 the default guest stays `Ready` until the probe starts it. The probe covers the
 contract a browser depends on, not a browser:
@@ -27,7 +27,7 @@ contract a browser depends on, not a browser:
     GET    /no-such-page          -> 404   (no SPA catch-all)
     GET    /assets/no-such.js     -> 404   (asset table is exact)
     <bundle>                      -> holds every endpoint the UI calls
-    GET    /api/manifest          -> 200   (vms + console + shell panels)
+    GET    /api/manifest          -> 200   (vms + files + host + console + shell panels)
     GET    /api/consoles          -> 200   (management lane + the default VM's lane,
                                             each with a boolean `attached`)
     GET    /ws/axvisor            -> 101   (management shell: help output)
@@ -68,10 +68,6 @@ import urllib.parse
 import urllib.request
 
 BASE = os.environ.get("AXVISOR_HTTP_BASE", "http://127.0.0.1:8080").rstrip("/")
-CASE_DIR = os.environ.get(
-    "AXVISOR_HTTP_CASE_DIR", os.path.dirname(os.path.abspath(__file__))
-)
-LIB_DIR = "os/axvisor/configs/vms/qemu/aarch64"
 CONNECT_TIMEOUT = float(os.environ.get("AXVISOR_HTTP_CONNECT_TIMEOUT", "120"))
 REQUEST_TIMEOUT = float(os.environ.get("AXVISOR_HTTP_REQUEST_TIMEOUT", "5"))
 # Deadline for VM state transitions (guest entry, delete): well below the case
@@ -910,14 +906,18 @@ def check_lifecycle(events):
 
 
 def check_recreate(events):
-    """Recreate the default guest from the fixture, the way the panel does."""
-    # The default guest's config lives in the shared config library: the build
-    # registers it from there and this probe reads the same file back.
-    repo = os.path.abspath(os.path.join(CASE_DIR, "..", "..", "..", "..", ".."))
-    with open(
-        os.path.join(repo, LIB_DIR, "linux-virtio-blk-fs.toml"), "r", encoding="utf-8"
-    ) as handle:
-        vm_config = handle.read()
+    """Recreate the default guest from the pool candidate the UI can see."""
+    # The build rewrites managed image paths when it packages the guest. Read
+    # the resulting candidate from the control plane instead of sending the
+    # source fixture's `${workspace}` path back to the hypervisor.
+    status, pool = request("GET", "/api/vms/pool")
+    expect_status("GET /api/vms/pool (recreate source)", status, 200)
+    candidates = [entry for entry in pool.get("entries", []) if entry.get("id") == DEFAULT_VM_ID]
+    if len(candidates) != 1:
+        raise AssertionError("pool did not expose exactly one VM[1] candidate: %r" % candidates)
+    vm_config = candidates[0].get("toml")
+    if not isinstance(vm_config, str) or not vm_config:
+        raise AssertionError("pool candidate did not contain TOML: %r" % candidates[0])
     status, body = request(
         "POST", "/api/vms/create", json.dumps({"toml": vm_config})
     )

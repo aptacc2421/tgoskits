@@ -25,19 +25,27 @@ use axvm as _;
 // These modules stay reachable from the production binary build; the harness
 // compiles them only for their in-file axtest suites.
 #[allow(dead_code)]
-#[path = "../src/network_console/delivery.rs"]
+#[path = "../src/control/network_console/delivery.rs"]
 mod browser_console_delivery;
 #[allow(dead_code)]
-#[path = "../src/network_console/layout.rs"]
+#[path = "../src/control/network_console/layout.rs"]
 mod browser_console_layout;
+#[allow(dead_code)]
+#[path = "../src/control/domain/files.rs"]
+mod files;
 mod guest_console_harness;
 #[allow(dead_code)]
 #[path = "../src/guest_console/terminal.rs"]
 mod host_terminal;
 mod manager;
 mod network_console;
+mod control {
+    pub(crate) use crate::network_console;
+}
 #[path = "../src/control/domain/pool.rs"]
 mod pool;
+#[path = "../src/sync.rs"]
+mod sync;
 // The pool suites clean their fixtures through the production filesystem
 // helpers, so the harness compiles that module for its in-file suite too.
 #[allow(dead_code)]
@@ -69,6 +77,36 @@ mod tests {
     use axfs_ng_vfs::{Mountpoint, MutationCredentials, NodePermission};
     use axtest::prelude::*;
     use axvisor::builtin::{install_builtin, selected_configs};
+
+    #[test]
+    fn placed_file_cannot_be_reopened_as_an_upload() {
+        let directory = "/tmp/file-transfer-reopen";
+        let id = "placed-reopen";
+        let _ = std::fs::remove_dir_all(directory);
+        std::fs::create_dir_all(directory).unwrap();
+
+        crate::files::open(id, directory, 4).unwrap();
+        match crate::files::send(id, 0, Some(5), b"data") {
+            Err(crate::files::FileError::Conflict { offset, .. }) => ax_assert_eq!(offset, 0),
+            _ => panic!("a range with a different declared total was accepted"),
+        }
+        crate::files::send(id, 0, None, b"data").unwrap();
+        let placed = crate::files::place(id, "kernel").unwrap();
+        ax_assert_eq!(
+            placed.path.as_deref(),
+            Some("/tmp/file-transfer-reopen/kernel")
+        );
+
+        match crate::files::open(id, directory, 4) {
+            Err(crate::files::FileError::Conflict { offset, .. }) => ax_assert_eq!(offset, 4),
+            _ => panic!("reopening a placed file did not return a conflict"),
+        }
+        ax_assert_eq!(
+            std::fs::read_to_string(placed.path.unwrap()).unwrap(),
+            "data"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
 
     #[test]
     fn diskless_boot_keeps_memory_root_with_inherited_root_parameter() {
@@ -225,9 +263,7 @@ mod tests {
         ax_assert!(target.resolve("/guest/builtin/images/obsolete").is_err());
     }
 
-    #[cfg(feature = "fs")]
     use crate::shell_fs::{RemoveOptions, remove_path};
-    #[cfg(feature = "fs")]
     use ax_std::fs;
 
     fn remove_guest_console(vm_id: usize) {
@@ -242,8 +278,6 @@ mod tests {
         use crate::{guest_console_harness::mux, network_console};
 
         network_console::reset();
-        network_console::set_guest_connected(1);
-        network_console::set_guest_connected(2);
         let backend_1 = mux::serial_backend_factory(1).create();
         let backend_2 = mux::serial_backend_factory(2).create();
         mux::mark_running(1);
@@ -260,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn guest_output_skips_network_path_without_a_browser_session() {
+    fn guest_output_is_retained_without_a_browser_session() {
         use crate::{guest_console_harness::mux, network_console};
 
         network_console::reset();
@@ -269,7 +303,10 @@ mod tests {
 
         backend.write(b"physical console only\n");
 
-        ax_assert!(network_console::take_guest_output(1).is_empty());
+        ax_assert_eq!(
+            network_console::take_guest_output(1),
+            b"physical console only\n"
+        );
         remove_guest_console(1);
     }
 
@@ -278,7 +315,6 @@ mod tests {
         use crate::{guest_console_harness::mux, network_console};
 
         network_console::reset();
-        network_console::set_guest_connected(1);
         let backend = mux::serial_backend_factory(1).create();
         mux::mark_running(1);
 
@@ -293,7 +329,6 @@ mod tests {
         use crate::{guest_console_harness::mux, network_console};
 
         network_console::reset();
-        network_console::set_guest_connected(2);
         let backend = mux::serial_backend_factory(2).create();
         mux::mark_running(2);
 
@@ -310,7 +345,6 @@ mod tests {
         use crate::{guest_console_harness, network_console};
 
         network_console::reset();
-        network_console::set_guest_connected(1);
         let backend = guest_console_harness::mux::serial_backend_factory(1).create();
         guest_console_harness::mux::mark_running(1);
 
@@ -341,7 +375,6 @@ mod tests {
         mux::mark_running(2);
         ax_assert_eq!(backend_2.try_write(b"vm2\n"), 4);
 
-        network_console::set_guest_connected(1);
         let backend_1 = mux::serial_backend_factory(1).create();
         mux::mark_running(1);
         ax_assert_eq!(backend_1.try_write(b"retained by uart"), 0);
@@ -664,7 +697,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "fs")]
     fn reset_test_dir(path: &str) {
         let _ = remove_path(
             path,
@@ -677,7 +709,6 @@ mod tests {
         fs::create_dir(path).expect("create test directory");
     }
 
-    #[cfg(feature = "fs")]
     #[test]
     fn vm_pool_scan_lists_only_configs_that_can_become_a_vm() {
         use crate::pool::scan_dir;
@@ -687,22 +718,13 @@ mod tests {
         let kernel = format!("{root}/kernel.bin");
         fs::write(&kernel, b"guest kernel").expect("write kernel image fixture");
 
-        let entry_toml = |id: usize, name: &str, source: &str| {
+        let entry_toml = |id: usize, name: &str| {
             format!(
-                "[base]\nid = {id}\nname = \"{name}\"\n\n[kernel]\nimage_location = \"{source}\"\nkernel_path = \"{kernel}\"\n"
+                "[base]\nid = {id}\nname = \"{name}\"\n\n[kernel]\nkernel_path = \"{kernel}\"\n"
             )
         };
-        fs::write(&format!("{root}/named.toml"), entry_toml(7, "named", "fs"))
+        fs::write(&format!("{root}/named.toml"), entry_toml(7, "named"))
             .expect("write filesystem entry");
-        // A memory-backed entry reads no guest path at runtime: its build-time
-        // kernel path is allowed to be absent from the guest filesystem.
-        fs::write(
-            &format!("{root}/embedded.toml"),
-            format!(
-                "[base]\nid = 6\nname = \"embedded\"\n\n[kernel]\nimage_location = \"memory\"\nkernel_path = \"/no/such/embedded-image\"\n"
-            ),
-        )
-        .expect("write memory entry");
         // Only the `.toml` suffix makes a file a pool candidate.
         fs::write(&format!("{root}/notes.txt"), b"[base]\nid = 9\n").expect("write note");
         fs::write(&format!("{root}/empty.toml"), b"").expect("write empty file");
@@ -711,9 +733,7 @@ mod tests {
         let absent = format!("{root}/absent.bin");
         fs::write(
             &format!("{root}/missing.toml"),
-            format!(
-                "[base]\nid = 8\nname = \"missing\"\n\n[kernel]\nimage_location = \"fs\"\nkernel_path = \"{absent}\"\n"
-            ),
+            format!("[base]\nid = 8\nname = \"missing\"\n\n[kernel]\nkernel_path = \"{absent}\"\n"),
         )
         .expect("write missing-image entry");
 
@@ -723,7 +743,7 @@ mod tests {
         let mut ids: alloc::vec::Vec<usize> =
             pool.entries().iter().map(|entry| entry.id()).collect();
         ids.sort();
-        ax_assert_eq!(ids, [6, 7]);
+        ax_assert_eq!(ids, [7]);
         let named = pool
             .entries()
             .iter()
@@ -759,8 +779,8 @@ mod tests {
         // is reported, whichever the filesystem enumerates first.
         let dupes = format!("{root}/dupes");
         fs::create_dir(&dupes).expect("create duplicate fixture directory");
-        fs::write(&format!("{dupes}/a.toml"), entry_toml(5, "a", "fs")).expect("write a.toml");
-        fs::write(&format!("{dupes}/b.toml"), entry_toml(5, "b", "fs")).expect("write b.toml");
+        fs::write(&format!("{dupes}/a.toml"), entry_toml(5, "a")).expect("write a.toml");
+        fs::write(&format!("{dupes}/b.toml"), entry_toml(5, "b")).expect("write b.toml");
         let dupe_pool = scan_dir(&dupes);
         ax_assert_eq!(dupe_pool.entries().len(), 1);
         ax_assert_eq!(dupe_pool.issues().len(), 1);
@@ -796,7 +816,6 @@ mod tests {
         .expect("remove pool fixture");
     }
 
-    #[cfg(feature = "fs")]
     #[test]
     fn vm_pool_scan_walks_subdirectories_and_ignores_documents_that_are_no_config() {
         use crate::pool::{MAX_SCAN_DEPTH, scan_dir, scan_dirs, sources};
@@ -807,7 +826,7 @@ mod tests {
         fs::write(&kernel, b"guest kernel").expect("write kernel image fixture");
         let entry_toml = |id: usize, name: &str| {
             format!(
-                "[base]\nid = {id}\nname = \"{name}\"\n\n[kernel]\nimage_location = \"fs\"\nkernel_path = \"{kernel}\"\n"
+                "[base]\nid = {id}\nname = \"{name}\"\n\n[kernel]\nkernel_path = \"{kernel}\"\n"
             )
         };
 
@@ -882,7 +901,6 @@ mod tests {
         .expect("remove walk fixture");
     }
 
-    #[cfg(feature = "fs")]
     #[test]
     fn vm_pool_reads_several_directories_in_precedence_order() {
         use crate::pool::{browse, scan_dirs, sources};
@@ -897,7 +915,7 @@ mod tests {
         fs::write(&kernel, b"guest kernel").expect("write kernel image fixture");
         let entry_toml = |id: usize, name: &str| {
             format!(
-                "[base]\nid = {id}\nname = \"{name}\"\n\n[kernel]\nimage_location = \"fs\"\nkernel_path = \"{kernel}\"\n"
+                "[base]\nid = {id}\nname = \"{name}\"\n\n[kernel]\nkernel_path = \"{kernel}\"\n"
             )
         };
 
@@ -983,7 +1001,6 @@ mod tests {
         .expect("remove multi-directory fixture");
     }
 
-    #[cfg(feature = "fs")]
     #[test]
     fn vm_pool_save_only_writes_validated_configs_inside_the_directory() {
         use crate::pool::{SaveError, save_in, scan_dir};
@@ -992,9 +1009,8 @@ mod tests {
         reset_test_dir(root);
         let kernel = format!("{root}/kernel.bin");
         fs::write(&kernel, b"guest kernel").expect("write kernel image fixture");
-        let valid = format!(
-            "[base]\nid = 4\nname = \"saved\"\n\n[kernel]\nimage_location = \"fs\"\nkernel_path = \"{kernel}\"\n"
-        );
+        let valid =
+            format!("[base]\nid = 4\nname = \"saved\"\n\n[kernel]\nkernel_path = \"{kernel}\"\n");
 
         // A name that could escape the directory is refused before any write,
         // so a request cannot place a file anywhere it likes.
@@ -1034,10 +1050,12 @@ mod tests {
         ax_assert_eq!(pool.entries()[0].id(), 4);
         ax_assert_eq!(pool.entries()[0].name(), "saved");
 
-        // Writing again replaces the file instead of appending to it.
-        save_in(root, "saved.toml", &valid).expect("save a second time");
-        let rewritten = scan_dir(root);
-        ax_assert_eq!(rewritten.entries().len(), 1);
+        // A save never replaces an existing candidate behind an operator's
+        // back; choose a new name or remove the old file explicitly.
+        ax_assert!(matches!(
+            save_in(root, "saved.toml", &valid),
+            Err(SaveError::Exists(_))
+        ));
 
         remove_path(
             root,

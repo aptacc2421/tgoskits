@@ -4,7 +4,7 @@
 # pool configs into Axvisor's own root filesystem, which is how a
 # console-provisioned pool looks, and then drive listing, start-on-demand and
 # delete-on-close through the management shell.
-features = ["ax-driver/nvme", "fs"]
+features = ["ax-driver/nvme"]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
 vm_configs = []

@@ -7,18 +7,13 @@
 //! them.
 //!
 //! - [`pool`]: the guest configuration directories, scanned and written.
-//! - [`files`]: files staged on their way into the guest filesystem. Only the
-//!   transfer routes use it, so it needs both `fs` and `http-axum`.
+//! - [`files`]: files staged on their way into the guest filesystem. The
+//!   transfer routes are part of the unified `web` control-plane feature.
 //! - [`events`]: registry change events consumed by `/ws/events`. The watcher
-//!   only runs where that route exists, so the `http-axum` and
-//!   `browser-console` features are both required for it.
+//!   runs with the same `web` feature as that route.
 //! - [`host`]: the machine this hypervisor runs on, read by the host panel.
 
-#[cfg(all(feature = "browser-console", feature = "http-axum"))]
 pub mod events;
-#[cfg(all(feature = "fs", feature = "http-axum"))]
 pub mod files;
-#[cfg(any(feature = "browser-console", feature = "http-axum"))]
 pub mod host;
-#[cfg(feature = "fs")]
 pub mod pool;

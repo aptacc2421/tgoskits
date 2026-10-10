@@ -1,4 +1,4 @@
-//! VM registry change events for the browser UI (`browser-console` feature).
+//! VM registry change events for the browser UI (`web` feature).
 //!
 //! The registry (`axvm`) is the only authoritative VM state. This module reports
 //! the differences it observes in it so a browser list can refresh without
@@ -147,9 +147,13 @@ fn run_watcher() {
 }
 
 fn registry_snapshot() -> VmSnapshot {
-    crate::manager::AxvmManager::vm_list()
-        .iter()
-        .map(|vm| (vm.id(), (vm.name(), vm.status().as_str())))
+    crate::manager::manager()
+        .list()
+        .into_iter()
+        .map(|vm| {
+            let snapshot = vm.snapshot();
+            (snapshot.vm_id, (snapshot.name, snapshot.state.as_str()))
+        })
         .collect()
 }
 

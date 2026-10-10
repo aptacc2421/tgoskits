@@ -20,9 +20,7 @@
 //! then [`DEFAULT_VM_ROOT`] itself, each of them recursively to
 //! [`MAX_SCAN_DEPTH`]. An entry is only a candidate: nothing is created at
 //! startup, so an idle pool costs no guest memory and may list more guests than
-//! the machine can run at once. This is the difference from
-//! [`DEFAULT_VM_CONFIG_DIR`], whose configs the startup path creates immediately
-//! as the default guest set.
+//! the machine can run at once.
 //!
 //! The tree is the single authority for the candidate set: the scan reads it on
 //! every call and keeps no cache, so a config that the host adds, replaces or
@@ -42,9 +40,13 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
+use std::sync::{LazyLock, Mutex};
 
-use ax_std::fs::FileTypeExt;
+use ax_std::fs::{FileTypeExt, OpenOptions};
+use ax_std::io::{Error as IoError, Write};
 use axvmconfig::GuestConfig;
+
+use crate::sync::MutexExt;
 
 /// Guest tree the pool reads, and writes a new config into, by default.
 ///
@@ -53,9 +55,6 @@ use axvmconfig::GuestConfig;
 /// folder of the pool's own any more, and nothing creates one at startup.
 pub const DEFAULT_VM_ROOT: &str = "/guest";
 
-/// Directory of configs that the startup path creates as the default guest set.
-pub const DEFAULT_VM_CONFIG_DIR: &str = "/guest/vm_default";
-
 /// How many directory levels below a source a scan descends.
 ///
 /// The scan reads a whole filesystem, so it needs a floor: an operator's
@@ -63,6 +62,8 @@ pub const DEFAULT_VM_CONFIG_DIR: &str = "/guest/vm_default";
 /// plane for as long as it takes to walk it. Configs deeper than this are not
 /// candidates.
 pub const MAX_SCAN_DEPTH: usize = 8;
+
+static SAVE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Directory a new config is written to: `[env] AXVISOR_VM_POOL` wins over
 /// [`DEFAULT_VM_ROOT`].
@@ -246,11 +247,6 @@ impl Pool {
     pub fn issues(&self) -> &[Issue] {
         &self.issues
     }
-
-    /// The entry that claims `id`, if the pool holds a usable config for it.
-    pub fn entry(&self, id: usize) -> Option<&Entry> {
-        self.entries.iter().find(|entry| entry.id == id)
-    }
 }
 
 /// Scan every directory reported by [`sources`].
@@ -259,10 +255,7 @@ pub fn scan() -> Pool {
 }
 
 /// Scan one directory of guest configs.
-///
-/// A missing or unreadable directory yields an empty pool with a single
-/// [`IssueKind::DirectoryUnavailable`] issue rather than an error, so callers
-/// can render "no pool provisioned" without special-casing failures.
+#[cfg(any(test, axtest))]
 pub fn scan_dir(directory: &str) -> Pool {
     scan_dirs(&[directory.to_string()])
 }
@@ -675,6 +668,8 @@ pub enum SaveError {
     InvalidName(String),
     /// The text is not a guest config TOML document.
     InvalidToml(String),
+    /// A config with the same name already exists.
+    Exists(String),
     /// The pool directory or the file could not be written.
     Unwritable(String),
 }
@@ -687,6 +682,7 @@ impl core::fmt::Display for SaveError {
                 "`{name}` is not a file name (a plain name ending in .toml is required)"
             ),
             Self::InvalidToml(error) => write!(formatter, "not a guest config: {error}"),
+            Self::Exists(path) => write!(formatter, "`{path}` already exists"),
             Self::Unwritable(error) => write!(formatter, "cannot be written: {error}"),
         }
     }
@@ -728,6 +724,7 @@ pub fn save(name: &str, toml: &str) -> Result<String, SaveError> {
 /// must be a plain `*.toml` file name (no separators, no leading dot) and the
 /// text must parse as a guest config before anything is written.
 pub fn save_in(directory: &str, name: &str, toml: &str) -> Result<String, SaveError> {
+    let _save = SAVE_LOCK.lock_unpoisoned();
     let name = name.trim();
     if name.is_empty() || !name.ends_with(".toml") || name.contains('/') || name.starts_with('.') {
         return Err(SaveError::InvalidName(name.to_string()));
@@ -739,20 +736,43 @@ pub fn save_in(directory: &str, name: &str, toml: &str) -> Result<String, SaveEr
     // target directory is created one level deep, which is all a save needs.
     ensure_directory(directory).map_err(SaveError::Unwritable)?;
     let path = format!("{directory}/{name}");
-    ax_std::fs::write(&path, toml).map_err(|error| SaveError::Unwritable(error.to_string()))?;
+    // `create` lets ax-fs-ng resolve a missing leaf; `create_new` still makes
+    // the create operation exclusive, so an existing file cannot win a race.
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            let already_exists = match &error {
+                ax_std::StdError::Api(error) => IoError::from(*error) == IoError::AlreadyExists,
+                ax_std::StdError::Io(error) => *error == IoError::AlreadyExists,
+                _ => false,
+            };
+            if already_exists {
+                return Err(SaveError::Exists(path));
+            }
+            return Err(SaveError::Unwritable(error.to_string()));
+        }
+    };
+    if let Err(error) = file.write_all(toml.as_bytes()) {
+        // Remove a partial file before returning so a transient write failure
+        // can be retried instead of becoming a permanent invalid entry.
+        let _ = ax_std::fs::remove_file(&path);
+        return Err(SaveError::Unwritable(error.to_string()));
+    }
     Ok(path)
 }
 
 /// The first guest image a config names but that is missing from the guest
 /// filesystem.
 ///
-/// Only a config that reads its images from the guest filesystem names files
-/// this plane can look up: a config whose images are embedded in the hypervisor
-/// (`image_location = "memory"`) has nothing to check here, and its kernel path
-/// is allowed to be absent from the guest filesystem. A filesystem config that
-/// names an absent kernel, ramdisk or DTB cannot become a VM, so it is reported
-/// rather than listed: the operator would otherwise pick a config that fails on
-/// start.
+/// A config that names an absent boot image cannot become a VM, so it is
+/// reported rather than listed: the operator would otherwise pick a config
+/// that fails on start.
 fn unusable_image(config: &GuestConfig) -> Option<IssueKind> {
     missing_guest_image(config).map(IssueKind::MissingImage)
 }
@@ -765,18 +785,16 @@ fn unusable_image(config: &GuestConfig) -> Option<IssueKind> {
 /// point — "is this file in place" is one fact, and neither caller has to know
 /// the other exists.
 pub(crate) fn missing_guest_image(config: &GuestConfig) -> Option<String> {
-    if config.kernel.image_location.as_deref() != Some("fs") {
-        return None;
-    }
-
-    [
-        Some(config.kernel.kernel_path.as_str()),
-        config.kernel.ramdisk_path.as_deref(),
-        config.kernel.dtb_path.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|path| !path.is_empty())
-    .find(|path| ax_std::fs::metadata(path).is_err())
-    .map(|path| path.to_string())
+    config
+        .kernel
+        .boot_image_paths()
+        .filter(|path| !path.is_empty())
+        .find(|path| ax_std::fs::metadata(path).is_err())
+        .map(|path| path.to_string())
+        .or_else(|| {
+            config.devices.virtual_devices.iter().find_map(|device| {
+                let path = device.options.get("path")?.as_str()?;
+                (!path.is_empty() && ax_std::fs::metadata(path).is_err()).then(|| path.to_string())
+            })
+        })
 }

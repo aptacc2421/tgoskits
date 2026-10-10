@@ -81,7 +81,7 @@ npm ci
 npm run build
 ```
 
-产物就绪后，用 `web-ui` 特性内嵌静态资源、用 `browser-console` 启用终端网关，并在 QEMU 配置里加入端口转发。使用 `no-auto-start` 可以让默认客户机停在 `Ready`，便于观察登记表与配置池。
+产物就绪后，用 `web` 特性启用管理面和终端网关，用 `web-ui` 特性内嵌静态资源，并在 QEMU 配置里加入端口转发。使用 `no-auto-start` 可以让默认客户机停在 `Ready`，便于观察登记表与配置池。
 
 ```bash
 cargo xtask axvisor qemu \
@@ -110,7 +110,7 @@ management HTTP server (axum) listening on 0.0.0.0:8080
 | 产物已存在但仍报缺少 UI 资产 | 复用了缺少产物那次生成的资源表，把产物目录整份移走再移回不会改变时间戳 | 删除构建目录下对应的 axvisor 产物目录后重建，或更新产物目录内文件的时间戳 |
 | 页面返回 404 但日志显示监听成功 | 该构建没有启用 `web-ui` | 在构建配置里启用该特性 |
 | 浏览器无法连接 | QEMU 配置没有 `hostfwd` | 加入端口转发参数 |
-| 界面看不到终端面板 | 该构建没有启用 `browser-console` | 启用该特性 |
+| 界面看不到终端面板 | 该构建没有启用 `web` | 启用该特性 |
 | 改了前端源码但页面行为没变 | `cargo xtask axvisor build` 只读现成的 `dist`，不调用 npm（见 1.4） | 先 `npm run build`，再重建 Axvisor；只跑 `tsc --noEmit` 或 `npm test` 不更新`dist` |
 | 构建进程被杀、失败信息与代码无关 | 内存不足时 OOM killer 静默终止 cargo | 用 `CARGO_BUILD_JOBS=2` 限制并行度 |
 | `--qemu-config` 报No such file | 该参数相对**仓库根**，而用例注释里写的是相对用例目录 | 用 `test-suit/axvisor/normal/qemu-web-ui/web-ui/qemu-<arch>-hostfwd.toml` |
@@ -126,9 +126,9 @@ management HTTP server (axum) listening on 0.0.0.0:8080
 | `build-<target>.toml` | **测试用例**。命名匹配用例发现规则，会出现在 `cargo xtask axvisor test` 的运行里 |
 | `demo-fs-build*.toml` | **本地演示**。命名不匹配发现规则，因此不会出现在任何测试运行中 |
 
-四个演示配置都启用 `web-ui` + `browser-console` + `fs` + `ax-driver/nvme` + `no-auto-start`，并且**故意不带 `vm_configs`**：启动时不注册任何客户机，页面上的每一个客户机都来自操作者放进 `/guest` 的配置。池子递归读取 `/guest` 下所有 `.toml`，而控制台保存的配置也写回 `/guest`。
+当前演示配置启用 `web-ui` + `web` + `ax-driver/nvme` + `no-auto-start`，并且**故意不带 `vm_configs`**：启动时不注册任何客户机，页面上的每一个客户机都来自操作者放进 `/guest` 的配置。池子递归读取 `/guest` 下所有 `.toml`，而控制台保存的配置也写回 `/guest`。
 
-三个架构各有一份官方 target 的演示配置，riscv64 另开 `sstc` 扩展开关：
+仓库提供 aarch64 的官方演示配置：
 
 ```bash
 # aarch64
@@ -137,17 +137,6 @@ cargo xtask axvisor qemu \
   --qemu-config test-suit/axvisor/normal/qemu-web-ui/web-ui/qemu-aarch64-hostfwd.toml \
   --arch aarch64
 
-# riscv64
-cargo xtask axvisor qemu \
-  -c test-suit/axvisor/normal/qemu-web-ui/demo-fs-build-riscv64.toml \
-  --qemu-config test-suit/axvisor/normal/qemu-web-ui/web-ui/qemu-riscv64-hostfwd.toml \
-  --arch riscv64
-
-# x86_64 —— 见下节的 TODO
-cargo xtask axvisor qemu \
-  -c test-suit/axvisor/normal/qemu-web-ui/demo-fs-build-x86_64.toml \
-  --qemu-config test-suit/axvisor/normal/qemu-web-ui/web-ui/qemu-x86_64-hostfwd.toml \
-  --arch x86_64
 ```
 
 不加 `--rootfs` 时 rootfs 按1.1 的顺序自动获取；已经有一份镜像时用 `--rootfs <path>` 跳过下载。

@@ -10,15 +10,11 @@
 //! [`api`] holds the management handlers, [`events`] the registry event stream,
 //! and [`browser_console`] the console gateway.
 
-#[cfg(feature = "http-axum")]
 pub mod api;
-#[cfg(feature = "browser-console")]
 pub mod browser_console;
-#[cfg(all(feature = "browser-console", feature = "http-axum"))]
 pub mod events;
 pub mod server;
 
-#[cfg(feature = "browser-console")]
 use axum::http::{HeaderMap, StatusCode, header};
 
 /// Rejects a WebSocket upgrade that a page from another origin started.
@@ -28,7 +24,6 @@ use axum::http::{HeaderMap, StatusCode, header};
 /// the viewer's browser. It compares the `Origin` header against the `Host` the
 /// request was addressed to, which accepts the listener's own page and rejects
 /// anything else.
-#[cfg(feature = "browser-console")]
 pub(super) fn validate_browser_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
     let host = headers
         .get(header::HOST)

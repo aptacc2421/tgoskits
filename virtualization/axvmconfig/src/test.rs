@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{
-    templates::{VmTemplateParams, get_vm_config_template},
-    *,
-};
+use crate::*;
 
 const MINIMAL_CONFIG: &str = r#"
 [base]
@@ -371,82 +368,4 @@ fn boot_config_validation_preserves_typed_errors() {
 fn rejects_invalid_toml_with_public_error() {
     let result = GuestConfig::from_toml("[base");
     assert!(matches!(result, Err(AxVmConfigError::TomlParse { .. })));
-}
-
-#[test]
-fn template_names_the_memory_region_it_was_parameterized_with() {
-    let config = get_vm_config_template(VmTemplateParams {
-        id: 3,
-        name: "sized-guest".into(),
-        guest_type: GuestType::Virtualized,
-        cpu_num: 1,
-        entry_point: 0x8020_0000,
-        kernel_path: "/guest/linux/linux-qemu".into(),
-        kernel_load_addr: 0x8020_0000,
-        image_location: "fs".into(),
-        cmdline: None,
-        memory_base: 0x8000_0000,
-        memory_mb: 256,
-    });
-
-    // A guest with no region has no memory, and the creation path refuses such a
-    // configuration outright, so a template has to be one that can be created:
-    // the region is the caller's own RAM, at the address and size it gave.
-    assert_eq!(config.kernel.memory_regions.len(), 1);
-    let region = &config.kernel.memory_regions[0];
-    assert_eq!(region.gpa, 0x8000_0000);
-    assert_eq!(region.size, 256 * 1024 * 1024);
-    assert_eq!(region.flags, 0x7);
-    assert_eq!(region.map_type, VmMemMappingType::MapAlloc);
-    // The count says the region above is a configured one. This is the value
-    // that parsing the same template back from TOML produces, so a template
-    // built here and one read back agree on which regions are configured.
-    assert_eq!(config.kernel.configured_memory_region_count, 1);
-}
-
-#[test]
-fn candidate_names_do_not_collide_when_reduction_merges_them() {
-    // A writer that truncates whatever it finds under the name it is given used
-    // to let the second of two such guests replace the first one's file,
-    // including the `base.id` inside it — which then named a guest that was no
-    // longer on the tree. Appending the id is what keeps them apart.
-    assert_ne!(
-        candidate_file_name(1, "my vm"),
-        candidate_file_name(2, "my-vm"),
-        "names differing only in replaced characters must not share a file"
-    );
-    assert_ne!(
-        candidate_file_name(1, "demo/alpha"),
-        candidate_file_name(2, "demo:alpha"),
-        "a separator and the character replacing it reduce to the same text"
-    );
-}
-
-#[test]
-fn candidate_name_carries_the_id_and_one_plain_component() {
-    // The name stays readable in the tree — an operator recognises a guest by
-    // it — while the id makes it unique.
-    assert_eq!(candidate_file_name(7, "linux demo"), "linux-demo-7.toml");
-    // Nothing survives the reduction: a name made entirely of replaced
-    // characters still has to yield a usable file rather than `-7.toml`.
-    assert_eq!(candidate_file_name(7, "///"), "guest-7.toml");
-    assert_eq!(candidate_file_name(7, "  "), "guest-7.toml");
-    // The reduction never introduces a separator, so the result stays one
-    // component a writer will accept.
-    for name in ["a/b", "../escape", ".hidden", "a b/c"] {
-        let file = candidate_file_name(1, name);
-        assert!(!file.contains('/'), "`{name}` produced a path separator");
-        assert!(!file.starts_with('.'), "`{name}` produced a dot-file");
-        assert!(file.ends_with(".toml"), "`{name}` lost the extension");
-    }
-}
-
-#[test]
-fn resaving_one_guest_still_edits_its_own_file() {
-    // One id names one guest, so the same id and name must keep landing on the
-    // same file: that is what makes a re-save an edit rather than a new guest.
-    assert_eq!(
-        candidate_file_name(3, "demo"),
-        candidate_file_name(3, "demo")
-    );
 }

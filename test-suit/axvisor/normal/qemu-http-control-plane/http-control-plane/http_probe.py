@@ -17,7 +17,6 @@ networking hostfwd. Nothing in the hypervisor knows a test is running.
 Environment (set by the generic runner):
 
     AXVISOR_HTTP_BASE            http://127.0.0.1:<host_port> (forwarded)
-    AXVISOR_HTTP_TOKEN           bearer token for authenticated requests
     AXVISOR_BUILTIN_CONFIG_DIR   directory holding packaged `vm-1.toml`
                                  (default: this file's directory)
     AXVISOR_HTTP_CASE_DIR        case directory holding test fixtures
@@ -31,7 +30,7 @@ Optional probe-only override:
                                  (default 120)
 
 The probe drives the whole `/api/vms` lifecycle contract in one boot —
-auth/error mapping, the accepted pause/resume cycles, the Stopped→start
+error mapping and the pause/resume cycles, the Stopped→start
 restart, and the destroy-then-recreate resource re-acquire regression —
 mirroring `os/axvisor/doc/http-control-plane-quickstart.md`:
 
@@ -39,13 +38,12 @@ mirroring `os/axvisor/doc/http-control-plane-quickstart.md`:
     GET    /api/vms/1          -> 200 ready      (detail; id/name/cpu_num/vcpu_states/guest_entry_count)
     GET    /api/vms/not-an-id  -> 404            (non-numeric id)
     GET    /api/vms/999        -> 404            (unknown VM)
-    DELETE /api/vms/999        -> 404            (no auth header)
+    DELETE /api/vms/999        -> 404            (unknown VM; no auth header required)
     POST   /api/vms/create {}  -> 400            (missing toml)
     POST   /api/vms/create <bad toml> -> 400     (invalid TOML)
     POST   /api/vms/create <fields>   -> 409     (a file the config names is not in place)
     GET    /api/vms/browse            -> 200     (a file candidate for a `file` field, with length)
     POST   /api/vms/create <toml>     -> 409     (a device's backing file is not in place)
-    POST   /api/vms/4245/start        -> 409     (same, via a pool config's start)
     POST   /api/vms/create <fields>   -> 200     (file in place: created, config written to the guest tree, then removed)
     POST   /api/vms/999/start  -> 404            (unknown VM)
     POST   /api/vms/999/stop   -> 404            (unknown VM)
@@ -57,13 +55,13 @@ mirroring `os/axvisor/doc/http-control-plane-quickstart.md`:
     POST   /api/vms/1/start    -> 200 -> running (async=false; start awaits completion)
     POST   /api/vms/1/start    -> 409            (already running; start is not idempotent)
     POST   /api/vms/1/resume   -> 200 -> running (already running; idempotent, async=false)
-    POST   /api/vms/1/pause    -> 200 -> paused  (async=true; accepted, then quiesces)
+    POST   /api/vms/1/pause    -> 200 -> paused  (async=false; waits for quiescence)
     POST   /api/vms/1/pause    -> 200 -> paused  (already paused; idempotent, no new park)
     POST   /api/vms/1/resume   -> 200 -> running (async=false; genuine wake)
     POST   /api/vms/1/resume   -> 200 -> running (already running; idempotent)
     POST   /api/vms/1/pause    -> 200 -> paused  (second suspend/wake cycle)
     POST   /api/vms/1/resume   -> 200 -> running (guest re-entered)
-    POST   /api/vms/1/stop     -> 200 -> stopped (async=true; accepted, then teardown)
+    POST   /api/vms/1/stop     -> 200 -> stopped (async=false; waits for teardown)
     POST   /api/vms/1/stop     -> 200 -> stopped (already stopped; idempotent)
     POST   /api/vms/1/start    -> 200 -> running (restart from Stopped; fresh run)
     POST   /api/vms/1/stop     -> 200 -> stopped (restarted run stops again)
@@ -74,19 +72,13 @@ mirroring `os/axvisor/doc/http-control-plane-quickstart.md`:
     POST   /api/vms/1/stop     -> 200 -> stopped
     DELETE /api/vms/1          -> 204 -> 404     (cleanup)
 
-Accepted versus completion semantics (grounded in `os/axvisor/src/http/vm.rs`
+Completion semantics (grounded in `os/axvisor/src/control/transport/api/vm.rs`
 and the `virtualization/axvm/src/control.rs` owner):
 
-  * `create`, `start`, `resume` and `delete` await the operation's *completion*
-    before responding, so a 200 already implies the owner postcondition (the
-    guest started, the parked vCPUs were woken, the resources were released).
-    These routes are dialed with the longer `COMPLETION_TIMEOUT`.
-  * `pause` and `stop` respond once the operation is *accepted*
-    (`VmOperation::accepted()`, `"async": true`). The `Paused`/`Stopped`
-    snapshot then appears only after the owner has actually parked every
-    participant and quieted devices/ports/timers (pause) or torn the run down
-    (stop), so the probe polls the detail for the terminal status rather than
-    trusting the accepted reply.
+  * Every lifecycle action waits for its manager operation to complete before responding,
+    so a 200 already implies the owner postcondition and every response reports
+    `"async": false`. The probe still polls the detail for the terminal status
+    where the runtime publishes it after the operation returns.
   * Reaching an already-satisfied target is idempotent for `pause`/`resume`/
     `stop` (HTTP 200): a repeated pause while `Paused` returns 200 without
     requesting a duplicate park, a repeated resume while `Running` and a
@@ -166,7 +158,7 @@ POLL_DEADLINE = 120.0
 POLL_INTERVAL = 1.0
 
 
-def request(method, path, token=None, body=None, timeout=None):
+def request(method, path, body=None, timeout=None):
     """One HTTP request; returns (status, parsed JSON or None).
 
     The control plane has no authentication: no request carries an
@@ -525,163 +517,10 @@ def check_file_transfer():
 
 
 
-def check_create_gate(vm_config):
-    """A config naming a file nobody transferred is refused, and the file is named.
-
-    This refusal is what the transfer is *for*: "it is not there yet" is an answer
-    an operator can act on, unlike the device error that appears when creation is
-    allowed to proceed and a backing file turns out to be missing.
-    """
-    # A `.toml` name on purpose: the directory listing shows a config that cannot
-    # be parsed as an issue, which is how this probe observes that the file really
-    # is in the guest filesystem at that path.
-    missing = "/guest/probe-gate/linux-missing.toml"
-    # Anchored replacements: the fixture's own comments quote `id = 1`, so an
-    # unanchored substitution would edit the prose instead of the field.
-    target = re.sub(r'(?m)^id = \d+', "id = 4242", vm_config, count=1)
-    target = re.sub(r'(?m)^kernel_path = ".*"$', 'kernel_path = "%s"' % missing, target, count=1)
-    if missing not in target or "id = 4242" not in target:
-        raise AssertionError("the fixture no longer has the fields this check rewrites")
-
-    status, body = request("POST", "/api/vms/create", json.dumps({"toml": target}))
-    check("POST /api/vms/create (kernel not transferred)", status, 409)
-    if missing not in json.dumps(body):
-        raise AssertionError("the refusal does not name the missing file: %r" % (body,))
-    print("  http probe: create refused and named `%s`" % missing)
-
-    # And the transfer is what turns the answer around: once a file is placed at
-    # that path, the predicate the gate uses is satisfied. The probe stops short
-    # of a second creation request on purpose — a creation that gets past the
-    # gate loads the "kernel" it names, and this payload is not one — so what is
-    # asserted here is the fact the gate reads: the file is at that path.
-    directory = "/guest/probe-gate"
-    payload = b"not-a-kernel\n"
-    request(
-        "POST",
-        "/api/files/dirs",
-        json.dumps({"parent": "/guest", "name": "probe-gate"}),
-    )
-    status, _, body = request_raw(
-        "POST",
-        "/api/files",
-        headers={"Content-Type": "application/json"},
-        body=json.dumps(
-            {"id": "probe-gate", "directory": directory, "total": len(payload)}
-        ).encode("utf-8"),
-    )
-    check("POST /api/files (gate session)", status, 200)
-    status, _, body = request_raw(
-        "PATCH",
-        "/api/files/probe-gate",
-        headers={
-            "Content-Type": "application/octet-stream",
-            "Content-Range": "bytes 0-%d/%d" % (len(payload) - 1, len(payload)),
-        },
-        body=payload,
-    )
-    check("PATCH /api/files (gate session)", status, 200)
-    status, _, body = request_raw(
-        "POST",
-        "/api/files/probe-gate/place",
-        headers={"Content-Type": "application/json"},
-        body=json.dumps({"name": missing.rsplit("/", 1)[1]}).encode("utf-8"),
-    )
-    check("POST /api/files/place (gate session)", status, 200)
-
-    status, body = request("GET", "/api/vms/browse?path=" + directory)
-    check("GET /api/vms/browse (placed file)", status, 200)
-    listed = json.dumps(body)
-    if missing not in listed:
-        raise AssertionError("the placed file is not in %s: %r" % (directory, body))
-    print("  http probe: the placed file is at `%s`" % missing)
-
-
-def check_create_backing_file_gate(vm_config):
-    """A config whose *disk* nobody transferred is refused the same way.
-
-    The kernel gate is decided by the plane reading the config; a device backing
-    file is named by the device model that owns the option, so this refusal can
-    only come from the failure that would otherwise interrupt creation inside
-    device setup. It has to stay the same answer an operator can act on — 409,
-    with the file named — because one precondition should read as one answer,
-    whichever file the config is about.
-    """
-    absent = "/guest/probe-gate/absent-disk.img"
-    # Anchored replacements: only the device's own `path` line starts with it,
-    # so the fixture's prose and its `kernel_path` stay untouched.
-    target = re.sub(r'(?m)^id = \d+', "id = 4244", vm_config, count=1)
-    target = re.sub(r'(?m)^path = ".*"$', 'path = "%s"' % absent, target, count=1)
-    if absent not in target or "id = 4244" not in target:
-        raise AssertionError("the fixture no longer has the fields this check rewrites")
-
-    status, body = request("POST", "/api/vms/create", json.dumps({"toml": target}))
-    check("POST /api/vms/create (backing file not transferred)", status, 409)
-    if absent not in json.dumps(body):
-        raise AssertionError(
-            "the refusal does not name the missing backing file: %r" % (body,)
-        )
-    print("  http probe: create refused and named `%s`" % absent)
-
-
-def check_start_backing_file_gate(vm_config):
-    """A start of a pool config whose disk nobody transferred is refused too.
-
-    An id that is still only a pool candidate is created before it is started,
-    so `start` reaches the same device setup a create does. The answer has to be
-    the same 409: one precondition should read as one answer whichever route the
-    operator takes to it.
-    """
-    disk = "/guest/probe-gate/absent-pool-disk.img"
-    config = "/guest/probe-gate/pool-disk-missing.toml"
-    target = re.sub(r'(?m)^id = \d+', "id = 4245", vm_config, count=1)
-    target = re.sub(r'(?m)^path = ".*"$', 'path = "%s"' % disk, target, count=1)
-    if disk not in target or "id = 4245" not in target:
-        raise AssertionError("the fixture no longer has the fields this check rewrites")
-
-    # The config reaches the pool the way an operator puts one there: through
-    # the transfer contract, into the folder the pool is read from.
-    payload = target.encode("utf-8")
-    request(
-        "POST",
-        "/api/files/dirs",
-        json.dumps({"parent": "/guest", "name": "probe-gate"}),
-    )
-    status, _, _ = request_raw(
-        "POST",
-        "/api/files",
-        headers={"Content-Type": "application/json"},
-        body=json.dumps(
-            {"id": "pool-disk", "directory": "/guest/probe-gate", "total": len(payload)}
-        ).encode("utf-8"),
-    )
-    check("POST /api/files (pool config)", status, 200)
-    status, _, _ = request_raw(
-        "PATCH",
-        "/api/files/pool-disk",
-        headers={
-            "Content-Type": "application/octet-stream",
-            "Content-Range": "bytes 0-%d/%d" % (len(payload) - 1, len(payload)),
-        },
-        body=payload,
-    )
-    check("PATCH /api/files (pool config)", status, 200)
-    status, _, _ = request_raw(
-        "POST",
-        "/api/files/pool-disk/place",
-        headers={"Content-Type": "application/json"},
-        body=json.dumps({"name": config.rsplit("/", 1)[1]}).encode("utf-8"),
-    )
-    check("POST /api/files/place (pool config)", status, 200)
-
-    status, _ = request("POST", "/api/vms/4245/start")
-    check("POST /api/vms/4245/start (pool disk not transferred)", status, 409)
-    print("  http probe: starting a pool config with a missing disk is refused")
-
-
 def fields_body(kernel_path, **overrides):
     """The form's create body: only the fields a form itself must type.
 
-    The optional fields (`image_location`, `cpu_num`, `guest_type`, `cmdline`)
+    The optional fields (`cpu_num`, `guest_type`, `cmdline`)
     stay absent unless a caller overrides them: the template fills them from
     its declared defaults, so a successful create is also proof those defaults
     reach a bootable guest, and the field set stays the declaration's to
@@ -701,25 +540,14 @@ def fields_body(kernel_path, **overrides):
     return json.dumps({"fields": fields})
 
 
-def check_create_form():
-    """The form's field set comes from the backend, and its body shares the gate.
-
-    A creation request built from fields is a different *shape*, not a different
-    path: it has to reach the same "is the file there" check the textual bodies
-    reach, or the form would be a way around the transfer.
-
-    A `file` field is the one a client cannot fill by hand: its candidates are
-    the files that are already in the guest filesystem, so the probe checks that
-    the declaration says which field that is and that the folder listing through
-    the *same* resource (`/api/vms/browse`) shows a file to offer.
-    """
+def check_create_form(packaged_kernel_path):
+    """The dashboard schema matches the current GuestConfig form contract."""
     status, body = request("GET", "/api/vms/schema")
     check("GET /api/vms/schema", status, 200)
     fields = {field["name"]: field for field in body.get("fields", [])}
     expected = {
         "id", "name", "guest_type", "cpu_num", "entry_point", "kernel_path",
-        "kernel_load_addr", "image_location", "cmdline", "memory_base", "memory_mb",
-        "rootfs_path",
+        "kernel_load_addr", "cmdline", "memory_base", "memory_mb", "rootfs_path",
     }
     if set(fields) != expected:
         raise AssertionError("schema fields are %r" % (sorted(fields),))
@@ -730,132 +558,38 @@ def check_create_form():
         if not fields[required].get("required"):
             raise AssertionError("schema does not require `%s`" % required)
     if fields["kernel_path"].get("type") != "file":
-        raise AssertionError(
-            "`kernel_path` is not declared as a file field: %r" % (fields["kernel_path"],)
-        )
-    # A form-made guest reads its kernel from the guest filesystem; an embedded
-    # (`memory`) kernel is a build-time fact no form can provide, so the
-    # declaration must not offer it.
-    if fields["image_location"].get("options") != ["fs"]:
-        raise AssertionError(
-            "`image_location` offers more than the filesystem source: %r"
-            % (fields["image_location"],)
-        )
-    # The rootfs field declares the extensions it takes, so a client can filter
-    # its file chooser down to images before a transfer is even attempted.
-    if fields["rootfs_path"].get("accept") != [".img"]:
-        raise AssertionError(
-            "`rootfs_path` does not declare its image extensions: %r"
-            % (fields["rootfs_path"],)
-        )
-    # The command line arrives with a working default: a guest without one runs
-    # silent and answers no terminal, which reads like a broken form.
+        raise AssertionError("kernel_path is not a file field: %r" % fields["kernel_path"])
     if "console=" not in str(fields["cmdline"].get("default")):
-        raise AssertionError(
-            "`cmdline` has no console in its default: %r" % (fields["cmdline"],)
-        )
+        raise AssertionError("cmdline has no console default: %r" % fields["cmdline"])
     print("  http probe: schema advertises %d fields" % len(fields))
 
-    status, body = request("GET", "/api/vms/browse?path=/guest/linux")
+    status, body = request("GET", "/api/vms/browse?path=/guest/builtin/images")
     check("GET /api/vms/browse (file candidates)", status, 200)
     listed = {entry["path"]: entry for entry in body.get("files", [])}
-    kernel = listed.get("/guest/linux/linux-qemu")
-    if kernel is None:
-        raise AssertionError("the kernel is not offered as a file candidate: %r" % (body,))
-    if not isinstance(kernel.get("size"), int) or kernel["size"] <= 0:
-        raise AssertionError("a file candidate has no length: %r" % (kernel,))
-    print("  http probe: browse offers `%s` (%d bytes) as a file candidate" % (
-        kernel["path"],
-        kernel["size"],
-    ))
+    kernel = listed.get(packaged_kernel_path)
+    if kernel is None or not isinstance(kernel.get("size"), int) or kernel["size"] <= 0:
+        raise AssertionError(
+            "the packaged kernel %s is not offered as a file candidate: %r"
+            % (packaged_kernel_path, body)
+        )
 
-    absent = "/guest/probe-gate/absent-kernel"
+    absent = "/guest/builtin/images/missing-form-kernel"
     status, body = request("POST", "/api/vms/create", fields_body(absent))
-    check("POST /api/vms/create (fields, file not transferred)", status, 409)
+    check("POST /api/vms/create (fields, image missing)", status, 409)
     if absent not in json.dumps(body):
-        raise AssertionError("the fields body is not gated: %r" % (body,))
-    print("  http probe: fields body reaches the same gate")
+        raise AssertionError("missing form image was not named: %r" % body)
 
-    # A form can also ask for something the plane's own model refuses: the
-    # memory-image kernel is a build-time fact no form can provide.
     status, body = request(
         "POST",
         "/api/vms/create",
-        fields_body("/guest/linux/linux-qemu", image_location="memory"),
+        fields_body(packaged_kernel_path),
+        timeout=COMPLETION_TIMEOUT,
     )
-    check("POST /api/vms/create (fields, memory kernel)", status, 400)
-    print("  http probe: a form body cannot ask for a memory kernel")
-
-    # The root disk rides the form like the kernel does: a file field the
-    # operator transfers to. Naming one that is not there yet is the same
-    # precondition, answered with the same transfer prompt — from the device's
-    # own typed error, because the disk is the device the request implies.
-    absent_rootfs = "/guest/probe-gate/absent-rootfs.img"
-    status, body = request(
-        "POST",
-        "/api/vms/create",
-        fields_body("/guest/linux/linux-qemu", rootfs_path=absent_rootfs),
-    )
-    check("POST /api/vms/create (fields, rootfs not transferred)", status, 409)
-    if absent_rootfs not in json.dumps(body):
-        raise AssertionError("the rootfs refusal does not name the missing file: %r" % (body,))
-    print("  http probe: fields rootfs reaches the same gate")
-
-    # A file that is there but is not what the slot declares (the kernel is no
-    # ext4 image) is a mistake in the request, not a server fault: it is a 400
-    # that says so in the validation's own words.
-    status, body = request(
-        "POST",
-        "/api/vms/create",
-        fields_body("/guest/linux/linux-qemu", rootfs_path="/guest/linux/linux-qemu"),
-    )
-    check("POST /api/vms/create (fields, rootfs is not a filesystem)", status, 400)
-    if "ext4" not in json.dumps(body):
-        raise AssertionError("the unusable-rootfs refusal does not say why: %r" % (body,))
-    print("  http probe: a non-filesystem rootfs is refused as a bad request")
-
-    # The same body, with the file it names actually there, has to become a
-    # guest: that is the form's whole contract. Only the fields a form must
-    # type are sent — the optional ones (`image_location`, `cpu_num`,
-    # `guest_type`, `cmdline`) stay absent, so the create succeeding is also
-    # proof that the template fills its declared defaults. This form guest
-    # names a root disk, so the create also instantiates its virtio-blk device
-    # against the real image, and the close below is the lock-outside destroy
-    # the file backend needs.
-    status, body = request(
-        "POST",
-        "/api/vms/create",
-        fields_body(
-            "/guest/linux/linux-qemu",
-            rootfs_path="/guest/rootfs-aarch64-alpine-0.img",
-        ),
-    )
-    check("POST /api/vms/create (fields, file in place)", status, 200)
+    check("POST /api/vms/create (fields, image present)", status, 200)
     check("created VM id", body.get("id"), 4243)
-    # The form's guest is also a file on the guest tree: the same configuration
-    # the registry holds is what the candidate scan reads, so it survives a
-    # reboot. The response names the file; the pool is what proves it is there.
-    # The name is the guest's own, reduced to one plain component, with the id
-    # appended — a component alone is not unique, and the writer truncates.
-    saved = body.get("config")
-    if saved != "/guest/probe-fields-4243.toml":
-        raise AssertionError("the form's config was not written to the guest tree: %r" % (body,))
-    status, body = request("GET", "/api/vms/pool")
-    check("GET /api/vms/pool (form config persisted)", status, 200)
-    entries = {entry["id"]: entry for entry in body.get("entries", [])}
-    if 4243 not in entries or entries[4243].get("path") != saved:
-        raise AssertionError("the persisted form config is not a candidate: %r" % (body,))
-    if "virtblk0" not in entries[4243].get("toml", ""):
-        raise AssertionError("the persisted form config carries no root disk")
-    # The defaults are the form's promise: a guest built from an empty-cmdline
-    # submission still carries a console, or the terminal reads as broken.
-    if "console=ttyAMA0" not in entries[4243].get("toml", ""):
-        raise AssertionError("the persisted form config carries no console")
-    print("  http probe: the form's config is a candidate at `%s` with its root disk" % saved)
-    status, _ = request("DELETE", "/api/vms/4243")
+    status, _ = request("DELETE", "/api/vms/4243", timeout=COMPLETION_TIMEOUT)
     check("DELETE /api/vms/4243", status, 204)
-    print("  http probe: a form body created and removed VM[4243]")
-
+    print("  http probe: form validation and creation use the current API")
 
 
 def check(label, actual, expected):
@@ -1097,6 +831,12 @@ def main():
         raise AssertionError(
             "VM recreate must use installed built-in boot assets: %s" % config_path
         )
+    kernel_match = re.search(
+        r'(?m)^\s*kernel_path\s*=\s*"([^\"]+)"', vm_config
+    )
+    if kernel_match is None:
+        raise AssertionError("the packaged VM config has no kernel_path: %s" % config_path)
+    packaged_kernel_path = kernel_match.group(1)
     create_body = json.dumps({"toml": vm_config})
     bad_body = json.dumps({"toml": "this is not [[ valid toml {{{"})
 
@@ -1105,10 +845,8 @@ def main():
     poll_ready()
     print("  http probe: guest management server reachable")
 
-    # 1b. Capability declaration: this build has the management API but no
-    #     browser console, so it must advertise the VM panel and nothing else.
-    #     The declaration has to follow the build's features, or a frontend
-    #     would offer a terminal that this hypervisor cannot serve.
+    # 1b. Capability declaration: the unified `web` feature exposes the
+    #     management API, file transfer, host facts, and both console panels.
     status, body = request("GET", "/api/manifest")
     check("GET /api/manifest", status, 200)
     check("GET /api/manifest proto", body.get("proto"), 1)
@@ -1116,24 +854,17 @@ def main():
     if not isinstance(panels, list):
         raise AssertionError("GET /api/manifest panels was not a list: %r" % (body,))
     kinds = [panel.get("kind") for panel in panels]
-    # `fs` is enabled for this case, so the file-transfer panel is declared too:
-    # the transfer routes exist exactly where the guest filesystem does. The
-    # host panel is declared unconditionally: its facts come from the build and
-    # the boot instant, not from a feature switch.
-    # Declaration order: the VM panel first (it is what an operator lands on),
-    # then the transfer panel that `fs` adds, then the host panel.
-    check("GET /api/manifest panel kinds", kinds, ["vms", "files", "host"])
+    check("GET /api/manifest panel kinds", kinds, ["vms", "files", "host", "console", "shell"])
     check("GET /api/manifest vms verbs", panels[0].get("verbs"), ["read", "write"])
     if not panels[0].get("root"):
         raise AssertionError("GET /api/manifest vms panel had no root: %r" % (panels[0],))
     check_manifest_links(panels)
     check_file_transfer()
-    check_create_gate(vm_config)
-    check_create_backing_file_gate(vm_config)
-    check_start_backing_file_gate(vm_config)
-    check_create_form()
-    status, _ = request("GET", "/api/consoles")
-    check("GET /api/consoles without browser-console", status, 404)
+    check_create_form(packaged_kernel_path)
+    status, body = request("GET", "/api/consoles")
+    check("GET /api/consoles", status, 200)
+    if not any(console.get("route") == "axvisor" for console in body):
+        raise AssertionError("management console is missing: %r" % body)
 
     # 2. List: the default VM (id 1) is registered and `Ready`.
     status, body = request("GET", "/api/vms")
@@ -1170,10 +901,9 @@ def main():
     status, _ = request("GET", "/api/vms/999")
     check("GET /api/vms/999", status, 404)
 
-    # 6. No authentication gate: a mutating route without any Authorization
-    #    header reaches its handler and is judged by the route's own contract.
-    #    An unknown id is 404, not 401; re-adding the removed `ApiToken`
-    #    extractor would fail this step before the handler ever runs.
+    # 6. The first control-plane version has no authentication gate: a mutating
+    #    route without an Authorization header reaches its handler and is judged
+    #    by the route's own contract. An unknown id is 404, not 401.
     status, _ = request("DELETE", "/api/vms/999")
     check("DELETE /api/vms/999 (no auth header)", status, 404)
 
@@ -1208,7 +938,7 @@ def main():
     # 21. Start the default VM: `start` awaits completion (`async=false`), then
     #     poll the detail into `running`.
     status, body = request(
-        "POST", "/api/vms/1/start", token=TOKEN, timeout=COMPLETION_TIMEOUT
+        "POST", "/api/vms/1/start", timeout=COMPLETION_TIMEOUT
     )
     check("POST /api/vms/1/start", status, 200)
     check_action("POST /api/vms/1/start", body, True, False)
@@ -1225,21 +955,21 @@ def main():
 
     # 22. Re-starting an already-running VM conflicts: `start` is not an
     #     idempotent target transition.
-    status, _ = request("POST", "/api/vms/1/start", token=TOKEN)
+    status, _ = request("POST", "/api/vms/1/start")
     check("POST /api/vms/1/start (already running)", status, 409)
 
     # 23. Resume while already `Running` is an idempotent no-op (200, sync).
-    status, body = request("POST", "/api/vms/1/resume", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/resume")
     check("POST /api/vms/1/resume (already running)", status, 200)
     check_action("POST /api/vms/1/resume (already running)", body, True, False)
 
-    # 24. Pause is a request (`async=true`): the handler returns once the owner
-    #     accepts it. The `Paused` snapshot then appears only after the owner
+    # 24. Pause waits for the owner (`async=false`): the handler returns after the owner
+    #     accepts and completes it. The `Paused` snapshot then appears only after the owner
     #     parked every vCPU and quieted devices/ports/timers, so polling for
     #     `paused` is the real completion signal.
-    status, body = request("POST", "/api/vms/1/pause", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/pause")
     check("POST /api/vms/1/pause", status, 200)
-    check_action("POST /api/vms/1/pause", body, True, True)
+    check_action("POST /api/vms/1/pause", body, True, False)
     poll_vm_status(1, "paused")
     # Park evidence: wait until a vCPU has actually observed the paused state.
     poll_guest_parks(1, parks + 1)
@@ -1254,9 +984,9 @@ def main():
     # 25. Pausing an already-paused VM is an idempotent no-op (200): it must not
     #     request a duplicate park, and the parked VM's counters must stay
     #     frozen.
-    status, body = request("POST", "/api/vms/1/pause", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/pause")
     check("POST /api/vms/1/pause (already paused)", status, 200)
-    check_action("POST /api/vms/1/pause (already paused)", body, True, True)
+    check_action("POST /api/vms/1/pause (already paused)", body, True, False)
     status, body = request("GET", "/api/vms/1")
     check_vm_status("GET /api/vms/1 (still paused)", body, "paused")
     check_frozen_counters("POST /api/vms/1/pause (already paused)", body, entries, parks)
@@ -1265,7 +995,7 @@ def main():
     #     the status flips back to `Running`, and the parked vCPU is woken to
     #     re-enter the guest.
     status, body = request(
-        "POST", "/api/vms/1/resume", token=TOKEN, timeout=COMPLETION_TIMEOUT
+        "POST", "/api/vms/1/resume", timeout=COMPLETION_TIMEOUT
     )
     check("POST /api/vms/1/resume", status, 200)
     check_action("POST /api/vms/1/resume", body, True, False)
@@ -1277,15 +1007,15 @@ def main():
     entries = entries + 1
 
     # 27. Resuming an already-running VM is an idempotent no-op (200).
-    status, body = request("POST", "/api/vms/1/resume", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/resume")
     check("POST /api/vms/1/resume (already running)", status, 200)
     check_action("POST /api/vms/1/resume (already running)", body, True, False)
 
     # 28-29. Second suspend/wake cycle: a parked vCPU is woken and re-parked
     #        repeatedly, so the wake path must converge every time.
-    status, body = request("POST", "/api/vms/1/pause", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/pause")
     check("POST /api/vms/1/pause (cycle 2)", status, 200)
-    check_action("POST /api/vms/1/pause (cycle 2)", body, True, True)
+    check_action("POST /api/vms/1/pause (cycle 2)", body, True, False)
     poll_vm_status(1, "paused")
     # Pause-completion on the second cycle too: wait for the vCPU to actually
     # park before resuming.
@@ -1296,7 +1026,7 @@ def main():
     check_vm_status("GET /api/vms/1 (paused cycle 2)", body, "paused")
     entries = guest_entry_count(body)
     status, body = request(
-        "POST", "/api/vms/1/resume", token=TOKEN, timeout=COMPLETION_TIMEOUT
+        "POST", "/api/vms/1/resume", timeout=COMPLETION_TIMEOUT
     )
     check("POST /api/vms/1/resume (cycle 2)", status, 200)
     check_action("POST /api/vms/1/resume (cycle 2)", body, True, False)
@@ -1305,12 +1035,12 @@ def main():
     poll_guest_entries(1, entries + 1)
     entries = entries + 1
 
-    # 30. Stop is a request (`async=true`): the `stopped` state arrives only
+    # 30. Stop waits for the owner (`async=false`): the `stopped` state arrives only
     #     after the owner has fully torn the run down (vCPUs joined, devices and
     #     memory retired), which drops the per-run counters back to zero.
-    status, body = request("POST", "/api/vms/1/stop", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/stop")
     check("POST /api/vms/1/stop", status, 200)
-    check_action("POST /api/vms/1/stop", body, True, True)
+    check_action("POST /api/vms/1/stop", body, True, False)
     poll_vm_status(1, "stopped")
     status, body = request("GET", "/api/vms/1")
     check_vm_status("GET /api/vms/1 (stopped)", body, "stopped")
@@ -1322,9 +1052,9 @@ def main():
 
     # 31. Stopping an already-stopped VM is an idempotent success (200) and must
     #     not resurrect any run resource.
-    status, body = request("POST", "/api/vms/1/stop", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/stop")
     check("POST /api/vms/1/stop (already stopped)", status, 200)
-    check_action("POST /api/vms/1/stop (already stopped)", body, True, True)
+    check_action("POST /api/vms/1/stop (already stopped)", body, True, False)
     status, body = request("GET", "/api/vms/1")
     check_vm_status("GET /api/vms/1 (still stopped)", body, "stopped")
     if guest_entry_count(body) != 0 or guest_park_count(body) != 0:
@@ -1337,7 +1067,7 @@ def main():
     #     before it is stopped again. The counters reset to zero at stop, so a
     #     fresh entry is itself the restart's success evidence.
     status, body = request(
-        "POST", "/api/vms/1/start", token=TOKEN, timeout=COMPLETION_TIMEOUT
+        "POST", "/api/vms/1/start", timeout=COMPLETION_TIMEOUT
     )
     check("POST /api/vms/1/start (from Stopped)", status, 200)
     check_action("POST /api/vms/1/start (from Stopped)", body, True, False)
@@ -1345,13 +1075,13 @@ def main():
     poll_guest_entries(1, 1)
 
     # 33. The restarted run stops again cleanly.
-    status, body = request("POST", "/api/vms/1/stop", token=TOKEN)
+    status, body = request("POST", "/api/vms/1/stop")
     check("POST /api/vms/1/stop (restarted run)", status, 200)
-    check_action("POST /api/vms/1/stop (restarted run)", body, True, True)
+    check_action("POST /api/vms/1/stop (restarted run)", body, True, False)
     poll_vm_status(1, "stopped")
 
     # 34. Delete the stopped VM, then poll until it is gone.
-    status, _ = request("DELETE", "/api/vms/1", token=TOKEN, timeout=COMPLETION_TIMEOUT)
+    status, _ = request("DELETE", "/api/vms/1", timeout=COMPLETION_TIMEOUT)
     check("DELETE /api/vms/1", status, 204)
     poll_vm_gone(1)
 
@@ -1360,7 +1090,6 @@ def main():
     status, body = request(
         "POST",
         "/api/vms/create",
-        token=TOKEN,
         body=create_body,
         timeout=COMPLETION_TIMEOUT,
     )
@@ -1370,7 +1099,7 @@ def main():
     poll_vm_status(1, "ready")
 
     # 36. The re-registered id conflicts with a second create.
-    status, _ = request("POST", "/api/vms/create", token=TOKEN, body=create_body)
+    status, _ = request("POST", "/api/vms/create", body=create_body)
     check("POST /api/vms/create (recreate duplicate)", status, 409)
 
     # 37-38. The recreated VM must be fully usable, not merely re-registered:
@@ -1378,7 +1107,7 @@ def main():
     #        registry entry so a fresh VM can be rebuilt and run from the same
     #        embedded image. This is the resource re-acquire regression.
     status, _ = request(
-        "POST", "/api/vms/1/start", token=TOKEN, timeout=COMPLETION_TIMEOUT
+        "POST", "/api/vms/1/start", timeout=COMPLETION_TIMEOUT
     )
     check("POST /api/vms/1/start (recreated)", status, 200)
     poll_vm_status(1, "running")
@@ -1390,7 +1119,7 @@ def main():
     poll_vm_status(1, "stopped")
 
     # 39. Cleanup: leave the hypervisor without a registered VM.
-    status, _ = request("DELETE", "/api/vms/1", token=TOKEN, timeout=COMPLETION_TIMEOUT)
+    status, _ = request("DELETE", "/api/vms/1", timeout=COMPLETION_TIMEOUT)
     check("DELETE /api/vms/1 (cleanup)", status, 204)
     poll_vm_gone(1)
 

@@ -30,12 +30,12 @@ sidebar_label: "控制面"
 
 | feature | 打开后新增 |
 | :-- | :-- |
-| `http-axum` | `vms` 面板与生命周期动作，`GET /api/manifest`，`/ws/events` |
-| `fs` | `files` 面板、配置池读写与目录浏览 |
-| `browser-console` | `console` 与 `shell` 面板，终端网关与通道表 |
-| `web-ui` | 内嵌仪表盘 `/` 与 `/assets/*`，隐含依赖 `http-axum` |
+| `web` | `vms`、`files`、`host`、`console`、`shell` 面板，HTTP API、WebSocket 网关、事件流与配置池 |
+| `web-ui` | 内嵌仪表盘 `/` 与 `/assets/*`，隐含依赖 `web` |
 
-`web-ui` 不在默认特性里，所以干净检出上 `cargo build` 不受前端产物影响；只有显式打开它时，`build.rs` 才会要求 `web-ui/dist` 存在。事件流同时需要 `http-axum` 与 `browser-console`，只有前者时 `/ws/events` 不注册。
+
+
+`web-ui` 不在默认特性里，所以干净检出上 `cargo build` 不受前端产物影响；只有显式打开它时，`build.rs` 才会要求 `web-ui/dist` 存在。`web` 统一提供 API、事件流和终端通道，`web-ui` 只增加静态资源。
 
 ## 2. 能力声明
 
@@ -106,7 +106,7 @@ flowchart TB
 
 ### 3.3 错误映射
 
-状态码只出现在传输层，由处理函数在返回处决定。领域层以类型化错误向上报告，`axvm` 的错误由 `map_axvm_error` 一类函数翻译，例如缺少磁盘 backing file 的 `DeviceBackingFileMissing` 映射成 409 而不是 500 空响应。
+状态码只出现在传输层，由处理函数在返回处决定。领域层以类型化错误向上报告，`axvm` 的错误由 `map_axvm_error` 一类函数翻译；配置池和创建前置检查会在引用文件缺失时直接返回 409，而不会把可修复的输入问题伪装成 500。
 
 | 状态码 | 出现位置 | 含义 |
 | :-- | :-- | :-- |
@@ -132,7 +132,7 @@ flowchart TB
 
 ### 4.2 诊断问题上报
 
-被跳过的文件不会消失，而是作为问题项随候选清单一并返回。问题分类覆盖读不到的配置、`image_location` 不是 `fs` 的旧形态配置，以及引用的内核文件不存在三种情况。
+被跳过的文件不会消失，而是作为问题项随候选清单一并返回。问题分类覆盖读不到的配置、无效 TOML、重复 id，以及引用的内核或虚拟设备 backing 文件不存在等情况。
 
 这个设计把「为什么这台客户机没出现在列表里」变成可回答的问题。旧实现依赖操作者自己比对目录内容与界面显示，缺文件时只表现为创建失败，而失败信息出现在操作之后，因果被时间隔离开。
 
@@ -208,7 +208,7 @@ stateDiagram-v2
 
 ### 7.1 通道与独占
 
-通道编号在 `network_console/layout.rs` 里固定：0 号是管理台自身的通道，1 到 8 号分配给客户机，上限由 `MAX_GUEST_CONSOLES` 决定。通道表通过 `GET /api/consoles` 暴露，每一项都带 `attached` 字段表示当前是否被占用。
+通道编号在 `control/network_console/layout.rs` 里固定：0 号是管理台自身的通道，1 到 8 号分配给客户机，上限由 `MAX_GUEST_CONSOLES` 决定。通道表通过 `GET /api/consoles` 暴露，每一项都带 `attached` 字段表示当前是否被占用。
 
 通道在客户机登记时分配，取最小空槽；移除时释放。分配失败意味着同时打开的客户机终端已达上限，此时登记请求整体失败而不是退化成「没有终端也能用」。
 

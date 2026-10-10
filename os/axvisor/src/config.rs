@@ -43,6 +43,8 @@ pub fn init_guest_vms() -> Result<()> {
 
 pub(crate) fn prepare_guest_vm(raw_cfg: &str) -> Result<VmCreatePlan> {
     let image_provider = AxvisorBootImageProvider;
+    let vm_create_config =
+        GuestConfig::from_toml(raw_cfg).context("parse VM TOML configuration")?;
     let configured_vm_id = vm_create_config.base.id;
 
     if let Some(linux) = get_image_header(&vm_create_config, &image_provider) {
@@ -91,9 +93,9 @@ pub fn init_guest_vm(raw_cfg: &str) -> Result<usize> {
         &GuestConfig::from_toml(raw_cfg).context("parse VM TOML configuration")?,
     );
 
+    let operation = crate::manager::manager().create_plan(plan)?;
     crate::manager::manager()
-        .create_plan(plan)?
-        .wait()
+        .wait_for_created_vm(operation)
         .with_context(|| format!("create VM[{vm_id}]"))?;
 
     #[cfg(all(any(

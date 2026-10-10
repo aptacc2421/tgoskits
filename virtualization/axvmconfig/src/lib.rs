@@ -23,7 +23,7 @@ extern crate alloc;
 #[macro_use]
 extern crate log;
 
-use alloc::{collections::BTreeSet, format, string::String, vec, vec::Vec};
+use alloc::{collections::BTreeSet, string::String, vec, vec::Vec};
 
 pub use axvm_types::{
     AddressSpacePolicy, HostAddressAssignment, HostDeviceAssignment, HostPortAssignment,
@@ -715,77 +715,6 @@ impl GuestConfig {
         config.kernel.configured_memory_region_count = config.kernel.memory_regions.len();
         Ok(config)
     }
-
-    /// Serialize back to the TOML shape [`Self::from_toml`] reads.
-    ///
-    /// The round trip is how a form-made guest becomes a file on the guest tree:
-    /// the configuration the registry holds is what a later scan reads, so the
-    /// two cannot drift.
-    /// The file name a candidate guest configuration is written under.
-    ///
-    /// The guest's own name is reduced to one plain component so the tree stays
-    /// readable, and the id is appended because that component is **not unique**:
-    /// `my vm` and `my-vm` reduce to the same text. A writer that truncates
-    /// whatever it finds there would then let the second guest replace the first
-    /// one's file — including the `base.id` inside it, which afterwards names a
-    /// guest no longer on the tree.
-    ///
-    /// Appending the id costs nothing when the name is already unique, and keeps a
-    /// re-save of the *same* guest an edit rather than a collision, since one id
-    /// names one guest.
-    pub fn candidate_file_name(id: usize, guest_name: &str) -> String {
-        let stem: String = guest_name
-            .trim()
-            .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-                    character
-                } else {
-                    '-'
-                }
-            })
-            .collect();
-        let stem = stem.trim_matches(|character| character == '-' || character == '.');
-        if stem.is_empty() {
-            return format!("guest-{id}.toml");
-        }
-        format!("{stem}-{id}.toml")
-    }
-
-    pub fn to_toml(&self) -> Result<String, String> {
-        toml::to_string(self).map_err(|error| format!("{error}"))
-    }
-}
-
-/// The file name a candidate guest configuration is written under.
-///
-/// The guest's own name is reduced to one plain component so the tree stays
-/// readable, and the id is appended because that component is **not unique**:
-/// `my vm` and `my-vm` reduce to the same text. A writer that truncates
-/// whatever it finds there would then let the second guest replace the first
-/// one's file — including the `base.id` inside it, which afterwards names a
-/// guest no longer on the tree.
-///
-/// Appending the id costs nothing when the name is already unique, and keeps a
-/// re-save of the *same* guest an edit rather than a collision, since one id
-/// names one guest.
-pub fn candidate_file_name(id: usize, guest_name: &str) -> String {
-    let stem: String = guest_name
-        .trim()
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let stem = stem.trim_matches(|character| character == '-' || character == '.');
-    if stem.is_empty() {
-        return format!("guest-{id}.toml");
-    }
-    format!("{stem}-{id}.toml")
 }
 
 #[cfg(test)]

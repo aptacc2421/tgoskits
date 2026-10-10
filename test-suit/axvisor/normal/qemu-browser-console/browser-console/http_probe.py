@@ -176,10 +176,10 @@ def receive_until_counting_frames(websocket, marker):
 
 
 def check_gateway():
-    """The console gateway of a build without a dashboard.
+    """The console gateway of a build without the embedded dashboard.
 
-    This case builds `browser-console` alone: it is the terminal gateway the
-    dashboard drives, and it deliberately owns no page. `/` and `/assets/*` stay
+    This case builds the unified `web` feature without `web-ui`: it is the
+    terminal gateway the dashboard drives, and it deliberately owns no page. `/` and `/assets/*` stay
     404 here, which is what keeps "the UI is the embedded dashboard" true — the
     dashboard case (`qemu-web-ui`) asserts the other half of that contract.
     """
@@ -195,12 +195,13 @@ def check_gateway():
     if consoles != expected:
         raise AssertionError("console snapshot returned %r, expected %r" % (consoles, expected))
 
-    status, _ = get("/api/vms")
-    expect_status("GET /api/vms without http-axum", status, 404)
+    status, body = get("/api/vms")
+    expect_status("GET /api/vms", status, 200)
+    if json.loads(body.decode("utf-8")) != []:
+        raise AssertionError("empty browser-console build listed unexpected VMs: %r" % body)
 
-    # The capability declaration has to describe this build: a console-only
-    # build offers both terminals and no VM management, so a browser that built
-    # its navigation from the manifest never calls a route this build lacks.
+    # The capability declaration has to describe every route exposed by the
+    # unified `web` feature, even when this fixture has no guest VM configured.
     status, body = get("/api/manifest")
     expect_status("GET /api/manifest", status, 200)
     manifest = json.loads(body.decode("utf-8"))
@@ -209,17 +210,24 @@ def check_gateway():
     panels = manifest.get("panels")
     if not isinstance(panels, list):
         raise AssertionError("manifest panels was not a list: %r" % (manifest,))
-    if [panel.get("kind") for panel in panels] != ["console", "shell"]:
+    if [panel.get("kind") for panel in panels] != ["vms", "files", "host", "console", "shell"]:
         raise AssertionError("manifest panel kinds were %r" % (panels,))
+    expected_verbs = {
+        "vms": ["read", "write"],
+        "files": ["read", "write"],
+        "host": ["read"],
+        "console": ["read", "write", "stream"],
+        "shell": ["read", "write", "stream"],
+    }
     for panel in panels:
-        if panel.get("verbs") != ["read", "write", "stream"]:
+        if panel.get("verbs") != expected_verbs[panel["kind"]]:
             raise AssertionError("manifest panel %r had unexpected verbs" % (panel,))
         if not panel.get("title"):
             raise AssertionError("manifest panel %r had no title" % (panel,))
         if not panel.get("root"):
             raise AssertionError("manifest panel %r had no root" % (panel,))
     check_manifest_links(panels)
-    print("  browser console probe: GET /api/manifest -> console + shell")
+    print("  browser console probe: GET /api/manifest -> unified web panels")
 
 
 def request_status(method, path):

@@ -1,8 +1,8 @@
 //! The control plane: every entry point the dashboard can reach.
 //!
 //! Served by an axum `Router` running on a tokio current-thread runtime (see
-//! [`transport::server`]). The browser console and VM management API are
-//! independent features that may share this listener when both are enabled.
+//! [`transport::server`]). The HTTP API, file transfer, host panel, and browser consoles share the
+//! single `web` feature and listener.
 //!
 //! The server binds `127.0.0.1:8080` by default and only binds wider when
 //! `[env] AXVM_HTTP_BIND` opts in. The control plane runs under a local-host
@@ -31,10 +31,15 @@
 //! exports from this module is therefore either [`serve`] (the entry point) or
 //! a status query used by the startup banner.
 
-#[cfg(any(feature = "browser-console", feature = "http-axum"))]
+#[cfg(feature = "web")]
 pub mod capability;
+#[cfg(feature = "web")]
 pub mod domain;
-#[cfg(any(feature = "browser-console", feature = "http-axum"))]
+#[cfg(feature = "web")]
+pub(crate) mod network_console;
+#[cfg(feature = "web")]
+pub(crate) mod network_status;
+#[cfg(feature = "web")]
 pub mod transport;
 #[cfg(feature = "web-ui")]
 pub mod web;
@@ -47,7 +52,7 @@ pub mod web;
 /// This is the assembly root: the router is built here, from the capability
 /// table, and handed to the transport as data. That keeps the transport from
 /// importing the capability layer and keeps the paths in one place.
-#[cfg(any(feature = "browser-console", feature = "http-axum"))]
+#[cfg(feature = "web")]
 pub fn serve() -> anyhow::Result<()> {
     let router = capability::table::router();
 
@@ -61,13 +66,13 @@ pub fn serve() -> anyhow::Result<()> {
 }
 
 /// Configured HTTP listener address used by the startup access banner.
-#[cfg(feature = "browser-console")]
+#[cfg(feature = "web")]
 pub(crate) fn bind_addr() -> &'static str {
     transport::server::bind_addr()
 }
 
 /// Whether the HTTP listener has successfully bound its configured address.
-#[cfg(feature = "browser-console")]
+#[cfg(feature = "web")]
 pub(crate) fn is_listening() -> bool {
     transport::server::is_listening()
 }

@@ -1,4 +1,4 @@
-//! Live VM registry events for the browser UI (`browser-console` feature).
+//! Live VM registry events for the browser UI (`web` feature).
 //!
 //! The socket at `/ws/events` — declared in
 //! [`crate::control::capability::table`] — upgrades to a WebSocket and pushes
@@ -27,7 +27,6 @@ use axum::{
 use serde_json::{Value, json};
 
 use crate::control::domain::events::{EventKind, Subscription, VmEvent};
-use crate::manager::AxvmManager;
 
 /// Route for the registry event stream.
 pub(crate) fn events_stream_route() -> MethodRouter {
@@ -77,13 +76,15 @@ fn text_frame(body: String) -> Message {
 
 /// The current VM list, in the shape the UI list needs.
 fn snapshot_frame() -> String {
-    let vms: Vec<Value> = AxvmManager::vm_list()
+    let vms: Vec<Value> = crate::manager::manager()
+        .list()
         .iter()
         .map(|vm| {
+            let snapshot = vm.snapshot();
             json!({
-                "id": vm.id(),
-                "name": vm.name(),
-                "status": vm.status().as_str(),
+                "id": snapshot.vm_id,
+                "name": snapshot.name,
+                "status": snapshot.state.as_str(),
             })
         })
         .collect();

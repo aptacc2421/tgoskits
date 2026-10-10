@@ -25,46 +25,37 @@
 //! | POST | `/api/vms/{id}/stop` | `vm::vm_stop` | stop |
 //! | POST | `/api/vms/{id}/pause` | `vm::vm_pause` | pause |
 //! | POST | `/api/vms/{id}/resume` | `vm::vm_resume` | resume |
-//! | GET | `/api/vms/pool` | `vm::vm_pool` | pool (`fs`) |
-//! | POST | `/api/vms/pool` | `vm::vm_pool_save` | pool_save (`fs`) |
-//! | GET | `/api/vms/browse` | `vm::vm_browse` | browse (`fs`) |
-//! | GET | `/api/files` | `files::list_files` | list (`fs`) |
-//! | POST | `/api/files` | `files::open_file` | open (`fs`) |
-//! | HEAD | `/api/files/{id}` | `files::resume_file` | resume (`fs`) |
-//! | PATCH | `/api/files/{id}` | `files::send_chunk` | send (`fs`) |
-//! | POST | `/api/files/{id}/place` | `files::place_file` | place (`fs`) |
-//! | DELETE | `/api/files/{id}` | `files::drop_file` | drop (`fs`) |
-//! | POST | `/api/files/dirs` | `files::make_directory` | mkdir (`fs`) |
-//! | GET | `/ws/events` | `events::upgrade_events` | events (`http-axum` + `browser-console`) |
+//! | GET | `/api/vms/pool` | `vm::vm_pool` | pool (`web`) |
+//! | POST | `/api/vms/pool` | `vm::vm_pool_save` | pool_save (`web`) |
+//! | GET | `/api/vms/browse` | `vm::vm_browse` | browse (`web`) |
+//! | GET | `/api/files` | `files::list_files` | list (`web`) |
+//! | POST | `/api/files` | `files::open_file` | open (`web`) |
+//! | HEAD | `/api/files/{id}` | `files::resume_file` | resume (`web`) |
+//! | PATCH | `/api/files/{id}` | `files::send_chunk` | send (`web`) |
+//! | POST | `/api/files/{id}/place` | `files::place_file` | place (`web`) |
+//! | DELETE | `/api/files/{id}` | `files::drop_file` | drop (`web`) |
+//! | POST | `/api/files/dirs` | `files::make_directory` | mkdir (`web`) |
+//! | GET | `/ws/events` | `events::upgrade_events` | events (`web`) |
 //! | GET | `/api/consoles` | `browser_console::console_descriptions` | list |
 //! | GET | `/ws/{endpoint}` | `browser_console::upgrade_console` | stream |
 //!
-//! An id that is not registered yet may still be startable: with the `fs`
-//! feature, `start` creates a VM from the matching config in the VM pool first
-//! (see [`crate::control::domain::pool`]), and `/api/vms/pool` reports those
-//! candidates. Starting an id that is neither registered nor pooled returns 404.
+//! `/api/vms/pool` reports candidate configurations. A start action can create
+//! the matching candidate on demand, while all other lifecycle actions operate
+//! on VMs already registered in the manager.
 
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use axum::Router;
-#[cfg(all(feature = "fs", feature = "http-axum"))]
 use axum::extract::DefaultBodyLimit;
 use axum::routing::get;
-#[cfg(feature = "http-axum")]
 use axum::routing::{delete, post};
-#[cfg(all(feature = "fs", feature = "http-axum"))]
 use axum::routing::{head, patch};
 
-#[cfg(all(feature = "fs", feature = "http-axum"))]
 use crate::control::transport::api::files;
-#[cfg(feature = "http-axum")]
 use crate::control::transport::api::host;
-#[cfg(feature = "http-axum")]
 use crate::control::transport::api::vm;
-#[cfg(feature = "browser-console")]
 use crate::control::transport::browser_console;
-#[cfg(all(feature = "browser-console", feature = "http-axum"))]
 use crate::control::transport::events;
 
 use super::{Endpoint, MANIFEST_PATH, Method, Resource, Verb};
@@ -101,25 +92,19 @@ pub fn router() -> Router {
 pub fn resources() -> Vec<&'static Resource> {
     let mut all = Vec::new();
 
-    #[cfg(feature = "http-axum")]
     all.push(&VMS_RESOURCE);
 
-    #[cfg(all(feature = "fs", feature = "http-axum"))]
     all.push(&FILES_RESOURCE);
 
-    #[cfg(feature = "http-axum")]
     all.push(&HOST_RESOURCE);
 
-    #[cfg(feature = "browser-console")]
     all.push(&CONSOLE_RESOURCE);
 
-    #[cfg(feature = "browser-console")]
     all.push(&SHELL_RESOURCE);
 
     all
 }
 
-#[cfg(feature = "http-axum")]
 static VMS_RESOURCE: Resource = Resource {
     kind: "vms",
     title: "虚拟机",
@@ -128,7 +113,6 @@ static VMS_RESOURCE: Resource = Resource {
     endpoints: VMS_ENDPOINTS,
 };
 
-#[cfg(feature = "http-axum")]
 static VMS_ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         name: "list",
@@ -156,7 +140,6 @@ static VMS_ENDPOINTS: &[Endpoint] = &[
     },
     // The pool is a directory on the host filesystem, so its routes only exist
     // in builds that can read one.
-    #[cfg(feature = "fs")]
     Endpoint {
         name: "pool",
         verb: Verb::Read,
@@ -164,7 +147,6 @@ static VMS_ENDPOINTS: &[Endpoint] = &[
         path: "/api/vms/pool",
         build: || get(vm::vm_pool),
     },
-    #[cfg(feature = "fs")]
     Endpoint {
         name: "pool_save",
         verb: Verb::Write,
@@ -172,7 +154,6 @@ static VMS_ENDPOINTS: &[Endpoint] = &[
         path: "/api/vms/pool",
         build: || post(vm::vm_pool_save),
     },
-    #[cfg(feature = "fs")]
     Endpoint {
         name: "browse",
         verb: Verb::Read,
@@ -180,11 +161,8 @@ static VMS_ENDPOINTS: &[Endpoint] = &[
         path: "/api/vms/browse",
         build: || get(vm::vm_browse),
     },
-    // Only the dashboard subscribes to registry changes, and reaching the
-    // stream needs both the socket feature and a panel to hang it on: without
-    // `http-axum` there is no `vms` panel, so the watcher has no subscriber to
-    // wake and the route would be one nothing could name.
-    #[cfg(all(feature = "http-axum", feature = "browser-console"))]
+    // The event stream belongs to the `vms` panel and is part of the same
+    // unified `web` feature.
     Endpoint {
         name: "events",
         verb: Verb::Read,
@@ -236,7 +214,6 @@ static VMS_ENDPOINTS: &[Endpoint] = &[
     },
 ];
 
-#[cfg(all(feature = "fs", feature = "http-axum"))]
 static FILES_RESOURCE: Resource = Resource {
     kind: "files",
     title: "文件",
@@ -253,7 +230,6 @@ static FILES_RESOURCE: Resource = Resource {
 /// moves the finished file to its final name and `drop` forgets an attempt.
 /// `list` is what shows a client which objects are waiting to be placed; a
 /// session whose bytes are still arriving is deliberately absent from it.
-#[cfg(all(feature = "fs", feature = "http-axum"))]
 static FILES_ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         name: "list",
@@ -327,7 +303,6 @@ static FILES_ENDPOINTS: &[Endpoint] = &[
     },
 ];
 
-#[cfg(feature = "browser-console")]
 static CONSOLE_RESOURCE: Resource = Resource {
     kind: "console",
     title: "客户机终端",
@@ -358,7 +333,6 @@ static CONSOLE_RESOURCE: Resource = Resource {
 /// how long it has been up. It is declared last because the panels before it
 /// are what an operator acts on — this one is what they are acting *from*, so
 /// the navigation keeps it at the bottom rather than opening on it.
-#[cfg(feature = "http-axum")]
 static HOST_RESOURCE: Resource = Resource {
     kind: "host",
     title: "宿主机",
@@ -367,7 +341,6 @@ static HOST_RESOURCE: Resource = Resource {
     endpoints: HOST_ENDPOINTS,
 };
 
-#[cfg(feature = "http-axum")]
 static HOST_ENDPOINTS: &[Endpoint] = &[Endpoint {
     name: "get",
     verb: Verb::Read,
@@ -382,7 +355,6 @@ static HOST_ENDPOINTS: &[Endpoint] = &[Endpoint {
 /// console gateway names the management endpoint. Declaring the socket again
 /// under this kind is what tells the dashboard that a management terminal
 /// exists and that its link is the same template with a different parameter.
-#[cfg(feature = "browser-console")]
 static SHELL_RESOURCE: Resource = Resource {
     kind: "shell",
     title: "管理终端",

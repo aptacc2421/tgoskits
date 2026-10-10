@@ -5,7 +5,7 @@ sidebar_label: "客户机控制台"
 
 # Axvisor 客户机控制台架构
 
-Axvisor 只有一个物理宿主控制台，但管理 shell 和多台客户机都需要收发字符。这个共享边界由 Axvisor 应用层的 `GuestConsoleMux` 管理：它是物理宿主输入的唯一读取者，决定当前前台，把输入送进对应 VM 的有界队列，并在多个客户机写同一个物理终端时完成输出仲裁。可选的 `browser-console` 传输还可以把管理 shell 和每个已登记 VM 映射到独立 WebSocket 字节流，而不改变物理 UART 前台。虚拟 UART 只通过 `SerialBackend` 读写字节，不拥有前台、快捷键或宿主终端策略。
+Axvisor 只有一个物理宿主控制台，但管理 shell 和多台客户机都需要收发字符。这个共享边界由 Axvisor 应用层的 `GuestConsoleMux` 管理：它是物理宿主输入的唯一读取者，决定当前前台，把输入送进对应 VM 的有界队列，并在多个客户机写同一个物理终端时完成输出仲裁。可选的 `web` 控制面还可以把管理 shell 和每个已登记 VM 映射到独立 WebSocket 字节流，而不改变物理 UART 前台。虚拟 UART 只通过 `SerialBackend` 读写字节，不拥有前台、快捷键或宿主终端策略。
 
 本文说明应用层的输入 ownership、前台状态、backend generation/identity 有效性、输出模式和 VM 生命周期接入。UART 寄存器、FIFO、IRQ endpoint 与 vCPU poll 的完整语义见[设备运行时与中断架构](./device-runtime.md#5-串口完整路径)。
 
@@ -20,7 +20,7 @@ Axvisor 只有一个物理宿主控制台，但管理 shell 和多台客户机�
 | `GuestSerialBackendFactory` / `GuestSerialBackend` | factory 为一个 host-console serial request 创建带 `(VMId, BackendGeneration)` 身份的 backend；backend 的 `try_write()` 把设备层字节调用转入 mux。`SerialBackend::try_write` 是通用 accepted-prefix 接口，当前 `GuestSerialBackend` 对 ordered record queue 的提交是 all-or-zero：整条 record 被接受时返回 `bytes.len()`，`WouldBlock` 或 stale 时返回 0 | configured node 创建；UART runtime 读写 |
 | `GuestOutputMux` | 在 `BootMultiplex` 与 `Interactive` 间切换，补齐物理行，维护每 VM 16 KiB 环形输出，并生成回放 | 客户机输出与前台变化 |
 | `guest_console/host.rs` | 在 vCPU 启动前取得唯一的 task-console RX、日志订阅与 output；output 移交给专用任务，其他路径只向固定队列提交事务 | Axvisor 初始化与 shell 主循环 |
-| `network_console` | 在运行期登记与释放客户机通道（管理通道加 8 条客户机通道）、维护独占网页会话和 Axvisor 网页行编辑；不提供 raw TCP listener | `browser-console` 功能启用时 |
+| `network_console` | 在运行期登记与释放客户机通道（管理通道加 8 条客户机通道）、维护独占网页会话和 Axvisor 网页行编辑；不提供 raw TCP listener | `web` 功能启用时 |
 | `shell/mod.rs` | 作为输入事件循环的唯一 owner，消费 `ConsoleInputEvent`，调用 `activate()`，每轮 reconcile VM 状态 | 管理 shell |
 | `shell/command/vm.rs` | `vm start --console`、`vm console` 以及 start/stop/reset/resume/delete 的 mux lifecycle 调用 | 管理命令 |
 | `AxvmManager` 接入 | 提供 VM registry/status；输入入队后、以及 ordered record 被消费释放容量后唤醒对应 VM；实际设备 poll 由 vCPU0 执行 | VM lifecycle 与运行期 |
@@ -200,7 +200,7 @@ host transport queue。host transport 满时，直接提交（shell 输出、宿
 ordered subscription 时的 guest 直接 replay）整事务回滚并累计丢弃摘要；专用 output worker
 从该队列取出批次，可睡眠地写 `TaskConsoleOutput`。没有 ordered subscription 时，
 `write_guest_output()` 跳过 record queue，直接在 host transport 上 replay，成功返回全长
-（`bytes.len()`），失败返回 0。`browser-console` 分支复制 `try_write()` 实际返回的 accepted
+（`bytes.len()`），失败返回 0。`web` 分支复制 `try_write()` 实际返回的 accepted
 字节；在当前 `GuestSerialBackend` 中即整段或 0。
 
 ```mermaid
@@ -318,11 +318,11 @@ active admission/stable identity 语义一致。
 | 单 vCPU guest | `notify_vm()` 设置 Release 发布的 pending device-poll flag 并唤醒；指定 poll owner 用 Acquire/AcqRel 消费 | flag 只表达“需要 poll”，不计数；队列才保存字节 |
 | SMP guest | 与单 vCPU guest 一样先发布 pending device-poll flag，再通过线程世代绑定的 capability 定向 kick 当前 poll owner | flag 只表达“需要 poll”，不计数；队列才保存字节 |
 | 输出并发 | `output_lock` 覆盖 active admission、record 入队、`retained_tx` 记/清与 retry drain；ordered record queue 保持 guest 写入顺序，固定 64 KiB transport 保持直接 replay 的事务边界，只有 output worker 等待 UART | guest record queue 满时 `try_write()` 返回 0 且不丢弃已排队记录，由 PL011 重试，并由 pop 路径锁外 `notify_vm()` 唤醒；直接 host transport 事务满时整事务回滚并报告摘要；per-guest ring 淘汰最旧字节；这些路径不等待 UART；任务 mutex 竞争可以睡眠 |
-| 网络输出 | 每端点独立 64 KiB 固定队列；有连接时 vCPU 只复制原始字节并通过 `IrqNotify` 唤醒对应网页输出任务 | 无连接时不保留历史也不获取网络队列锁；慢客户端只影响自身通道并最终触发该端点队列丢弃摘要 |
+| 网络输出 | 每端点独立 64 KiB 固定队列；vCPU 复制原始字节并通过 `IrqNotify` 唤醒对应网页输出任务 | 无连接时也保留最近 64 KiB，后来接入的会话会回放；慢客户端只影响自身通道并最终触发该端点队列丢弃摘要 |
 
-`browser-console` 只提供控制台字节流的 WebSocket 网关，不再内嵌网页。网页界面由 `web-ui`
-功能提供：它以编译期内嵌的静态资源发布管理台，并通过 HTTP 管理 API 读取 VM registry；
-`browser-console` 与 `web-ui` 各自独立启用。
+统一的 `web` 功能提供控制台字节流的 WebSocket 网关，`web-ui` 在其上增加编译期内嵌的管理台静态资源；
+管理台通过 HTTP API 读取 VM registry。`web-ui` 只能在 `web` 之上启用，API、WebSocket
+和管理台共享同一监听器。
 
 `network_console` 的通道表是运行期注册表而不是启动快照：VM 创建时为它登记一条客户机通道，
 VM 删除时释放，通道号取最小空位，因此释放过的通道可以复用，客户机也可能出现在任意通道上。
@@ -346,12 +346,12 @@ SMP 路径仍不能让任意 vCPU poll，那会破坏设备 poll 的 single-owne
 
 ### 8.1 宿主所有权边界
 
-实体板卡启用网络 Shell 时，构建配置需要同时提供平台总线、实体网卡驱动和 `browser-console`。`AXVM_HTTP_BIND` 只决定 HTTP 监听地址，不会自动隔离客户机设备，也不会让 Axvisor 与客户机共享同一物理控制器。
+实体板卡启用网络 Shell 时，构建配置需要同时提供平台总线、实体网卡驱动和 `web`。`AXVM_HTTP_BIND` 只决定 HTTP 监听地址，不会自动隔离客户机设备，也不会让 Axvisor 与客户机共享同一物理控制器。
 
 | 配置或资源 | 所有者 | 维护含义 |
 | --- | --- | --- |
 | `ax-driver/rk3588-pcie` 与 `ax-driver/realtek-rtl8125` | Axvisor | 探测并驱动 Orange Pi 5 Plus 的 RTL8125 管理网卡 |
-| `browser-console` 与 `AXVM_HTTP_BIND` | Axvisor | 发布内嵌页面、`/api/consoles` 和各控制台 WebSocket |
+| `web` 与 `AXVM_HTTP_BIND` | Axvisor | 发布 `web-ui` 内嵌页面（若启用）、`/api/consoles` 和各控制台 WebSocket |
 | PCIe Host Bridge、PCIe PHY 和网卡依赖 | Axvisor | 客户机不得重新配置、复位或关闭这些实体资源 |
 | 客户机虚拟 UART backend | 对应 VM，Axvisor 路由 | 只承载 Shell 字节，不要求客户机拥有实体网卡 |
 

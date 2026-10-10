@@ -2,18 +2,24 @@
 
 extern crate alloc;
 
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 
 use anyhow::anyhow;
 use anyhow::{Context, Result};
 #[cfg(not(feature = "no-auto-start"))]
 use axvm::VmStatus;
 use axvm::{StopReason, VMId, VmHandle, VmManager, VmOperation};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::sync::MutexExt;
 
 /// Application policy and its instance-owned VM registry.
 pub struct AxvmManager {
     runtime: VmManager,
+    /// Serializes VM creation completion and destruction with console-lane
+    /// reclamation. A lane must not be reused between the runtime operation
+    /// finishing and the old owner releasing it.
+    lifecycle: Mutex<()>,
 }
 
 static APPLICATION_MANAGER: OnceLock<Arc<AxvmManager>> = OnceLock::new();
@@ -29,6 +35,7 @@ impl AxvmManager {
     pub fn new() -> Result<Arc<Self>> {
         let manager = Arc::new(Self {
             runtime: VmManager::new().context("initialize AxVM runtime")?,
+            lifecycle: Mutex::new(()),
         });
         APPLICATION_MANAGER
             .set(manager.clone())
@@ -71,10 +78,102 @@ impl AxvmManager {
         self.create_plan(plan)
     }
 
+    /// Creates one VM and waits until its control task has finished setup.
+    #[cfg(feature = "web")]
+    pub fn create_vm_from_toml_and_wait(&self, raw_cfg: &str) -> Result<VmHandle> {
+        let _lifecycle = self.lifecycle.lock_unpoisoned();
+        let operation = self.create_vm_from_toml(raw_cfg)?;
+        self.wait_for_created_vm_locked(operation)
+    }
+
     pub fn create_plan(&self, plan: axvm::VmCreatePlan) -> Result<VmOperation<VmHandle>> {
-        self.runtime
-            .create(plan)
-            .context("create VM from prepared configuration")
+        #[cfg(feature = "web")]
+        let vm_id = plan.config.id();
+        #[cfg(feature = "web")]
+        let lane = crate::control::network_console::register_guest(vm_id, &plan.config.name())?;
+
+        match self.runtime.create(plan) {
+            Ok(operation) => Ok(operation),
+            Err(error) => {
+                #[cfg(feature = "web")]
+                if matches!(
+                    lane,
+                    crate::control::network_console::LaneAllocation::Allocated
+                ) {
+                    crate::control::network_console::release_guest(vm_id);
+                }
+                Err(error).context("create VM from prepared configuration")
+            }
+        }
+    }
+
+    /// Waits for VM initialization and releases its browser lane on failure.
+    pub fn wait_for_created_vm(&self, operation: VmOperation<VmHandle>) -> Result<VmHandle> {
+        let _lifecycle = self.lifecycle.lock_unpoisoned();
+        self.wait_for_created_vm_locked(operation)
+    }
+
+    fn wait_for_created_vm_locked(&self, operation: VmOperation<VmHandle>) -> Result<VmHandle> {
+        #[cfg(feature = "web")]
+        let vm_id = operation.id().vm().vm_id();
+        match operation.wait() {
+            Ok(vm) => Ok(vm),
+            Err(error) => {
+                #[cfg(feature = "web")]
+                {
+                    // AxVM keeps a failed creation in the registry so the
+                    // caller can inspect its snapshot. Remove that failed
+                    // entry before returning, otherwise releasing its lane
+                    // would let a new VM claim the same route while the old
+                    // numeric id is still reserved.
+                    if let Some(vm) = self.get(vm_id) {
+                        if let Ok(destroy) = vm.destroy() {
+                            if let Err(cleanup_error) = destroy.wait() {
+                                warn!(
+                                    "VM[{vm_id}] creation failed and cleanup did not finish: {cleanup_error:#}"
+                                );
+                            } else if let Err(cleanup_error) = vm.join_control_task() {
+                                warn!(
+                                    "VM[{vm_id}] creation failed and control task did not join: {cleanup_error:#}"
+                                );
+                            }
+                        }
+                    }
+                    if self.get(vm_id).is_none() {
+                        crate::control::network_console::release_guest(vm_id);
+                    }
+                }
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Ensures that `vm_id` is registered, creating it from the current pool
+    /// entry when necessary. A pool entry is a candidate until a start request
+    /// names it; no VM or console lane is reserved by merely listing the pool.
+    #[cfg(feature = "web")]
+    pub fn ensure_vm_from_pool(&self, vm_id: VMId) -> Result<bool> {
+        let _lifecycle = self.lifecycle.lock_unpoisoned();
+        if self.get(vm_id).is_some() {
+            return Ok(true);
+        }
+
+        let pool = crate::control::domain::pool::scan();
+        let Some(entry) = pool.entries().iter().find(|entry| entry.id() == vm_id) else {
+            crate::control::domain::pool::log_issues(&pool);
+            return Ok(false);
+        };
+        let operation = self
+            .create_vm_from_toml(entry.toml())
+            .with_context(|| format!("create VM[{vm_id}] from VM pool entry `{}`", entry.path()))?;
+        self.wait_for_created_vm_locked(operation)
+            .with_context(|| {
+                format!(
+                    "initialize VM[{vm_id}] from VM pool entry `{}`",
+                    entry.path()
+                )
+            })?;
+        Ok(true)
     }
 
     pub fn get(&self, vm_id: VMId) -> Option<VmHandle> {
@@ -120,9 +219,13 @@ impl AxvmManager {
     }
 
     pub fn destroy_vm(&self, vm_id: VMId) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock_unpoisoned();
         let vm = self.require_vm(vm_id)?;
         vm.destroy()?.wait().context("destroy VM")?;
-        vm.join_control_task().context("join VM control task")
+        vm.join_control_task().context("join VM control task")?;
+        #[cfg(feature = "web")]
+        crate::control::network_console::release_guest(vm_id);
+        Ok(())
     }
 
     pub fn notify_vm(&self, vm_id: VMId) -> Result<()> {
@@ -159,69 +262,6 @@ impl AxvmManager {
         target_arch = "loongarch64"
     )))]
     fn release_host_filesystem_for_guest_passthrough(&self) {}
-
-    /// Read VM config files from an Axvisor-owned directory.
-    pub fn filesystem_vm_configs(config_dir: &str) -> Vec<String> {
-        let mut configs = Vec::new();
-
-        debug!("Read VM config files from filesystem.");
-
-        let entries = match ax_std::fs::read_dir(config_dir) {
-            Ok(entries) => {
-                info!("Find dir: {}", config_dir);
-                entries
-            }
-            Err(_) => {
-                info!("NOT find dir: {} in filesystem", config_dir);
-                return configs;
-            }
-        };
-
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => {
-                    warn!("Failed to read config directory entry: {e:?}");
-                    continue;
-                }
-            };
-            let path = entry.path();
-            let path_str = path.as_str();
-            debug!("Considering file: {}", path_str);
-            if !path_str.ends_with(".toml") {
-                continue;
-            }
-
-            let file_size = match Self::file_size(path_str) {
-                Ok(file_size) => file_size,
-                Err(e) => {
-                    error!("Failed to get config file {path_str} metadata: {e:#}");
-                    continue;
-                }
-            };
-            info!("File {} size: {}", path_str, file_size);
-
-            if file_size == 0 {
-                warn!("File {} is empty", path_str);
-                continue;
-            }
-
-            let buffer = match Self::read_file_exact(path_str, file_size) {
-                Ok(buffer) => buffer,
-                Err(e) => {
-                    error!("Failed to read file {path_str}: {e:#}");
-                    continue;
-                }
-            };
-
-            match String::from_utf8(buffer) {
-                Ok(content) => configs.push(content),
-                Err(e) => error!("Config file {} is not valid UTF-8: {:?}", path_str, e),
-            }
-        }
-
-        configs
-    }
 
     fn open_file(file_name: &str) -> Result<ax_std::fs::File> {
         ax_std::fs::File::open(file_name)

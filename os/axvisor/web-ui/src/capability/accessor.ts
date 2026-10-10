@@ -13,7 +13,7 @@
 //!   visible through the panel's error boundary instead of turning into a 404
 //!   that reads as "the backend is broken".
 //! - `maybeUrl` returns `null` instead. That is for operations a build may
-//!   legitimately lack (`fs`-only ones): the panel renders the absent feature
+//!   legitimately lack (for example, filesystem browsing in an API-only build): the panel renders the absent feature
 //!   instead of an error.
 //!
 //! Nothing here knows what a panel is *about*: the module is pure and takes the

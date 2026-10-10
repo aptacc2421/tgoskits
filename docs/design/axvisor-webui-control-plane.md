@@ -16,9 +16,9 @@ Axvisor 的客户机管理目前只能通过物理串口上的管理 shell 完�
 
 ## 现有代码与未采用的复用方案
 
-`src/http/browser_console/` 提供了浏览器终端的可用基础，它的问题在于把通道表、页面模板、静态资产与客户端操作放在同一组模块里。通道表与终端网关这部分能力予以保留并重构为运行期注册表；页面模板与静态资源服务被前端构建产物取代；鉴权模块整体删除，理由见安全边界一节。
+历史实验实现（当时位于 `os/axvisor/src/http/browser_console/`）提供了浏览器终端的可用基础，它的问题在于把通道表、页面模板、静态资产与客户端操作放在同一组模块里。通道表与终端网关这部分能力予以保留并重构为运行期注册表；页面模板与静态资源服务被前端构建产物取代；鉴权模块整体删除，理由见安全边界一节。
 
-`src/network_console/` 的通道与前端行编辑逻辑继续复用，控制面只替换它的端点声明方式：从静态端点表改为运行期注册表，使通道按客户机登记动态分配。
+`os/axvisor/src/control/network_console/` 的通道与前端行编辑逻辑继续复用，控制面只替换它的端点声明方式：从静态端点表改为运行期注册表，使通道按客户机登记动态分配。
 
 参照工程 `webui_demo` 提供了本设计采用的界面架构约束：导航项全部来自后端声明、面板之间互不引用、共享逻辑只能下沉到纯函数库。**只采用这些约束，不复制其代码** —— 它与 Axvisor 的接口形态、构建方式和信任模型都不同，直接移植会把两套假设混在一起。
 
@@ -144,9 +144,9 @@ cargo xtask axvisor test qemu --arch aarch64 --test-case qemu-vm-pool
 cargo xtask axvisor test qemu --arch aarch64 --test-case qemu-vm-pool-http
 ```
 
-`web-ui` 与 `qemu-vm-pool-http` 两个用例依赖前端产物，而内核构建不调用包管理器，因此必须先执行 `cd os/axvisor/web-ui && npm ci && npm run build`。CI 中的对应检查会在运行前准备满足版本要求的 Node.js 环境，把这一步显式写进流程而不是依赖宿主预装。
+前端产物由独立的 web UI 步骤验证：`cd os/axvisor/web-ui && npm ci && npm test && npm run build`。内核构建不调用包管理器，因此这一步必须显式写进 CI，而不能依赖宿主预装或某个 QEMU 用例的副作用。
 
-CI 采用的用例集合登记在 `.github/ci/checks/axvisor.toml`，aarch64 组包含上述五个用例。另有一个三客户机终端用例（`qemu-browser-console-3vm`，含普通与带内部日志两条配置）已提交但尚未登记进 CI，它的场景是暴露底层惰性初始化表的并发缺陷，用于验证该修复的回归保护。同一用例的诊断步骤为手工执行。
+CI 采用的用例集合登记在 `.github/ci/checks/axvisor.toml`：aarch64 控制面检查运行 `http-control-plane`、`browser-console` 和 `qemu-ivc-arceos`，并在同一检查中执行 web UI 的 `npm test` 与 `npm run build`；`web-ui`、`qemu-vm-pool`、`qemu-vm-pool-http` 以及三客户机终端用例仍是手工诊断入口，未计入 CI 绿灯。
 
 覆盖的缺口需要如实记录：文件传输定义的两类错误（分片超限与存储不足）在仓库的用例资产中没有断言，当前只覆盖了 400、404、409、200 与 204 这些路径。另外，`axvmconfig` 新增的必填参数改变了命令行行为，未在本文档的验证范围内提供独立用例。
 

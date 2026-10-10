@@ -25,7 +25,6 @@ const SCHEMA: VmSchema = {
     { name: 'name', type: 'string', required: true },
     { name: 'kernel_path', type: 'file', required: true },
     { name: 'rootfs_path', type: 'file', required: false, default: null, accept: ['.img'] },
-    { name: 'image_location', type: 'enum', required: false, default: 'fs', options: ['fs'] },
     { name: 'entry_point', type: 'address', required: true },
     { name: 'kernel_load_addr', type: 'address', required: true },
     { name: 'memory_base', type: 'address', required: true },
@@ -40,7 +39,6 @@ const FILLED = {
   id: '7',
   name: 'probe-guest',
   kernel_path: '/guest/linux/linux-qemu',
-  image_location: 'fs',
   entry_point: '0x8020_0000',
   kernel_load_addr: '0x8020_0000',
   memory_base: '0x8000_0000',
@@ -55,9 +53,6 @@ describe('initialValues', () => {
     const values = initialValues(SCHEMA)
     expect(values.guest_type).toBe('virtualized')
     expect(values.cpu_num).toBe('1')
-    // The only kernel source a form-made guest has is the filesystem, and the
-    // declaration says so with a default rather than a required choice.
-    expect(values.image_location).toBe('fs')
     // The command line arrives as a real value, not an empty field: a guest
     // without one runs silent and answers no terminal.
     expect(values.cmdline).toBe('root=/dev/vda ro rootwait console=ttyAMA0 init=/bin/sh')
@@ -79,8 +74,7 @@ describe('creationBody', () => {
         id: 7,
         name: 'probe-guest',
         kernel_path: '/guest/linux/linux-qemu',
-        image_location: 'fs',
-        entry_point: 0x80200000,
+              entry_point: 0x80200000,
         kernel_load_addr: 0x80200000,
         memory_base: 0x80000000,
         memory_mb: 256,
@@ -123,9 +117,9 @@ describe('creationBody', () => {
   })
 
   it('refuses an enum value the declaration does not offer', () => {
-    const body = creationBody(SCHEMA, { ...FILLED, image_location: 'network' })
+    const body = creationBody(SCHEMA, { ...FILLED, guest_type: 'unsupported' })
     expect(body.ok).toBe(false)
-    expect(body.ok === false && body.error).toContain('fs')
+    expect(body.ok === false && body.error).toContain('guest_type')
   })
 
   it('follows the declaration rather than a field list of its own', () => {

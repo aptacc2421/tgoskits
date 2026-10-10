@@ -73,7 +73,6 @@ pub enum Verb {
     Read,
     Write,
     /// Opens a live stream and keeps it open.
-    #[cfg(feature = "browser-console")]
     Stream,
 }
 
@@ -82,7 +81,6 @@ impl Verb {
         match self {
             Verb::Read => "read",
             Verb::Write => "write",
-            #[cfg(feature = "browser-console")]
             Verb::Stream => "stream",
         }
     }
@@ -95,15 +93,11 @@ impl Verb {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Method {
     Get,
-    #[cfg(feature = "http-axum")]
     Post,
-    #[cfg(feature = "http-axum")]
     Delete,
     /// Asks for the current offset of a transfer that stopped.
-    #[cfg(feature = "http-axum")]
     Head,
     /// Carries one chunk of a transfer.
-    #[cfg(feature = "http-axum")]
     Patch,
 }
 
@@ -111,13 +105,9 @@ impl Method {
     pub const fn as_str(self) -> &'static str {
         match self {
             Method::Get => "GET",
-            #[cfg(feature = "http-axum")]
             Method::Post => "POST",
-            #[cfg(feature = "http-axum")]
             Method::Delete => "DELETE",
-            #[cfg(feature = "http-axum")]
             Method::Head => "HEAD",
-            #[cfg(feature = "http-axum")]
             Method::Patch => "PATCH",
         }
     }

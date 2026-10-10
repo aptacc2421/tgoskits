@@ -2,7 +2,7 @@
 # `qemu-browser-console-3vm` and `qemu-browser-console-3vm-intlog` cases.
 #
 # ArceOS, read from `/guest/arceos/arceos-qemu` in the hypervisor's own
-# filesystem (`image_location = "fs"`): the case exists to give the dashboard
+# filesystem (a filesystem-backed `kernel_path`): the case exists to give the dashboard
 # three independent guest consoles at once, and a kernel that prints a banner and
 # exits gives it three honest console lanes with no disk, no userland and nothing
 # to keep alive. Only `base.id` / `name` / `phys_cpu_ids` differ between the
@@ -24,8 +24,6 @@ phys_cpu_ids = [2]
 [kernel]
 # The entry point of the kernel image.
 entry_point = 0x8020_0000
-# The location of image: "fs" reads the kernel from the guest filesystem.
-image_location = "fs"
 # The path of the kernel image inside the hypervisor filesystem.
 kernel_path = "/guest/arceos/arceos-qemu"
 # The load address of the kernel image.

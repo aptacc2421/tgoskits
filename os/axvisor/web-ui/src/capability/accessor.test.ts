@@ -31,7 +31,7 @@ const SHELL: PanelMeta = {
   links: [{ name: 'stream', verb: 'stream', method: 'GET', href: '/ws/{endpoint}' }],
 }
 
-/** One build declares the `fs`-only operations, one does not: the difference a panel sees. */
+/** One build declares optional filesystem operations, one does not: the difference a panel sees. */
 const WITH_POOL: PanelMeta = {
   ...VMS,
   links: [...VMS.links, { name: 'pool', verb: 'read', method: 'GET', href: '/api/vms/pool' }],

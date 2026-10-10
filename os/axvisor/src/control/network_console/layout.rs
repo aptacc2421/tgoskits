@@ -163,3 +163,57 @@ fn management_endpoint() -> Endpoint {
         display_name: "Axvisor".into(),
     }
 }
+
+#[cfg(all(test, not(axtest)))]
+mod tests {
+    use super::{ConsoleLane, LaneAllocation, Layout, LayoutFull, MAX_GUEST_CONSOLES};
+
+    #[test]
+    fn allocation_is_idempotent_and_reuses_a_released_lane() {
+        let mut layout = Layout::new();
+        assert_eq!(layout.allocate(7, "guest"), Ok(LaneAllocation::Allocated));
+        assert_eq!(layout.allocate(7, "renamed"), Ok(LaneAllocation::Reused));
+        assert_eq!(
+            layout.guest(7).map(|endpoint| endpoint.lane),
+            Some(ConsoleLane::guest(0))
+        );
+        assert_eq!(
+            layout.release(7).map(|endpoint| endpoint.lane),
+            Some(ConsoleLane::guest(0))
+        );
+        assert_eq!(layout.allocate(8, "next"), Ok(LaneAllocation::Allocated));
+        assert_eq!(
+            layout.guest(8).map(|endpoint| endpoint.lane),
+            Some(ConsoleLane::guest(0))
+        );
+    }
+
+    #[test]
+    fn allocation_uses_the_smallest_free_lane() {
+        let mut layout = Layout::new();
+        for vm_id in 1..=3 {
+            assert_eq!(
+                layout.allocate(vm_id, "guest"),
+                Ok(LaneAllocation::Allocated)
+            );
+        }
+        assert!(layout.release(2).is_some());
+        assert_eq!(layout.allocate(4, "guest"), Ok(LaneAllocation::Allocated));
+        assert_eq!(
+            layout.guest(4).map(|endpoint| endpoint.lane),
+            Some(ConsoleLane::guest(1))
+        );
+    }
+
+    #[test]
+    fn allocation_reports_a_full_layout() {
+        let mut layout = Layout::new();
+        for vm_id in 0..MAX_GUEST_CONSOLES {
+            assert_eq!(
+                layout.allocate(vm_id, "guest"),
+                Ok(LaneAllocation::Allocated)
+            );
+        }
+        assert_eq!(layout.allocate(MAX_GUEST_CONSOLES, "full"), Err(LayoutFull));
+    }
+}

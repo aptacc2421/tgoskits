@@ -25,7 +25,7 @@ guest configs plus one unusable file, all injected into the guest filesystem by
 the `sh/` asset pipeline. The probe drives the whole browser control plane in one
 boot:
 
-    GET    /api/manifest           -> 200 vms + console + shell panels
+    GET    /api/manifest           -> 200 vms + files + host + console + shell panels
     GET    /api/consoles           -> 200, management console only (no guest yet)
     GET    /api/vms                -> 200 []          (nothing created at startup)
     GET    /api/vms/pool           -> 200             (3 entries + 1 issue, TOML verbatim)
@@ -119,7 +119,6 @@ phys_cpu_ids = [1]
 
 [kernel]
 entry_point = 0x8020_0000
-image_location = "fs"
 kernel_path = "/guest/arceos/arceos-ivc-publisher.bin"
 kernel_load_addr = 0x8020_0000
 dtb_load_addr = 0x8000_0000
@@ -449,12 +448,9 @@ def check_manifest_links(panels):
 def check_manifest():
     """Assert the capability declaration describes this build.
 
-    The case builds `http-axum` and `browser-console` together, so all three
-    panels must be declared, each with the verbs its routes implement. Every
-    declared panel is then checked against the route that backs it, so a
-    declaration that survives while its code path is dropped cannot pass — the
-    same assertions run against builds with fewer features in the
-    `http-control-plane` and `browser-console` cases.
+    The case builds the unified `web` feature with the dashboard enabled, so all
+    five panels are declared. Every declared panel is checked against the route
+    that backs it, so the manifest cannot drift from the router.
     """
     status, body = get("/api/manifest", "GET /api/manifest")
     expect_status("GET /api/manifest", status, 200)
@@ -891,7 +887,7 @@ def phase_lane_limit():
 
 
 def check_dashboard():
-    """The dashboard is served in this build too (`web-ui` plus `fs`).
+    """The dashboard is served in this build too (`web-ui` plus unified `web`).
 
     This case is about the pool, not about the UI, so the check is deliberately
     minimal: the shell resolves and the page it serves is the embedded bundle

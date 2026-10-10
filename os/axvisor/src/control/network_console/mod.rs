@@ -3,7 +3,8 @@
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{
     string::String,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, LazyLock, Mutex},
+    thread,
     time::Duration,
 };
 
@@ -73,8 +74,7 @@ static OUTPUT_HUB: NetworkOutputHub = NetworkOutputHub::new();
 /// Which lane each guest owns. The table is written when a VM is created and
 /// when one is removed, so the browser console set follows the VM registry
 /// instead of a startup snapshot.
-static LAYOUT: LazyLock<NoPreemptMutex<Layout>> =
-    LazyLock::new(|| NoPreemptMutex::new(Layout::new()));
+static LAYOUT: LazyLock<Mutex<Layout>> = LazyLock::new(|| Mutex::new(Layout::new()));
 
 struct NetworkOutputHub {
     lanes: [NetworkOutputLane; CONSOLE_LANE_COUNT],
@@ -104,13 +104,12 @@ impl NetworkOutputHub {
         self.lanes[lane.index()].submit(bytes);
     }
 
-    /// Ends the lane's attached browser session, if it has one.
-    fn close_session(&self, lane: ConsoleLane) {
-        self.lanes[lane.index()].close_session();
-    }
-
     fn is_connected(&self, lane: ConsoleLane) -> bool {
         self.lanes[lane.index()].connected.load(Ordering::Acquire)
+    }
+
+    fn session(&self, lane: ConsoleLane) -> usize {
+        self.lanes[lane.index()].session.load(Ordering::Acquire)
     }
 
     fn begin_session(&self, lane: ConsoleLane) -> Option<usize> {
@@ -149,22 +148,22 @@ impl NetworkOutputLane {
         if bytes.is_empty() {
             return;
         }
-        let submitted = {
+        // Virtual UART drains and the management shell run in task context;
+        // this queue is never submitted from a hard-IRQ handler. The task
+        // mutex therefore preserves FIFO transactions without extending an
+        // IRQ-off critical section.
+        let connected = {
             let mut queue = self.queue.lock_unpoisoned();
-            if !self.connected.load(Ordering::Acquire) {
-                false
-            } else {
-                queue.enqueue(bytes);
-                true
-            }
+            queue.enqueue(bytes);
+            self.connected.load(Ordering::Acquire)
         };
-        if has_consumer {
+        if connected {
             let _result = self.ready.notify();
         }
     }
 
     fn begin_session(&self) -> Option<usize> {
-        let mut queue = self.queue.lock_unpoisoned();
+        let _queue = self.queue.lock_unpoisoned();
         self.connected
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()?;
@@ -174,22 +173,12 @@ impl NetworkOutputLane {
     }
 
     fn end_session(&self, session: usize) {
-        let mut queue = self.queue.lock_unpoisoned();
+        let _queue = self.queue.lock_unpoisoned();
         if self.session.load(Ordering::Acquire) == session {
             self.connected.store(false, Ordering::Release);
-            drop(queue);
+            drop(_queue);
             let _result = self.ready.notify();
         }
-    }
-
-    /// Ends whatever session currently owns this lane.
-    ///
-    /// Reading the session id is atomic and `end_session` ignores an id that is
-    /// no longer the live one, so this cannot end a session installed later on a
-    /// reallocated lane.
-    fn close_session(&self) {
-        let session = self.session.load(Ordering::Acquire);
-        self.end_session(session);
     }
 
     fn take_batch(&self, session: usize) -> Option<NetworkOutputBatch> {
@@ -328,34 +317,46 @@ impl Drop for ActiveSession {
 /// The result says whether this call took a lane or the VM already had one, so
 /// a caller that has to undo the registration gives back only its own lane.
 pub(crate) fn register_guest(vm_id: VMId, name: &str) -> Result<LaneAllocation> {
-    LAYOUT.lock().allocate(vm_id, name).map_err(|LayoutFull| {
-        anyhow::anyhow!(AxVmError::ResourceUnavailable {
-            resource: "browser console lane",
-            detail: format!("all {MAX_GUEST_CONSOLES} guest console lanes are in use"),
+    LAYOUT
+        .lock_unpoisoned()
+        .allocate(vm_id, name)
+        .map_err(|LayoutFull| {
+            anyhow::anyhow!(AxVmError::ResourceUnavailable {
+                resource: "browser console lane",
+                detail: format!("all {MAX_GUEST_CONSOLES} guest console lanes are in use"),
+            })
         })
-    })
 }
 
-fn build_startup_endpoints() -> Vec<Endpoint> {
-    let guests = crate::manager::manager()
-        .list()
-        .into_iter()
-        .map(|vm| (vm.key().vm_id(), vm.snapshot().name))
-        .collect();
-    plan_endpoints(guests)
+/// Removes a guest's browser endpoint after its VM control task has stopped.
+pub(crate) fn release_guest(vm_id: VMId) {
+    let (endpoint, session) = {
+        let mut layout = LAYOUT.lock_unpoisoned();
+        let endpoint = layout.release(vm_id);
+        let session = endpoint
+            .as_ref()
+            .map(|endpoint| OUTPUT_HUB.session(endpoint.lane));
+        (endpoint, session)
+    };
+    if let (Some(endpoint), Some(session)) = (endpoint, session) {
+        // `end_session` checks the session generation. A new VM can reuse the
+        // lane after the layout lock is released without being disconnected by
+        // this stale release.
+        OUTPUT_HUB.end_session(endpoint.lane, session);
+    }
 }
 
 fn endpoints() -> Vec<Endpoint> {
-    LAYOUT.lock().endpoints()
+    LAYOUT.lock_unpoisoned().endpoints()
 }
 
 fn endpoint_for_route(route: &str) -> Option<Endpoint> {
-    LAYOUT.lock().by_route(route)
+    LAYOUT.lock_unpoisoned().by_route(route)
 }
 
 fn lane_name(lane: ConsoleLane) -> String {
     LAYOUT
-        .lock()
+        .lock_unpoisoned()
         .by_lane(lane)
         .map(|endpoint| endpoint.display_name)
         .unwrap_or_else(|| format!("console lane {}", lane.index()))
@@ -436,8 +437,17 @@ pub(crate) fn submit_management_output(bytes: &[u8]) {
 }
 
 /// Copies current guest output into its VM-specific fixed browser queue.
+///
+/// `SerialBackend::try_write` is called after the virtual UART has released
+/// its register lock, from the vCPU task's ordinary polling/MMIO path. It is
+/// not an interrupt callback, so the queue and dynamic lane table may use the
+/// task-context mutex used by the rest of the current Axvisor runtime.
 pub(crate) fn submit_guest_output(vm_id: VMId, bytes: &[u8]) {
-    let Some(lane) = LAYOUT.lock().guest(vm_id).map(|endpoint| endpoint.lane) else {
+    let Some(lane) = LAYOUT
+        .lock_unpoisoned()
+        .guest(vm_id)
+        .map(|endpoint| endpoint.lane)
+    else {
         return;
     };
     OUTPUT_HUB.submit(lane, bytes);
@@ -454,7 +464,7 @@ pub(crate) fn open_browser_console(
     // lane: if it no longer serves this endpoint the session guard ends the
     // session on the way out, so a stale browser transport can never keep a
     // reallocated lane unusable.
-    let current = LAYOUT.lock().by_lane(endpoint.lane);
+    let current = LAYOUT.lock_unpoisoned().by_lane(endpoint.lane);
     if current.is_none_or(|current| current.vm_id != endpoint.vm_id) {
         return Err(anyhow::anyhow!("console endpoint `{route}` was removed"));
     }

@@ -103,9 +103,7 @@ pub fn describe() -> Value {
 fn features() -> Vec<&'static str> {
     let mut enabled = Vec::new();
     for (on, name) in [
-        (cfg!(feature = "fs"), "fs"),
-        (cfg!(feature = "http-axum"), "http-axum"),
-        (cfg!(feature = "browser-console"), "browser-console"),
+        (cfg!(feature = "web"), "web"),
         (cfg!(feature = "web-ui"), "web-ui"),
         (cfg!(feature = "vcpu-perf-load"), "vcpu-perf-load"),
     ] {

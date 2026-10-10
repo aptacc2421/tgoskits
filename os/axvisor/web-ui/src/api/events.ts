@@ -1,4 +1,4 @@
-//! Live VM registry feed (the `vms` panel's `events` link, `browser-console` builds).
+//! Live VM registry feed (the `vms` panel's `events` link in `web` builds).
 //!
 //! The frames only say *that* something changed; `GET /api/vms` stays
 //! authoritative. The feed therefore keeps a list that is replaced wholesale by

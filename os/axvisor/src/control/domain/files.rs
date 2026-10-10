@@ -40,13 +40,14 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use ax_std::StdError;
 use ax_std::fs::OpenOptions;
 use ax_std::io::Error as IoError;
 use ax_std::io::Write;
-use ax_std::os::arceos::sync::NoPreemptMutex;
+
+use crate::sync::MutexExt;
 
 use super::pool;
 
@@ -98,6 +99,7 @@ pub struct SessionView {
 /// The variants name the *kind* of failure, not the status code: mapping a
 /// failure to HTTP belongs to the transport layer, which is the layer that
 /// speaks HTTP.
+#[derive(Debug)]
 pub enum FileError {
     /// The session id is not a name this plane will turn into a path.
     InvalidId(String),
@@ -124,7 +126,7 @@ pub enum FileError {
     Unwritable(String),
     /// The guest filesystem is out of space. Recoverable: the bytes already
     /// written stay valid, so the same session can continue after cleanup.
-    StorageFull(String),
+    StorageFull { message: String, offset: usize },
 }
 
 /// Where one session stands.
@@ -149,6 +151,7 @@ impl State {
     }
 }
 
+#[derive(Clone)]
 struct Session {
     directory: String,
     total: usize,
@@ -157,8 +160,13 @@ struct Session {
     state: State,
 }
 
-static SESSIONS: LazyLock<NoPreemptMutex<BTreeMap<String, Session>>> =
-    LazyLock::new(|| NoPreemptMutex::new(BTreeMap::new()));
+static SESSIONS: LazyLock<Mutex<BTreeMap<String, Session>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+/// Serializes filesystem operations that must observe one coherent session
+/// state. The session table is protected separately so helpers can still take
+/// short snapshots, while this guard closes the check-then-rename and
+/// check-then-append races between concurrent HTTP requests.
+static OPERATION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Opens a session, or picks up the one an earlier attempt left behind.
 ///
@@ -174,6 +182,7 @@ static SESSIONS: LazyLock<NoPreemptMutex<BTreeMap<String, Session>>> =
 /// Silently re-pointing it would write the new folder's bytes into the old
 /// folder's staging file.
 pub fn open(id: &str, directory: &str, total: usize) -> Result<SessionView, FileError> {
+    let _operation = OPERATION_LOCK.lock_unpoisoned();
     let id = checked_id(id)?;
     let directory = checked_directory(directory)?;
     if total > FILE_LIMIT {
@@ -193,12 +202,22 @@ pub fn open(id: &str, directory: &str, total: usize) -> Result<SessionView, File
     // answer with this folder while every later chunk is written into the one
     // the session first named.
     let staged_under = {
-        let sessions = SESSIONS.lock();
-        sessions
-            .get(id)
-            .map(|session| (session.directory.clone(), session.total))
+        let sessions = SESSIONS.lock_unpoisoned();
+        sessions.get(id).map(|session| {
+            (
+                session.directory.clone(),
+                session.total,
+                session.state.clone(),
+            )
+        })
     };
-    if let Some((staged_in, declared)) = staged_under {
+    if let Some((staged_in, declared, state)) = staged_under {
+        if matches!(&state, State::Placed | State::Placing) {
+            return Err(FileError::Conflict {
+                reason: format!("{id} is {}", state.name()),
+                offset: declared,
+            });
+        }
         if staged_in != directory {
             return Err(FileError::Conflict {
                 reason: format!("{id} is already staged in `{staged_in}`, not `{directory}`"),
@@ -226,7 +245,7 @@ pub fn open(id: &str, directory: &str, total: usize) -> Result<SessionView, File
         .map_err(|error| map_std_error(&error))?;
 
     let written = disk_len(&path);
-    let mut sessions = SESSIONS.lock();
+    let mut sessions = SESSIONS.lock_unpoisoned();
     let session = sessions.entry(id.to_string()).or_insert_with(|| Session {
         directory: directory.clone(),
         total,
@@ -251,6 +270,7 @@ pub fn open(id: &str, directory: &str, total: usize) -> Result<SessionView, File
 /// client that wants "name (2)" asks for that name explicitly, so the interface
 /// chooses it and the plane never invents one.
 pub fn make_directory(parent: &str, name: &str) -> Result<String, FileError> {
+    let _operation = OPERATION_LOCK.lock_unpoisoned();
     let parent = checked_directory(parent)?;
     let name = checked_directory_name(name)?;
     let path = format!("{parent}/{name}");
@@ -270,19 +290,20 @@ pub fn make_directory(parent: &str, name: &str) -> Result<String, FileError> {
 /// longer staged, and a client that asks again should not be told the file it
 /// finished is empty.
 pub fn resume(id: &str) -> Result<usize, FileError> {
+    let _operation = OPERATION_LOCK.lock_unpoisoned();
     let id = checked_id(id)?;
-    let (directory, state) = {
-        let sessions = SESSIONS.lock();
+    let (directory, total, state) = {
+        let sessions = SESSIONS.lock_unpoisoned();
         let session = sessions.get(id).ok_or_else(|| unknown(id))?;
-        (session.directory.clone(), session.state.clone())
+        (
+            session.directory.clone(),
+            session.total,
+            session.state.clone(),
+        )
     };
-    let written = disk_len(&staging_path(&directory, id));
     match state {
-        State::Placed => Err(FileError::Conflict {
-            reason: format!("{id} is placed"),
-            offset: written,
-        }),
-        _ => Ok(written),
+        State::Placed => Ok(total),
+        _ => Ok(disk_len(&staging_path(&directory, id))),
     }
 }
 
@@ -299,10 +320,16 @@ pub fn resume(id: &str) -> Result<usize, FileError> {
 /// fresh file next to it, leaving an orphan behind while reporting the object
 /// as still transferring. A failed session is the exception: its bytes stay
 /// valid and the caller resumes it after making room.
-pub fn send(id: &str, start: usize, bytes: &[u8]) -> Result<usize, FileError> {
+pub fn send(
+    id: &str,
+    start: usize,
+    declared_total: Option<usize>,
+    bytes: &[u8],
+) -> Result<usize, FileError> {
+    let _operation = OPERATION_LOCK.lock_unpoisoned();
     let id = checked_id(id)?;
     let (directory, total, state) = {
-        let sessions = SESSIONS.lock();
+        let sessions = SESSIONS.lock_unpoisoned();
         let session = sessions.get(id).ok_or_else(|| unknown(id))?;
         (
             session.directory.clone(),
@@ -325,7 +352,20 @@ pub fn send(id: &str, start: usize, bytes: &[u8]) -> Result<usize, FileError> {
             offset: written,
         });
     }
-    let end = written + bytes.len();
+    if let Some(declared_total) = declared_total
+        && declared_total != total
+    {
+        return Err(FileError::Conflict {
+            reason: format!("range declares {declared_total} bytes but session is {total}"),
+            offset: written,
+        });
+    }
+    let end = written
+        .checked_add(bytes.len())
+        .ok_or(FileError::TooLarge {
+            total: usize::MAX,
+            limit: FILE_LIMIT,
+        })?;
     if end > FILE_LIMIT {
         return Err(FileError::TooLarge {
             total: end,
@@ -348,10 +388,10 @@ pub fn send(id: &str, start: usize, bytes: &[u8]) -> Result<usize, FileError> {
         .map_err(|error| map_std_error(&error))?;
     if let Err(error) = file.write_all(bytes) {
         record_failure(id, &error.to_string());
-        return Err(map_io_error(&error));
+        return Err(map_io_error(&error, written));
     }
 
-    let mut sessions = SESSIONS.lock();
+    let mut sessions = SESSIONS.lock_unpoisoned();
     if let Some(session) = sessions.get_mut(id) {
         session.state = if end >= session.total {
             State::Uploaded
@@ -369,10 +409,11 @@ pub fn send(id: &str, start: usize, bytes: &[u8]) -> Result<usize, FileError> {
 /// would change that guest's contents behind its back, so a conflict is the only
 /// honest answer and the client decides what to do about it.
 pub fn place(id: &str, name: &str) -> Result<SessionView, FileError> {
+    let _operation = OPERATION_LOCK.lock_unpoisoned();
     let id = checked_id(id)?;
     let name = checked_name(name)?;
     let (directory, total, state) = {
-        let sessions = SESSIONS.lock();
+        let sessions = SESSIONS.lock_unpoisoned();
         let session = sessions.get(id).ok_or_else(|| unknown(id))?;
         (
             session.directory.clone(),
@@ -426,7 +467,7 @@ pub fn place(id: &str, name: &str) -> Result<SessionView, FileError> {
     }
 
     {
-        let mut sessions = SESSIONS.lock();
+        let mut sessions = SESSIONS.lock_unpoisoned();
         if let Some(session) = sessions.get_mut(id) {
             session.state = State::Placing;
             session.name = Some(name);
@@ -437,7 +478,7 @@ pub fn place(id: &str, name: &str) -> Result<SessionView, FileError> {
         return Err(map_std_error(&error));
     }
 
-    let mut sessions = SESSIONS.lock();
+    let mut sessions = SESSIONS.lock_unpoisoned();
     let session = sessions.get_mut(id).ok_or_else(|| unknown(id))?;
     session.state = State::Placed;
     session.path = Some(to);
@@ -450,9 +491,10 @@ pub fn place(id: &str, name: &str) -> Result<SessionView, FileError> {
 /// the file a config points at, and deleting them here would be a deletion the
 /// operator never asked for.
 pub fn drop(id: &str) -> Result<(), FileError> {
+    let _operation = OPERATION_LOCK.lock_unpoisoned();
     let id = checked_id(id)?;
     let (directory, state) = {
-        let sessions = SESSIONS.lock();
+        let sessions = SESSIONS.lock_unpoisoned();
         let session = sessions.get(id).ok_or_else(|| unknown(id))?;
         (session.directory.clone(), session.state.clone())
     };
@@ -471,7 +513,7 @@ pub fn drop(id: &str) -> Result<(), FileError> {
             return Err(map_std_error(&error));
         }
     }
-    SESSIONS.lock().remove(id);
+    SESSIONS.lock_unpoisoned().remove(id);
     Ok(())
 }
 
@@ -482,10 +524,15 @@ pub fn drop(id: &str) -> Result<(), FileError> {
 /// must not appear there. The client that is uploading already knows its own
 /// session from the offset each chunk returns.
 pub fn list() -> Vec<SessionView> {
-    let sessions = SESSIONS.lock();
-    sessions
+    let _operation = OPERATION_LOCK.lock_unpoisoned();
+    let sessions: Vec<(String, Session)> = SESSIONS
+        .lock_unpoisoned()
         .iter()
         .filter(|(_, session)| !matches!(session.state, State::Uploading))
+        .map(|(id, session)| (id.clone(), session.clone()))
+        .collect();
+    sessions
+        .iter()
         .map(|(id, session)| {
             let written = match session.state {
                 State::Placed => session.total,
@@ -514,7 +561,7 @@ fn view(id: &str, session: &Session, written: usize) -> SessionView {
 }
 
 fn record_failure(id: &str, detail: &str) {
-    let mut sessions = SESSIONS.lock();
+    let mut sessions = SESSIONS.lock_unpoisoned();
     if let Some(session) = sessions.get_mut(id) {
         session.state = State::Failed(detail.to_string());
     }
@@ -612,9 +659,12 @@ fn checked_name(name: &str) -> Result<String, FileError> {
 /// is the primary signal; the message is a fallback, because the guest
 /// filesystem stack does not guarantee how the out-of-space condition is
 /// spelled once it has travelled through it.
-fn map_io_error(error: &IoError) -> FileError {
+fn map_io_error(error: &IoError, offset: usize) -> FileError {
     if *error == IoError::StorageFull {
-        FileError::StorageFull(error.to_string())
+        FileError::StorageFull {
+            message: error.to_string(),
+            offset,
+        }
     } else {
         FileError::Unwritable(error.to_string())
     }
@@ -626,7 +676,7 @@ fn map_io_error(error: &IoError) -> FileError {
 /// arrives one level deeper here than it does from a write.
 fn map_std_error(error: &StdError) -> FileError {
     match error {
-        StdError::Io(io) => map_io_error(io),
+        StdError::Io(io) => map_io_error(io, 0),
         other => FileError::Unwritable(other.to_string()),
     }
 }

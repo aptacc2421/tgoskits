@@ -4,8 +4,7 @@
 //! the one the registry names as its terminal, which is a registry fact: how a
 //! panel renders is decided by the injected registry, and which panels exist is
 //! decided by the backend manifest. That is what makes the navigation follow the
-//! build — a `http-axum`-only hypervisor advertises VM management, a build with
-//! `browser-console` adds the terminals — without a frontend change.
+//! build — a `web` advertises the available management and console panels without a frontend change.
 //!
 //! The shell reads the manifest once and turns it into [`Capabilities`]: the
 //! panels below are handed accessors, never paths. The feed URL is looked up the

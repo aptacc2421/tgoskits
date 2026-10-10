@@ -73,7 +73,7 @@ shell_cmd = "ls -l /k"
 success_regex = ["(?m)^-r\\S+\\s+\\d+\\s+/k\\s*$"]
 
 [[shell_check_steps]]
-shell_cmd = """echo 'kernel = {entry_point = 0x80200000, image_location = "fs", kernel_path = "/k", kernel_load_addr = 0x80200000, dtb_load_addr = 0x80000000, memory_regions = [[0x80000000, 0x40000000, 0x7, 1]]}' > /pool/boot.toml"""
+shell_cmd = """echo 'kernel = {entry_point = 0x80200000, kernel_path = "/k", kernel_load_addr = 0x80200000, dtb_load_addr = 0x80000000, memory_regions = [[0x80000000, 0x40000000, 0x7, 1]]}' > /pool/boot.toml"""
 
 # A pool entry is only a candidate: the listing shows it while the VM registry
 # is still empty.

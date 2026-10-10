@@ -169,20 +169,6 @@ fn invalid_options(request: &VirtualDeviceRequest, detail: &str) -> ConfiguredDe
     }
 }
 
-/// Whether the guest filesystem does not have `path`.
-///
-/// Only "not found" counts. A file that is there but cannot be read is a
-/// different failure and reaches the backend's own error instead.
-#[cfg(feature = "fs")]
-fn missing_guest_file(path: &str) -> bool {
-    matches!(
-        ax_api::fs::ax_metadata(path),
-        Err(ax_api::ApiError::Vfs(
-            ax_api::modules::ax_fs_ng::VfsError::NotFound
-        ))
-    )
-}
-
 fn parse_capacity(request: &VirtualDeviceRequest) -> Result<Option<u64>, &'static str> {
     let capacity = request.options.get("capacity");
     let legacy_sectors = request.options.get("capacity_sectors");
@@ -470,7 +456,6 @@ enum VirtioBlkBackend {
 
 impl VirtioBlkBackend {
     fn open(
-        request: &VirtualDeviceRequest,
         config: &BackendConfig,
         capacity_bytes: Option<u64>,
         port: Option<crate::services::DeviceWorkPort>,
@@ -478,13 +463,7 @@ impl VirtioBlkBackend {
         match config {
             BackendConfig::RamDisk => {
                 let capacity = capacity_bytes.unwrap_or(DEFAULT_CAPACITY_BYTES);
-                RamDiskBackend::new(capacity)
-                    .map(Self::RamDisk)
-                    .map_err(|error| ConfiguredDeviceError::Instantiation {
-                        device: request.id.clone(),
-                        model: request.model.clone(),
-                        detail: format!("failed to initialize backing storage: {error}"),
-                    })
+                Ok(Self::RamDisk(RamDiskBackend::new(capacity)?))
             }
             BackendConfig::File { path, filesystem } => {
                 let port = port.ok_or_else(|| {
@@ -514,7 +493,6 @@ impl VirtioBlkBackend {
 }
 
 fn open_file_backend(
-    request: &VirtualDeviceRequest,
     path: &str,
     configured_capacity: Option<u64>,
     filesystem: FilesystemFormat,
@@ -524,30 +502,18 @@ fn open_file_backend(
     options.read(true);
     options.write(true);
     let file = ax_api::fs::ax_open_file(path, &options).map_err(|error| {
-        // Opening is a guest-filesystem fault, not a wrong request: the file
-        // was just seen there, so this reads as server-side state and stays a
-        // generic instantiation failure.
-        ConfiguredDeviceError::Instantiation {
-            device: request.id.clone(),
-            model: request.model.clone(),
-            detail: format!(
-                "failed to initialize backing storage: failed to open `{path}`: {error}"
-            ),
-        }
+        invalid_device_config(
+            "open virtio-blk backing file",
+            &format!("failed to open `{path}`: {error}"),
+        )
     })?;
     let mut reader = AxFileReader { file: &file };
     let capacity =
         inspect_file_image(&mut reader, configured_capacity, filesystem).map_err(|error| {
-            // The file is there but is not what its options declare it to be
-            // (a kernel handed to a rootfs slot, a truncated image): that is a
-            // mistake in the request, so it is answered as one, with the
-            // validation's own words.
-            ConfiguredDeviceError::UnusableBackingFile {
-                device: request.id.clone(),
-                model: request.model.clone(),
-                path: path.to_string(),
-                detail: format!("{error}"),
-            }
+            invalid_device_config(
+                "prepare virtio-blk backing file",
+                &format!("failed to prepare `{path}`: {error}"),
+            )
         })?;
     FileBackend::new(file, capacity / SECTOR_SIZE as u64, port).map(VirtioBlkBackend::File)
 }

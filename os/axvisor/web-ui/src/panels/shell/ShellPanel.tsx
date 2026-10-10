@@ -16,7 +16,7 @@ import { TerminalView } from '@/components/Terminal'
  *
  * It is a lane *name*, not a path: the path comes from this panel's declared
  * `stream` link. The backend constant is `layout::MANAGEMENT_ROUTE`
- * (`network_console/layout.rs`); a future revision takes the name from the lane
+ * (`control/network_console/layout.rs`); a future revision takes the name from the lane
  * table instead of repeating it here, which needs a discriminator in that table
  * to tell a management lane from a guest one.
  */

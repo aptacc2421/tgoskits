@@ -1,4 +1,4 @@
-//! axum-based management HTTP server (`http-axum` feature).
+//! axum-based management HTTP server (`web` feature).
 //!
 //! Runs an axum `Router` on a tokio current-thread runtime. The router is
 //! handed in already assembled (see [`crate::control::serve`]), so this module
@@ -17,8 +17,8 @@
 //! # Lifecycle semantics and known limits
 //!
 //! Management commands use the single lifecycle owner and `VmOperation`.
-//! `pause` and `stop` await acceptance; their terminal snapshots are published
-//! after participant and device quiescence. `start` and `resume` await owner
+//! `pause` and `stop` await the lifecycle operation; their terminal snapshots
+//! are published after participant and device quiescence. `start` and `resume` await owner
 //! initialization/restoration, open admission and wake; real guest progress
 //! remains observable through the detail endpoint's live run counters.
 //!
@@ -28,19 +28,15 @@
 //! already have expired when the vCPU resumes. A passthrough device without a
 //! supported DMA quiescence contract cannot complete the affected teardown.
 
-#[cfg(feature = "browser-console")]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
 use axum::Router;
 
-#[cfg(feature = "browser-console")]
 static LISTENING: AtomicBool = AtomicBool::new(false);
 
-#[cfg(feature = "browser-console")]
 struct ListeningGuard;
 
-#[cfg(feature = "browser-console")]
 impl Drop for ListeningGuard {
     fn drop(&mut self) {
         LISTENING.store(false, Ordering::Release);
@@ -49,7 +45,7 @@ impl Drop for ListeningGuard {
 
 /// Bind address for the management HTTP server.
 ///
-/// Defaults to loopback (`127.0.0.1:8080`) so a stock `http-axum` build is not
+/// Defaults to loopback (`127.0.0.1:8080`) so a stock `web` build is not
 /// reachable from the management network. Test/dev flows that need QEMU
 /// hostfwd to reach the in-guest listener must opt in to all interfaces by
 /// setting `[env] AXVM_HTTP_BIND = "0.0.0.0:8080"` in their build config.
@@ -72,9 +68,7 @@ pub fn serve(router: Router) -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind(bind)
             .await
             .with_context(|| format!("failed to bind Axvisor HTTP server at {bind}"))?;
-        #[cfg(feature = "browser-console")]
         LISTENING.store(true, Ordering::Release);
-        #[cfg(feature = "browser-console")]
         let _listening_guard = ListeningGuard;
         info!("Axvisor HTTP server (axum) listening on {bind}");
         axum::serve(listener, router)
@@ -83,7 +77,6 @@ pub fn serve(router: Router) -> anyhow::Result<()> {
     })
 }
 
-#[cfg(feature = "browser-console")]
 pub(crate) fn is_listening() -> bool {
     LISTENING.load(Ordering::Acquire)
 }

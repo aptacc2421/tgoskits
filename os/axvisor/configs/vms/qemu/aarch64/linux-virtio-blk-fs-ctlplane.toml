@@ -3,7 +3,7 @@
 # network needs, kept `Ready` by `no-auto-start`.
 #
 # The guest kernel and the guest root filesystem are files in the hypervisor's
-# own filesystem (`image_location = "fs"`), so nothing about this guest is baked
+# own filesystem (a filesystem-backed `kernel_path`), so nothing about this guest is baked
 # into the hypervisor binary: `kernel_path` is where the hypervisor reads the
 # kernel and the `virtio-blk` device below is where the guest roots from.
 #
@@ -30,7 +30,6 @@ phys_cpu_ids = [1]
 # The entry point of the kernel image.
 entry_point = 0x8020_0000
 # Guest images are read from the guest filesystem; this is the only source.
-image_location = "fs"
 # The path of the kernel image inside the hypervisor filesystem.
 kernel_path = "/guest/linux/linux-qemu"
 # The load address of the kernel image.

@@ -1,6 +1,6 @@
 //! Board-hosted HTTP/WebSocket gateway for the current network console lanes.
 //!
-//! The console set is a runtime registry (see [`crate::network_console`]): a VM
+//! The console set is a runtime registry (see [`crate::control::network_console`]): a VM
 //! gets its lane when it is created and loses it when it is removed, so the
 //! lane table changes while the hypervisor runs and a route that answered a
 //! moment ago can be gone.
@@ -11,7 +11,7 @@
 //! them; here they are just two handlers plus the routes that mount them. The
 //! page a human actually looks at is the embedded dashboard
 //! (`crate::control::web`, the `web-ui` feature), which consumes this gateway; a
-//! build with `browser-console` but without `web-ui` is a headless gateway
+//! build with `web` but without `web-ui` is a headless gateway
 //! whose `/` stays a 404.
 
 use anyhow::{Context, Result};
@@ -42,7 +42,7 @@ pub(crate) fn console_stream_route() -> MethodRouter {
 
 async fn console_descriptions() -> Json<Vec<Value>> {
     Json(
-        crate::network_console::console_descriptions()
+        crate::control::network_console::console_descriptions()
             .into_iter()
             .map(|console| {
                 json!({
@@ -61,11 +61,11 @@ async fn upgrade_console(
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
     super::validate_browser_origin(&headers)?;
-    if !crate::network_console::has_console_route(&endpoint) {
+    if !crate::control::network_console::has_console_route(&endpoint) {
         return Err(StatusCode::NOT_FOUND);
     }
-    let (input, output) =
-        crate::network_console::open_browser_console(&endpoint).map_err(|error| {
+    let (input, output) = crate::control::network_console::open_browser_console(&endpoint)
+        .map_err(|error| {
             warn!("{endpoint} browser console could not open: {error}");
             StatusCode::CONFLICT
         })?;
@@ -83,8 +83,8 @@ async fn upgrade_console(
 
 async fn bridge_console(
     browser: WebSocket,
-    mut console_input: crate::network_console::BrowserConsoleInput,
-    console_output: crate::network_console::BrowserConsoleOutput,
+    mut console_input: crate::control::network_console::BrowserConsoleInput,
+    console_output: crate::control::network_console::BrowserConsoleOutput,
 ) -> Result<()> {
     let (browser_sender, mut browser_receiver) = browser.split();
     let greeting = Message::Binary(console_input.greeting().into_bytes().into());
@@ -92,7 +92,7 @@ async fn bridge_console(
     std::thread::Builder::new()
         .name("browser-console-output".into())
         .spawn(move || {
-            crate::network_console::pin_current_task();
+            crate::control::network_console::pin_current_task();
             if let Err(error) = run_browser_output(browser_sender, console_output, greeting) {
                 warn!("browser console output stopped: {error:#}");
             }
@@ -107,7 +107,7 @@ async fn bridge_console(
 
 async fn read_browser_input(
     browser_receiver: &mut futures_util::stream::SplitStream<WebSocket>,
-    console_input: &mut crate::network_console::BrowserConsoleInput,
+    console_input: &mut crate::control::network_console::BrowserConsoleInput,
 ) -> Result<()> {
     while let Some(message) = browser_receiver.next().await {
         let keep_open = match message.context("failed to read the browser console")? {
@@ -125,7 +125,7 @@ async fn read_browser_input(
 
 fn run_browser_output(
     mut browser_sender: futures_util::stream::SplitSink<WebSocket, Message>,
-    mut console_output: crate::network_console::BrowserConsoleOutput,
+    mut console_output: crate::control::network_console::BrowserConsoleOutput,
     greeting: Message,
 ) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()

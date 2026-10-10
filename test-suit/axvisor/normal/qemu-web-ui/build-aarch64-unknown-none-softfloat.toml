@@ -2,12 +2,12 @@
 #
 # `web-ui` serves the React dashboard from assets embedded in the hypervisor at
 # build time (no rootfs read for the assets, cargo never invokes npm), and
-# `browser-console` adds the terminal gateway the dashboard's guest and
+# unified `web` adds the terminal gateway the dashboard's guest and
 # management panels drive. `no-auto-start` keeps the default VM
 # (`linux-virtio-blk-fs.toml` in the shared config library) in `Ready` (registered but not booted), so the
 # probe can assert the lane table and then drive start/close/create itself.
 #
-# `fs` + `ax-driver/nvme` are what make the guest possible at all: the guest
+# The filesystem-backed kernel and disk paths plus `ax-driver/nvme` make the guest possible: the guest
 # kernel, and the ext4 image the guest roots from, are files in the hypervisor's
 # own filesystem on the QEMU NVMe disk. Nothing is embedded in the hypervisor
 # binary, so a case that wants a different guest only has to place files.
@@ -18,9 +18,8 @@
 # the check that runs this case.
 features = [
     "web-ui",
-    "browser-console",
+    "web",
     "ax-driver/nvme",
-    "fs",
     "no-auto-start",
 ]
 log = "Info"

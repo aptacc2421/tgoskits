@@ -28,11 +28,6 @@
 //! shell needs it and must not name a panel kind to get it; the host panel
 //! refreshes the same object through its own route instead.
 //!
-//! The response also carries a `host` object, the machine facts of
-//! [`crate::control::domain::host`]. It rides along with the panels because the
-//! shell needs it and must not name a panel kind to get it; the host panel
-//! refreshes the same object through its own route instead.
-//!
 //! VM links are not narrowed per VM status — `GET /api/vms/{id}` reports the
 //! status and the control plane rejects a transition the state machine does not
 //! allow, so a panel decides which controls to offer from the status it already

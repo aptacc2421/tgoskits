@@ -127,7 +127,7 @@ export default function VmsPanel({
   }, [api, link])
 
   const refreshPool = useCallback(async () => {
-    // A build without the `fs` feature declares no pool operation at all: that
+    // An API-only build may omit filesystem pool operations entirely: that
     // is a property of this hypervisor, not a failure of a request, so it is
     // asked for by name and no request is sent when it is absent.
     const url = link.maybeUrl('pool')
@@ -646,7 +646,7 @@ export default function VmsPanel({
             className="h-56 w-full rounded-md border bg-transparent p-2 font-mono text-xs"
             value={createToml}
             spellCheck={false}
-            placeholder={'[base]\nid = 9\nname = "guest"\n\n[kernel]\nimage_location = "fs"\n...'}
+            placeholder={'[base]\nid = 9\nname = "guest"\n\n[kernel]\nkernel_path = "/guest/kernel"\n...'}
             onChange={(event) => setCreateToml(event.target.value)}
           />
           {pool && (

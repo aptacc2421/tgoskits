@@ -55,7 +55,7 @@ export interface PanelLink {
   url(name: string, params?: LinkParams): string
   /**
    * URL of an operation this build may legitimately lack, `null` when absent.
-   * Use it for the optional halves of a resource (`fs`-only operations).
+   * Use it for optional halves of a resource, such as filesystem operations.
    */
   maybeUrl(name: string, params?: LinkParams): string | null
   /** Whether this build declares the operation at all. */
@@ -325,7 +325,7 @@ export interface PoolIssue {
   detail: string
 }
 
-/** `GET /api/vms/pool` (`fs` builds only). */
+/** `GET /api/vms/pool` (filesystem-enabled web builds only). */
 export interface PoolInfo {
   directory: string
   /** Every directory the pool reads, in precedence order. */
@@ -340,7 +340,7 @@ export interface BrowseDirectory {
   path: string
 }
 
-/** `GET /api/vms/browse?path=...` (`fs` builds only). */
+/** `GET /api/vms/browse?path=...` (filesystem-enabled web builds only). */
 export interface BrowseInfo {
   path: string
   /** Parent directory, or `null` at the filesystem root. */
@@ -399,7 +399,7 @@ export interface FileSession {
   detail: string | null
 }
 
-/** `GET /api/files` (`fs` builds only). */
+/** `GET /api/files` (filesystem-enabled web builds only). */
 export interface FilesInfo {
   files: FileSession[]
 }

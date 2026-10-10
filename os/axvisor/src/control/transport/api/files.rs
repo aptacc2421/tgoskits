@@ -174,7 +174,7 @@ pub async fn send_chunk(Path(id): Path<String>, request: Request) -> Response {
         ));
     }
 
-    match files::send(&id, start, &chunk) {
+    match files::send(&id, start, total, &chunk) {
         Ok(offset) => Response::builder()
             .status(StatusCode::OK)
             .header(UPLOAD_OFFSET, offset.to_string())
@@ -297,10 +297,10 @@ fn error_response(id: &str, error: FileError) -> Response {
         ),
         FileError::Conflict { reason, offset } => (StatusCode::CONFLICT, reason, offset),
         FileError::Unwritable(message) => (StatusCode::INTERNAL_SERVER_ERROR, message, 0),
-        FileError::StorageFull(message) => (
+        FileError::StorageFull { message, offset } => (
             StatusCode::INSUFFICIENT_STORAGE,
             format!("the guest filesystem is full: {message}"),
-            0,
+            offset,
         ),
     };
 
@@ -316,7 +316,10 @@ fn error_response(id: &str, error: FileError) -> Response {
         Json(json!({ "error": reason, "offset": offset, "subject": id })),
     )
         .into_response();
-    if status == StatusCode::CONFLICT {
+    if matches!(
+        status,
+        StatusCode::CONFLICT | StatusCode::INSUFFICIENT_STORAGE
+    ) {
         let value = header::HeaderValue::from_str(&offset.to_string())
             .unwrap_or_else(|_| header::HeaderValue::from_static("0"));
         response.headers_mut().insert(UPLOAD_OFFSET, value);
