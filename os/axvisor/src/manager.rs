@@ -135,20 +135,35 @@ impl AxvmManager {
                     // entry before returning, otherwise releasing its lane
                     // would let a new VM claim the same route while the old
                     // numeric id is still reserved.
-                    if let Some(vm) = self.get(vm_id) {
-                        if let Ok(destroy) = vm.destroy() {
-                            if let Err(cleanup_error) = destroy.wait() {
+                    let cleanup_finished = match self.get(vm_id) {
+                        None => true,
+                        Some(vm) => match vm.destroy() {
+                            Ok(destroy) => match destroy.wait() {
+                                Ok(()) => match vm.join_control_task() {
+                                    Ok(()) => true,
+                                    Err(cleanup_error) => {
+                                        warn!(
+                                            "VM[{vm_id}] creation failed and control task did not join: {cleanup_error:#}"
+                                        );
+                                        false
+                                    }
+                                },
+                                Err(cleanup_error) => {
+                                    warn!(
+                                        "VM[{vm_id}] creation failed and cleanup did not finish: {cleanup_error:#}"
+                                    );
+                                    false
+                                }
+                            },
+                            Err(cleanup_error) => {
                                 warn!(
-                                    "VM[{vm_id}] creation failed and cleanup did not finish: {cleanup_error:#}"
+                                    "VM[{vm_id}] creation failed and cleanup could not start: {cleanup_error:#}"
                                 );
-                            } else if let Err(cleanup_error) = vm.join_control_task() {
-                                warn!(
-                                    "VM[{vm_id}] creation failed and control task did not join: {cleanup_error:#}"
-                                );
+                                false
                             }
-                        }
-                    }
-                    if self.get(vm_id).is_none() {
+                        },
+                    };
+                    if cleanup_finished {
                         crate::control::network_console::release_guest(vm_id);
                     }
                 }

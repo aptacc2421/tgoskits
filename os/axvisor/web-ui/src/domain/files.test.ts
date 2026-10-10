@@ -45,7 +45,15 @@ function transfer(id: string, patch: Partial<Transfer> = {}): Transfer {
 }
 
 function file(name: string, size: number, lastModified = 1000): File {
-  return new File([new Uint8Array(size)], name, { lastModified })
+  // Node 18 exposes Blob but not the browser's File constructor. The transfer
+  // machine only needs File's metadata and Blob's slicing behaviour, so keep
+  // the unit test independent of the runner's DOM globals.
+  const value = new Blob([new Uint8Array(size)])
+  Object.defineProperties(value, {
+    lastModified: { value: lastModified },
+    name: { value: name },
+  })
+  return value as File
 }
 
 /** A link that only has to be distinguishable, never to be a real path. */

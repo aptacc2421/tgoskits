@@ -73,7 +73,7 @@ guest UEFI firmware 的路径属于 VM config（例如 `boot_protocol = "uefi"` 
 
 ### 1.4 网页管理台
 
-带管理台的运行需要先生成前端产物，再用端口转发把内核的监听地址暴露到宿主机。内核读取 `web-ui/dist`，而 Cargo 不调用 npm，产物缺失时内核构建会直接失败，因此产物构建必须排在二进制构建之前。
+带管理台的运行使用仓库中提交的 `web-ui/dist` 前端产物，再用端口转发把内核的监听地址暴露到宿主机。内核读取 `web-ui/dist`，而 Cargo 不调用 npm；修改前端源码时仍须先重新生成并提交产物，产物缺失时内核构建会直接失败。
 
 ```bash
 cd os/axvisor/web-ui
