@@ -12,6 +12,7 @@ use crate::context::{
 
 pub mod board;
 pub mod build;
+mod bundle;
 pub mod config;
 pub mod rootfs;
 pub mod test;
@@ -52,7 +53,7 @@ pub struct ArgsBuild {
     #[arg(long)]
     pub debug: bool,
 
-    #[arg(long)]
+    #[arg(long = "vmconfig", alias = "vmconfigs")]
     pub vmconfigs: Vec<PathBuf>,
 }
 
@@ -151,9 +152,10 @@ pub struct ArgsTestQemu {
         short = 'c',
         long = "test-case",
         value_name = "CASE",
-        help = "Run only one Axvisor QEMU test case"
+        value_delimiter = ',',
+        help = "Run selected Axvisor QEMU cases; repeat or separate with commas"
     )]
-    pub test_case: Option<String>,
+    pub test_case: Vec<String>,
     #[arg(short = 'l', long, help = "List discovered Axvisor QEMU test cases")]
     pub list: bool,
 }
@@ -184,16 +186,18 @@ pub struct ArgsTestBoard {
         short = 'c',
         long = "test-case",
         value_name = "CASE",
-        help = "Run only one Axvisor board test case"
+        value_delimiter = ',',
+        help = "Run one or more Axvisor board test cases"
     )]
-    pub test_case: Option<String>,
+    pub test_case: Vec<String>,
 
     #[arg(
         long,
         value_name = "BOARD",
-        help = "Run all Axvisor board test cases for one board"
+        value_delimiter = ',',
+        help = "Run all Axvisor board test cases for one or more boards"
     )]
-    pub board: Option<String>,
+    pub board: Vec<String>,
 
     #[arg(short = 'b', long = "board-type", value_name = "BOARD_TYPE")]
     pub board_type: Option<String>,
@@ -275,12 +279,16 @@ impl Axvisor {
     }
 
     async fn board(&mut self, args: ArgsBoard) -> anyhow::Result<()> {
-        let request =
+        let mut request =
             self.prepare_request((&args.build).into(), None, None, SnapshotPersistence::Store)?;
         self.app.set_debug_mode(request.debug)?;
         let cargo = build::load_cargo_config(&request, self.app.workspace_context())?;
-        let board_config = self
+        let mut board_config = self
             .load_board_config(&cargo, args.board_config.as_deref())
+            .await?;
+        // Board-only handoffs may resolve guest images to paths published by
+        // the board root filesystem (for example `/linux/...`).
+        self.prepare_guest_payload(&mut request, &mut board_config.boot, true)
             .await?;
         self.app
             .board(
@@ -390,23 +398,90 @@ impl Axvisor {
         }
     }
 
-    async fn run_build_request(&mut self, request: ResolvedAxvisorRequest) -> anyhow::Result<()> {
+    async fn run_build_request(
+        &mut self,
+        mut request: ResolvedAxvisorRequest,
+    ) -> anyhow::Result<()> {
         self.app.set_debug_mode(request.debug)?;
         let cargo = build::load_cargo_config(&request, self.app.workspace_context())?;
         self.app
-            .build(cargo, request.build_info_path)
-            .await
-            .map(|_| ())
+            .build(cargo, request.build_info_path.clone())
+            .await?;
+        self.prepare_guest_payload(
+            &mut request,
+            &mut ostool::BootPayloadConfig::default(),
+            false,
+        )
+        .await
     }
 
-    async fn run_uboot_request(&mut self, request: ResolvedAxvisorRequest) -> anyhow::Result<()> {
+    async fn run_uboot_request(
+        &mut self,
+        mut request: ResolvedAxvisorRequest,
+    ) -> anyhow::Result<()> {
         self.app.set_debug_mode(request.debug)?;
         let cargo = build::load_cargo_config(&request, self.app.workspace_context())?;
-        let uboot = self.load_uboot_config(&request, &cargo).await?;
-        self.app.uboot(cargo, request.build_info_path, uboot).await
+        let mut uboot = match self.load_uboot_config(&request, &cargo).await? {
+            Some(config) => config,
+            None => self.app.ensure_uboot_config_for_cargo(&cargo).await?,
+        };
+        self.prepare_guest_payload(&mut request, &mut uboot.boot, true)
+            .await?;
+        self.app
+            .uboot(cargo, request.build_info_path, Some(uboot))
+            .await
+    }
+
+    pub(super) async fn prepare_guest_payload(
+        &mut self,
+        request: &mut ResolvedAxvisorRequest,
+        boot: &mut ostool::BootPayloadConfig,
+        allow_external_assets: bool,
+    ) -> anyhow::Result<()> {
+        request.vmconfigs = build::load_vmconfigs(request, self.app.workspace_context())?;
+        rootfs::ensure_guest_image_bundles(
+            request,
+            self.app.workspace_root(),
+            self.app.target_dir(),
+        )
+        .await?;
+        let output = self
+            .app
+            .target_dir()
+            .join("axbuild/axvisor/host-initramfs")
+            .join(format!("{}.cpio", request.arch));
+        bundle::attach_with_external_assets(
+            &request.vmconfigs,
+            false,
+            &output,
+            &mut boot.initramfs,
+            allow_external_assets,
+        )
     }
 }
 
 fn default_qemu_config_template_path(axvisor_dir: &Path, arch: &str) -> PathBuf {
     axvisor_dir.join(format!("configs/qemu/qemu-{arch}.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Parser)]
+    struct BoardCli {
+        #[command(flatten)]
+        board: ArgsTestBoard,
+    }
+
+    #[test]
+    fn board_case_selector_accepts_repeated_and_comma_separated_values() {
+        let cli =
+            BoardCli::try_parse_from(["test", "--test-case", "smoke,direct", "--test-case", "pci"])
+                .unwrap();
+
+        assert_eq!(cli.board.test_case, ["smoke", "direct", "pci"]);
+    }
 }

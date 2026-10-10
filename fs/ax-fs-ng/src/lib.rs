@@ -5,6 +5,8 @@
 //! `std::fs`-like APIs.
 
 #![cfg_attr(all(not(test), not(doc)), no_std)]
+#![feature(core_io)]
+#![feature(core_io_borrowed_buf)]
 #![allow(clippy::new_ret_no_self)]
 
 extern crate alloc;
@@ -14,14 +16,13 @@ extern crate ax_runtime;
 #[macro_use]
 extern crate log;
 
-use alloc::{sync::Arc, vec::Vec};
-
-use axfs_ng_vfs::{Filesystem, Location};
+use axfs_ng_vfs::Location;
 pub use axfs_ng_vfs::{VfsError, VfsResult};
 
 pub mod api;
 pub mod block;
 pub mod bootargs;
+pub mod bundle;
 mod error;
 pub mod file;
 pub mod fops;
@@ -30,21 +31,10 @@ pub mod initramfs;
 pub use fs::memory::MemoryFs;
 mod fs_core;
 mod highlevel;
+mod mounts;
 pub mod os;
 pub mod root;
 pub mod volume;
-
-#[cfg(any(feature = "ext4", feature = "fat"))]
-pub(crate) use error::block_error_to_vfs_error;
-pub use error::{BlockError, BlockResult};
-pub(crate) use error::{io_error_to_vfs_error, vfs_error_to_io_error};
-
-static MOUNTED_FILESYSTEMS: os::sync::IrqMutex<Vec<Filesystem>> =
-    os::sync::IrqMutex::new(Vec::new());
-
-fn register_mounted_filesystem(fs: Filesystem) {
-    MOUNTED_FILESYSTEMS.lock().push(fs);
-}
 
 #[cfg(any(feature = "ext4", feature = "fat"))]
 pub use block::sync_all_block_caches;
@@ -55,8 +45,11 @@ pub use block::{
         block_batch_stats, block_io_stats, release_block_irqs_for_passthrough,
     },
 };
+pub use error::{BlockError, BlockResult};
+pub(crate) use error::{block_error_to_vfs_error, io_error_to_vfs_error, vfs_error_to_io_error};
 #[cfg(feature = "vfs")]
 pub use highlevel::*;
+pub(crate) use mounts::register_mounted_filesystem;
 #[cfg(feature = "vfs")]
 pub mod vfs {
     /// Create an ext4 filesystem from an owned file source and its open lease.
@@ -74,70 +67,27 @@ pub enum FilesystemKind {
     Fat,
 }
 
-/// Initializes the filesystem subsystem from a runtime-selected block region.
-pub(crate) fn init_filesystem(
-    dev: Arc<BlockDeviceHandle>,
-    region: BlockRegion,
-    description: &str,
-    source: &str,
-) -> Location {
-    info!("Initialize filesystem subsystem...");
-    info!("  selected root device: {}", description);
-
-    let fs = fs::new_from_handle(dev, region).unwrap_or_else(|err| {
-        panic!(
-            "failed to initialize filesystem on {}: {err:?}",
-            description
-        )
-    });
-    finish_filesystem_init(fs, source)
-}
-
-pub(crate) fn init_detected_filesystem(
-    dev: Arc<BlockDeviceHandle>,
-    region: BlockRegion,
-    kind: FilesystemKind,
-    description: &str,
-    source: &str,
-) -> Location {
-    info!("Initialize filesystem subsystem...");
-    info!("  selected root device: {}", description);
-
-    let fs = fs::new_from_handle_with_kind(dev, region, kind).unwrap_or_else(|err| {
-        panic!(
-            "failed to initialize filesystem on {}: {err:?}",
-            description
-        )
-    });
-    finish_filesystem_init(fs, source)
-}
-
 fn finish_filesystem_init(fs: axfs_ng_vfs::Filesystem, source: &str) -> Location {
     info!("  filesystem type: {:?}", fs.name());
 
-    let mp = axfs_ng_vfs::Mountpoint::new_root_with_source(&fs, source);
+    // Keep an immutable namespace anchor; the actual root mount can then be
+    // pivoted and detached without invalidating the namespace itself.
+    let anchor = axfs_ng_vfs::Mountpoint::new_root_with_source(&MemoryFs::new(), "nullfs");
+    anchor.set_readonly(true);
+    let mp = anchor
+        .root_location()
+        .mount_with_source(&fs, source)
+        .expect("initial filesystem mount");
     let root = mp.root_location();
     register_mounted_filesystem(fs);
-    highlevel::ROOT_FS_CONTEXT.call_once(|| highlevel::FsContext::new(root.clone()));
+    highlevel::ROOT_FS_CONTEXT.call_once(|| highlevel::FsContext::new(root.clone()).into_shared());
     root
 }
 
 pub fn shutdown_filesystems() -> axfs_ng_vfs::VfsResult {
     #[cfg(feature = "vfs")]
     highlevel::sync_all_cached_files(false)?;
-    shutdown_registered_filesystems()
-}
-
-/// Shuts down the registered filesystems in reverse mount order.
-fn shutdown_registered_filesystems() -> axfs_ng_vfs::VfsResult {
-    let filesystems = core::mem::take(&mut *MOUNTED_FILESYSTEMS.lock());
-    let mut first_error = None;
-    for fs in filesystems.into_iter().rev() {
-        if let Err(error) = fs.shutdown() {
-            first_error.get_or_insert(error);
-        }
-    }
-    first_error.map_or(Ok(()), Err)
+    mounts::shutdown_registered_filesystems()
 }
 
 pub(crate) fn detect_filesystem(

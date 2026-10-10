@@ -15,15 +15,15 @@ use core::{
 
 use axfs_ng_vfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, DirectoryCursor, FileNode, FileNodeOps,
-    FileRangeOperation, Filesystem, FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps,
-    NodePermission, NodeType, PreallocationMode, Reference, RenameOptions, StatFs, VfsError,
-    VfsResult, WeakDirEntry, XattrOps, XattrSetMode,
+    FileRangeOperation, Filesystem, FilesystemMountLease, FilesystemOps, Metadata, MetadataUpdate,
+    NodeFlags, NodeOps, NodePermission, NodeType, PreallocationMode, Reference, RenameOptions,
+    StatFs, TypeMap, VfsError, VfsResult, WeakDirEntry, XattrOps, XattrSetMode,
 };
 use axpoll::{IoEvents, Pollable};
 use hashbrown::HashMap;
 use slab::Slab;
 
-use crate::os::sync::{IrqMutex, SleepMutex as FsMutex, SleepMutex as Mutex};
+use crate::os::sync::{Mutex, RawSpinLock};
 
 const TMPFS_MAGIC: u32 = 0x0102_1994;
 const RAMFS_MAGIC: u32 = 0x8584_58f6;
@@ -71,16 +71,63 @@ impl Borrow<str> for FileName {
 
 /// A simple in-memory filesystem that supports basic file operations.
 pub struct MemoryFs {
+    self_ref: Weak<Self>,
     name: &'static str,
     fs_type: u32,
     size_limit: Option<u64>,
     used_bytes: AtomicU64,
     // Inodes may be released from atomic cleanup paths, so the slab and
     // metadata locks must not sleep.
-    inodes: IrqMutex<Slab<Arc<Inode>>>,
+    inodes: RawSpinLock<Slab<Arc<Inode>>>,
     // root_dir() is used while mounting pseudofs during early startup, before
     // Starry has reached a sleepable task context.
-    root: IrqMutex<Option<DirEntry>>,
+    root: RawSpinLock<Option<WeakDirEntry>>,
+    mount_lease: RawSpinLock<Weak<MemoryMountLease>>,
+}
+
+#[derive(Debug)]
+struct MemoryMountLease {
+    filesystem: Arc<MemoryFs>,
+}
+
+impl core::fmt::Debug for MemoryFs {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MemoryFs")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FilesystemMountLease for MemoryMountLease {}
+
+impl Drop for MemoryMountLease {
+    fn drop(&mut self) {
+        let last_lease = self.filesystem.mount_lease.lock_irqsave().strong_count() == 0;
+        if !last_lease {
+            return;
+        }
+        let root = self
+            .filesystem
+            .root
+            .lock_irqsave()
+            .as_ref()
+            .and_then(WeakDirEntry::upgrade);
+        if let Some(root) = root {
+            root.as_dir()
+                .expect("memory root directory")
+                .clear_cached_entries();
+        }
+    }
+}
+
+impl Drop for MemoryFs {
+    fn drop(&mut self) {
+        log::info!(
+            "releasing decoded {} filesystem ({} file bytes)",
+            self.name,
+            self.used_bytes.load(AtomicOrdering::Relaxed)
+        );
+    }
 }
 
 impl MemoryFs {
@@ -121,13 +168,15 @@ impl MemoryFs {
         fs_type: u32,
         size_limit: Option<u64>,
     ) -> (Filesystem, Arc<Self>) {
-        let handle = Arc::new(Self {
+        let handle = Arc::new_cyclic(|this| Self {
+            self_ref: this.clone(),
             name,
             fs_type,
             size_limit,
             used_bytes: AtomicU64::new(0),
-            inodes: IrqMutex::new(Slab::new()),
-            root: IrqMutex::new(None),
+            inodes: RawSpinLock::new(Slab::new()),
+            root: RawSpinLock::new(None),
+            mount_lease: RawSpinLock::new(Weak::new()),
         });
         let root_ino = Inode::new(
             &handle,
@@ -138,15 +187,16 @@ impl MemoryFs {
             0,
             0,
         );
-        *handle.root.lock() = Some(DirEntry::new_dir(
+        let root = DirEntry::new_dir(
             |this| DirNode::new(MemoryNode::new(handle.clone(), root_ino, Some(this))),
             Reference::root(),
-        ));
+        );
+        *handle.root.lock_irqsave() = Some(root.downgrade());
         (Filesystem::new(handle.clone()), handle)
     }
 
     fn get(&self, ino: u64) -> Arc<Inode> {
-        self.inodes.lock()[ino as usize - 1].clone()
+        self.inodes.lock_irqsave()[ino as usize - 1].clone()
     }
 
     fn resize_usage(&self, old_len: u64, new_len: u64) -> VfsResult<()> {
@@ -196,12 +246,35 @@ impl MemoryFs {
 }
 
 impl FilesystemOps for MemoryFs {
+    fn mount_lease(&self) -> Option<Arc<dyn FilesystemMountLease>> {
+        let mut installed = self.mount_lease.lock_irqsave();
+        if let Some(lease) = installed.upgrade() {
+            return Some(lease);
+        }
+        let lease = Arc::new(MemoryMountLease {
+            filesystem: self.self_ref.upgrade().expect("live memory filesystem"),
+        });
+        *installed = Arc::downgrade(&lease);
+        Some(lease)
+    }
+
     fn name(&self) -> &str {
         self.name
     }
 
     fn root_dir(&self) -> DirEntry {
-        self.root.lock().clone().unwrap()
+        let mut installed = self.root.lock_irqsave();
+        if let Some(root) = installed.as_ref().and_then(WeakDirEntry::upgrade) {
+            return root;
+        }
+        let owner = self.self_ref.upgrade().expect("live memory filesystem");
+        let inode = self.get(1);
+        let root = DirEntry::new_dir(
+            |this| DirNode::new(MemoryNode::new(owner, inode, Some(this))),
+            Reference::root(),
+        );
+        *installed = Some(root.downgrade());
+        root
     }
 
     fn stat(&self) -> VfsResult<StatFs> {
@@ -236,8 +309,8 @@ impl FilesystemOps for MemoryFs {
 }
 
 fn release_inode(fs: &MemoryFs, inode: &Arc<Inode>, nlink: u64) {
-    let mut inodes = fs.inodes.lock();
-    let mut metadata = inode.metadata.lock();
+    let mut inodes = fs.inodes.lock_irqsave();
+    let mut metadata = inode.metadata.lock_irqsave();
     metadata.nlink -= nlink;
     if metadata.nlink == 0 && Arc::strong_count(inode) == 2 {
         inodes.remove(metadata.inode as usize - 1);
@@ -256,16 +329,16 @@ struct FileContent {
 
 struct DirContent {
     // VFS dentry-cache operations call tmpfs directory ops while holding
-    // IrqMutex guards, so this per-directory map must not use a blocking
+    // RawSpinLock guards, so this per-directory map must not use a blocking
     // mutex.
-    entries: IrqMutex<HashMap<FileName, InodeRef>>,
+    entries: RawSpinLock<HashMap<FileName, InodeRef>>,
     next_cookie: AtomicU64,
 }
 
 impl Default for DirContent {
     fn default() -> Self {
         Self {
-            entries: IrqMutex::new(HashMap::new()),
+            entries: RawSpinLock::new(HashMap::new()),
             next_cookie: AtomicU64::new(3),
         }
     }
@@ -279,12 +352,14 @@ enum NodeContent {
 struct Inode {
     fs: Weak<MemoryFs>,
     ino: u64,
-    metadata: IrqMutex<Metadata>,
+    metadata: RawSpinLock<Metadata>,
     content: NodeContent,
+    // Page-cache and other inode state must survive dentry eviction and hard links.
+    user_data: axfs_ng_vfs::RawSpinLock<TypeMap>,
     // Extended attributes belong to the inode so hard links observe the same
     // values. Syscall xattr paths are sleepable and never hold a directory
     // entries guard while acquiring this lock.
-    xattrs: FsMutex<BTreeMap<Vec<u8>, Vec<u8>>>,
+    xattrs: Mutex<BTreeMap<Vec<u8>, Vec<u8>>>,
 }
 
 impl Inode {
@@ -297,7 +372,7 @@ impl Inode {
         gid: u32,
         dir_entries_subclass: u32,
     ) -> Arc<Inode> {
-        let mut inodes = fs.inodes.lock();
+        let mut inodes = fs.inodes.lock_irqsave();
         let entry = inodes.vacant_entry();
         let ino = entry.key() as u64 + 1;
         let metadata = Metadata {
@@ -325,14 +400,15 @@ impl Inode {
         let result = Arc::new(Self {
             fs: Arc::downgrade(fs),
             ino,
-            metadata: IrqMutex::new(metadata),
+            metadata: RawSpinLock::new(metadata),
             content,
-            xattrs: FsMutex::new(BTreeMap::new()),
+            user_data: axfs_ng_vfs::RawSpinLock::new(TypeMap::new()),
+            xattrs: Mutex::new(BTreeMap::new()),
         });
         entry.insert(result.clone());
         drop(inodes);
         if let NodeContent::Dir(dir) = &result.content {
-            let mut entries = dir.entries.lock_nested(dir_entries_subclass);
+            let mut entries = dir.entries.lock_irqsave_nested(dir_entries_subclass);
             entries.insert(
                 ".".into(),
                 InodeRef::new(fs.clone(), ino, NodeType::Directory, 1),
@@ -424,7 +500,7 @@ struct InodeRef {
 
 impl InodeRef {
     pub fn new(fs: Arc<MemoryFs>, ino: u64, node_type: NodeType, cookie: u64) -> Self {
-        fs.get(ino).metadata.lock().nlink += 1;
+        fs.get(ino).metadata.lock_irqsave().nlink += 1;
         Self {
             fs,
             ino,
@@ -484,31 +560,35 @@ impl MemoryNode {
         // context. MemoryNode::drop may run during task cleanup, where a
         // blocking directory-entry mutex would panic in might_sleep().
         if let NodeContent::Dir(dir) = &inode.content {
-            dir.entries.lock().clear();
+            dir.entries.lock_irqsave().clear();
         }
     }
 }
 
 impl NodeOps for MemoryNode {
+    fn inode_user_data(&self) -> Option<&axfs_ng_vfs::RawSpinLock<TypeMap>> {
+        Some(&self.inode.user_data)
+    }
+
     fn inode(&self) -> u64 {
         self.inode.ino
     }
 
     fn metadata(&self) -> VfsResult<Metadata> {
-        let mut metadata = self.inode.metadata.lock().clone();
+        let mut metadata = self.inode.metadata.lock_irqsave().clone();
         match &self.inode.content {
             NodeContent::File(content) => {
                 metadata.size = content.length.load(AtomicOrdering::Acquire);
             }
             NodeContent::Dir(dir) => {
-                metadata.size = dir.entries.lock().len() as u64;
+                metadata.size = dir.entries.lock_irqsave().len() as u64;
             }
         }
         Ok(metadata)
     }
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
-        let mut metadata = self.inode.metadata.lock();
+        let mut metadata = self.inode.metadata.lock_irqsave();
         if let Some(mode) = update.mode {
             metadata.mode = mode;
         }
@@ -614,7 +694,7 @@ impl DirNodeOps for MemoryNode {
         let offset = cursor.offset();
         let dir = self.inode.as_dir()?;
         let entries = loop {
-            let entries = dir.entries.lock();
+            let entries = dir.entries.lock_irqsave();
             let count = entries
                 .values()
                 .filter(|entry| offset == 0 || entry.cookie >= offset)
@@ -626,7 +706,7 @@ impl DirNodeOps for MemoryNode {
                 .try_reserve(count)
                 .map_err(|_| VfsError::NoMemory)?;
 
-            let entries = dir.entries.lock();
+            let entries = dir.entries.lock_irqsave();
             let live_count = entries
                 .values()
                 .filter(|entry| offset == 0 || entry.cookie >= offset)
@@ -662,11 +742,11 @@ impl DirNodeOps for MemoryNode {
 
     fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
         let dir = self.inode.as_dir()?;
-        let entries = dir.entries.lock();
+        let entries = dir.entries.lock_irqsave();
 
         let entry = entries.get(name).ok_or(VfsError::NotFound)?;
         let inode = entry.get();
-        let node_type = inode.metadata.lock().node_type;
+        let node_type = inode.metadata.lock_irqsave().node_type;
         self.new_entry(name, node_type, inode)
     }
 
@@ -682,7 +762,7 @@ impl DirNodeOps for MemoryNode {
             return Err(VfsError::InvalidInput);
         }
         let dir = self.inode.as_dir()?;
-        let mut entries = dir.entries.lock();
+        let mut entries = dir.entries.lock_irqsave();
 
         if entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
@@ -716,7 +796,7 @@ impl DirNodeOps for MemoryNode {
         let target_len = target.len() as u64;
         let dir = self.inode.as_dir()?;
         {
-            let entries = dir.entries.lock();
+            let entries = dir.entries.lock_irqsave();
             if entries.contains_key(name) {
                 return Err(VfsError::AlreadyExists);
             }
@@ -735,7 +815,7 @@ impl DirNodeOps for MemoryNode {
             self.fs
                 .used_bytes
                 .fetch_sub(target_len, AtomicOrdering::AcqRel);
-            drop(self.fs.inodes.lock().remove(inode.ino as usize - 1));
+            drop(self.fs.inodes.lock_irqsave().remove(inode.ino as usize - 1));
             return Err(VfsError::InvalidData);
         };
         file.length.store(target_len, AtomicOrdering::Release);
@@ -751,7 +831,7 @@ impl DirNodeOps for MemoryNode {
                 name.to_owned(),
             ),
         );
-        let mut entries = dir.entries.lock();
+        let mut entries = dir.entries.lock_irqsave();
         if entries.contains_key(name) {
             drop(entries);
             drop(entry);
@@ -771,7 +851,7 @@ impl DirNodeOps for MemoryNode {
 
     fn link(&self, name: &str, target: &DirEntry) -> VfsResult<DirEntry> {
         let dir = self.inode.as_dir()?;
-        let mut entries = dir.entries.lock();
+        let mut entries = dir.entries.lock_irqsave();
 
         let target = target.downcast::<Self>()?;
 
@@ -779,7 +859,7 @@ impl DirNodeOps for MemoryNode {
             return Err(VfsError::AlreadyExists);
         }
         let inode = target.inode.clone();
-        let node_type = inode.metadata.lock().node_type;
+        let node_type = inode.metadata.lock_irqsave().node_type;
         let cookie = dir.next_cookie.fetch_add(1, AtomicOrdering::Relaxed);
         entries.insert(
             name.into(),
@@ -792,7 +872,7 @@ impl DirNodeOps for MemoryNode {
         let dir = self.inode.as_dir()?;
 
         let (entry, inode) = {
-            let mut entries = dir.entries.lock();
+            let mut entries = dir.entries.lock_irqsave();
             let Some(entry) = entries.get(name) else {
                 return Err(VfsError::NotFound);
             };
@@ -800,7 +880,10 @@ impl DirNodeOps for MemoryNode {
             match (&inode.content, is_dir) {
                 (NodeContent::Dir(_), false) => return Err(VfsError::IsADirectory),
                 (NodeContent::Dir(DirContent { entries, .. }), true)
-                    if entries.lock_nested(TMPFS_NESTED_DIR_ENTRIES_SUBCLASS).len() > 2 =>
+                    if entries
+                        .lock_irqsave_nested(TMPFS_NESTED_DIR_ENTRIES_SUBCLASS)
+                        .len()
+                        > 2 =>
                 {
                     return Err(VfsError::DirectoryNotEmpty);
                 }
@@ -840,7 +923,7 @@ impl DirNodeOps for MemoryNode {
         }
 
         let src_entry = {
-            let mut entries = self.inode.as_dir()?.entries.lock();
+            let mut entries = self.inode.as_dir()?.entries.lock_irqsave();
             entries.remove(src_name).ok_or(VfsError::NotFound)?
         };
         let dst_dir = dst_node.inode.as_dir()?;
@@ -852,7 +935,7 @@ impl DirNodeOps for MemoryNode {
             cookie,
         );
         let overwritten = {
-            let mut entries = dst_dir.entries.lock();
+            let mut entries = dst_dir.entries.lock_irqsave();
             entries.insert(dst_name.into(), moved_entry)
         };
         drop(src_entry);

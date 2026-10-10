@@ -1,17 +1,11 @@
 # Converged HTTP control-plane build for the axum management API test
 # (http-control-plane).
-# `no-auto-start` keeps the default VM (`linux-virtio-blk-fs-ctlplane.toml`)
-# in `Ready` (registered but not booted); the typed probe drives the full
-# lifecycle through the HTTP control API. `fs` + `ax-driver/nvme` are what make
-# the guest possible: the hypervisor reads the guest kernel from its own
-# filesystem on the QEMU NVMe disk, and the guest roots from an ext4 image in
-# that same filesystem. Nothing about the guest is embedded in the hypervisor
-# binary. CI runs `cargo xtask image pull` before the test to provision the QEMU
-# images and the managed rootfs.
+# `no-auto-start` registers the default VM in Ready for HTTP start control.
+# Boot files are packaged into the host initramfs, installed on the NVMe root,
+# and reused by the HTTP delete/recreate/start resource lifecycle regression.
 features = [
     "http-axum",
     "ax-driver/nvme",
-    "fs",
     "no-auto-start",
 ]
 log = "Info"

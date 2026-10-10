@@ -47,6 +47,8 @@ QEMU 的目标架构不等于 runner 的宿主架构。例如 AArch64 测试可�
 | --- | --- | --- |
 | `ci.yml / plan_ci` | 去重、清理旧 run、配置校验和规划 | 主 CI 矩阵之前执行；跨仓 PR 不分配 |
 | `starry-apps.yml / plan` | 定时或手动应用矩阵规划 | 应用矩阵之前执行 |
+| `axvisor-nightly.yml / plan` | AxVisor 非性能 nightly 矩阵规划 | nightly 矩阵之前执行 |
+| `benchmarks.yml / plan` | 统一性能清单的 AxVisor、Starry QEMU 和 Starry 板卡矩阵规划 | 性能矩阵之前执行 |
 | `container-publish.yml / publish` | 构建并发布测试容器 | 独立工作流，不是主 CI 的前置 job |
 | `docs.yml / build` | 构建文档并上传 Pages artifact | 文档工作流的构建阶段 |
 | `docs.yml / deploy` | 部署 Pages artifact | 等待文档构建成功 |
@@ -61,27 +63,29 @@ QEMU 的目标架构不等于 runner 的宿主架构。例如 AArch64 测试可�
 
 ### 2.1 分配总览
 
-主 CI 与 Starry Apps 分开载入清单。PR 过滤、事件开关、owner 条件和精确 suite 展开都会改变真正运行的行，不能把静态计数当成每次 CI 的资源需求。
+主 CI、Starry Apps、AxVisor Nightly 与 Benchmarks 分开载入清单。PR 过滤、事件开关、owner 条件和精确 suite 展开都会改变真正运行的行，不能把静态计数当成每次 CI 的资源需求。
 
-| Profile | 主 CI 声明数 | Starry Apps 声明数 | 任务范围 |
-| --- | --- | --- | --- |
-| `qcs` | 14 | 0 | Formatting/publish 预检，Axvisor 控制面分层，Workspace Clippy/std，ArceOS 四架构套件，AxVisor AArch64/RISC-V 场景 |
-| `ubuntu-base` | 7 | 5 | sync-lint、qperf、Starry 四架构套件；定时完整 Clippy 和四架构应用 smoke |
-| `ubuntu-host` | 0 | 1 | Starry NixOS x86_64 Stage-2 |
-| `ubuntu-axvisor-lvz` | 2 | 0 | AxVisor LoongArch QEMU 套件 |
-| `kvm-intel` | 5 | 0 | VMX、ACPI/MP/OVMF 和 AxLoader UEFI HTTP 启动 |
-| `kvm-amd` | 3 | 0 | SVM、ACPI/OVMF 和 PCI 枚举 |
-| `board` | 17 | 0 | Starry 原生板卡测试和 AxVisor 板卡 guest 场景 |
+| Profile | 主 CI | Starry Apps | AxVisor Nightly | Benchmarks | 任务范围 |
+| --- | --- | --- | --- | --- | --- |
+| `qcs` | 10 | 0 | 1 | 6 | Formatting/publish 预检，Workspace Clippy/std，ArceOS 四架构套件，AxVisor AArch64/RISC-V 场景，Starry QEMU 性能 |
+| `ubuntu-base` | 6 | 5 | 0 | 0 | sync-lint、qperf、Starry 四架构套件；应用 smoke/完整 Clippy |
+| `ubuntu-host` | 0 | 1 | 0 | 0 | Starry NixOS x86_64 Stage-2 |
+| `ubuntu-axvisor-lvz` | 1 | 0 | 0 | 0 | AxVisor LoongArch QEMU 套件 |
+| `kvm-intel` | 3 | 0 | 0 | 0 | VMX、ACPI/MP/OVMF 和 AxLoader UEFI HTTP 启动 |
+| `kvm-amd` | 1 | 0 | 0 | 0 | SVM smoke、direct/OVMF ACPI、PCI 枚举和 PCI block RW/RO |
+| `board` | 11 | 0 | 2 | 8 | 主 CI、AxVisor nightly 和性能清单中的板卡场景 |
 
 修改清单时应同步更新这张表。`qcs` 在普通外部 fork 上回退为托管环境，表中仍按声明的 profile 分类；它不表示外部 fork 可以使用组织的 QCS 机器。
 
 ### 2.2 QCS 和托管任务
 
-`qcs` 承担较通用的构建与运行工作，但不是“所有测试的默认机器”。`arceos.toml`、`workspace.toml` 和 `axvisor.toml` 使用它作为文件默认值，单项仍可以覆盖；全局默认其实是 `ubuntu-base`。
+`qcs` 承担较通用的构建与运行工作，但不是“所有测试的默认机器”。`arceos.toml`、`workspace.toml`、`axvisor.toml` 和 `benchmarks.toml` 使用它作为文件默认值，单项仍可以覆盖；全局默认其实是 `ubuntu-base`。
 
 ArceOS 的四个架构聚合检查使用 QCS。AxVisor 的两个 AArch64 检查分别覆盖 smoke/virtio-blk/axtest/timer stress 和 panic/HTTP 控制面/浏览器控制台/IVC，另一个 RISC-V 检查覆盖 smoke、IPI 与 panic 模式。`static.toml` 中 formatting/publish 预检与 Axvisor 控制面分层检查使用 QCS，sync-lint 走托管 base 环境。
 
 Starry 的四个架构 QEMU 套件使用托管 base 环境，并在各自行中追加内核测试；不能因为它们运行内核就推断必须申请自托管 runner。`workspace.toml` 中的 qperf 同样显式选择 `ubuntu-base`。
+
+Benchmarks 清单中的六个 Starry QEMU 性能 check 显式选择 `qcs`，直接使用自托管 host 环境，不设置 `container_preflight`；Starry 板卡性能 check 继续使用 `board` profile。
 
 ### 2.3 KVM 任务
 
@@ -89,11 +93,9 @@ Intel 和 AMD 使用不同标签，测试命令也分别选择 VMX 或 SVM 场�
 
 | Profile | Check ID | 主要内容 |
 | --- | --- | --- |
-| `kvm-intel` | `test-axvisor-self-hosted-x86-64-vmx-smoke-pci-enumeration` | VMX smoke、通用 PCI 枚举 |
+| `kvm-intel` | `test-axvisor-self-hosted-x86-64-vmx` | VMX smoke、direct/MP/OVMF ACPI、通用 PCI 枚举、PCI block RW/RO；一次构建运行七用例 |
 | `kvm-intel` | `test-axloader-http-smoke` | AxLoader 的 x86_64 UEFI HTTP 启动 |
-| `kvm-intel` | `test-axvisor-x86-64-acpi-direct-and-ovmf-boot-vmx` | direct ACPI、MP fallback、OVMF ACPI |
-| `kvm-amd` | `test-axvisor-self-hosted-x86-64-svm-smoke-acpi` | SVM smoke、direct ACPI、OVMF ACPI |
-| `kvm-amd` | `test-axvisor-x86-64-pci-enumeration-svm` | SVM 通用 PCI 枚举 |
+| `kvm-amd` | `test-axvisor-self-hosted-x86-64-svm` | SVM smoke、direct ACPI、OVMF ACPI、PCI 枚举、PCI block RW/RO；一次构建运行六用例 |
 
 `require_kvm` 只让执行器检查 `/dev/kvm` 可读写，并未完整验证 CPU 虚拟化特性、嵌套虚拟化、固件镜像或 guest 能力。预检通过后仍可能在特定启动场景失败，应以相应 case 的日志定位。
 
@@ -137,10 +139,11 @@ StarryOS guest 和 AxVisor + Linux guest 标记 `nightly_only`，只由 AxVisor 
 `FEETECH_DEV=auto ./run_robot_ci_once.sh 28.0`；AxVisor Linux guest 通过
 `sudo -S env FEETECH_DEV=auto` 运行同一入口。它们使用原 USB 摄像头 `0ac8:0346` 和
 USB 控制器 `1a86:55d3`，不使用 SoC UART6 `/dev/ttyS6`，也不在 VM 配置中注入额外的
-UART6 设备选择；USB 控制器仍可能在系统中呈现 USB 串口节点。AxVisor 的两条检查分别使用
-`image_location = "memory"`（StarryOS，当前 checkout 构建）和
-`image_location = "fs"`（Linux，`/guest/linux/orangepi-5-plus-6.1.99`、
-`root=/dev/mmcblk1p2`、`console=ttyS2`）。real Linux 使用 USB 机器人板实测的
+UART6 设备选择；USB 控制器仍可能在系统中呈现 USB 串口节点。AxVisor 的两条检查都从文件
+加载客户机：StarryOS 使用当前 checkout 构建的内核，由 `vm_configs` 装入宿主 initramfs
+并安装到 `/guest/builtin/images`；Linux 使用板卡已有的
+`/guest/linux/orangepi-5-plus-6.1.99`、`root=/dev/mmcblk1p2`、`console=ttyS2`。
+real Linux 使用 USB 机器人板实测的
 `/dev/mmcblk1p2`；virtual 普通板仍为 `/dev/mmcblk0p2`。
 
 所有板卡检查都依赖人工部署：CI 不下载、编译、打包或部署应用。virtual 包由

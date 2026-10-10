@@ -34,6 +34,7 @@ mod config;
 mod control;
 mod guest_console;
 mod manager;
+mod net_uplink;
 #[cfg(feature = "browser-console")]
 mod network_console;
 #[cfg(feature = "browser-console")]
@@ -41,6 +42,7 @@ mod network_status;
 #[cfg(feature = "vcpu-perf-load")]
 mod perf_load;
 mod shell;
+mod sync;
 #[cfg(feature = "test-virq-delivery")]
 mod virq_regression;
 
@@ -69,11 +71,20 @@ fn main() {
 
     guest_console::submit_host_bytes(banner::STARTUP);
 
+    axvisor::builtin::prepare_root()
+        .unwrap_or_else(|error| panic!("failed to prepare Axvisor boot resources: {error:#}"));
+
     info!("Starting virtualization...");
     let manager = manager::AxvmManager::new()
         .unwrap_or_else(|error| panic!("failed to initialize AxVM manager: {error:#}"));
 
-    manager.init_default_vms();
+    // Bridge guest virtio-net ports onto the selected host interface before any
+    // guest device is created, so the host DHCP/console stack keeps owning the
+    // wire and guest MACs are validated against the reserved host MACs.
+    net_uplink::start();
+    manager
+        .init_default_vms()
+        .unwrap_or_else(|error| panic!("failed to initialize default VMs: {error:#}"));
     #[cfg(feature = "vcpu-perf-load")]
     let _performance_load = perf_load::start();
 
@@ -131,7 +142,7 @@ fn main() {
     #[cfg(not(feature = "no-auto-start"))]
     std::thread::Builder::new()
         .name("axvisor-vm-wait".into())
-        .spawn(manager::AxvmManager::wait_for_default_vms)
+        .spawn(move || manager.wait_for_default_vms())
         .unwrap_or_else(|error| panic!("failed to start VM completion waiter: {error}"));
 
     #[cfg(not(feature = "no-auto-start"))]

@@ -25,16 +25,15 @@ USB 控制器仍可能在系统中呈现 USB 串口节点。VM 配置也不注�
 
 ## 2. CI 矩阵
 
-本目录相关的最终矩阵包含普通 CI 的四条检查、AxVisor Nightly 的两条检查：
+本目录相关的最终矩阵把同一块板上的 Starry 原生、AxVisor Linux 和 AxVisor
+Starry guest 合并到同一个 runner；real robot 仍由普通 CI 与 AxVisor Nightly
+分别覆盖：
 
 | check id | 调度 | board selector | board_type | 入口 |
 | --- | --- | --- | --- | --- |
-| `test-orangepi-5-plus-robot-native-starryos` | 普通 CI | `orangepi-5-plus-robot` | `OrangePi-5-Plus` | 在 `/home/orangepi/robot-ci/aka-rk3588-virtual` 运行 `./run_vision_usb_ci_once.sh 28.0` |
-| `test-orangepi-5-plus-robot-axvisor-starryos-guest` | 普通 CI | `orangepi-5-plus-robot-starry` | `OrangePi-5-Plus` | 同上，AxVisor 运行当前 checkout 构建的 StarryOS guest |
-| `test-orangepi-5-plus-robot-axvisor-linux-guest` | 普通 CI | `orangepi-5-plus-robot-linux` | `OrangePi-5-Plus` | 同上，AxVisor 运行 Linux guest |
-| `test-orangepi-5-plus-robot-real-native-starryos` | 普通 CI | `orangepi-5-plus-robot-real` | `OrangePi-5-Plus-robot` | 在 `/home/orangepi/robot-ci/aka-rk3588` 运行 `FEETECH_DEV=auto ./run_robot_ci_once.sh 28.0` |
-| `test-orangepi-5-plus-robot-real-axvisor-starryos-guest` | AxVisor Nightly | `orangepi-5-plus-robot-real-starry` | `OrangePi-5-Plus-robot` | 同上，AxVisor 运行当前 checkout 构建的 StarryOS guest |
-| `test-orangepi-5-plus-robot-real-axvisor-linux-guest` | AxVisor Nightly | `orangepi-5-plus-robot-real-linux` | `OrangePi-5-Plus-robot` | 同上，AxVisor 运行 Linux guest |
+| `test-axvisor-self-hosted-board-orangepi-5-plus-linux-starry` | 普通 CI | `orangepi-5-plus`、`orangepi-5-plus-linux`、`orangepi-5-plus-starry` | `OrangePi-5-Plus` | 同一 runner 先运行 Starry board suites，再运行 AxVisor Linux 和 Starry guest |
+| `test-orangepi-5-plus-robot-axvisor-guests` | 普通 CI | `orangepi-5-plus-robot`、`orangepi-5-plus-robot-starry`、`orangepi-5-plus-robot-linux` | `OrangePi-5-Plus` | 同一 runner 先运行 virtual Starry suites，再用共享 AxVisor 构建运行 Linux 和 StarryOS guest |
+| `test-orangepi-5-plus-robot-real-suite` | AxVisor Nightly | `orangepi-5-plus-robot-real`、`orangepi-5-plus-robot-real-starry`、`orangepi-5-plus-robot-real-linux` | `OrangePi-5-Plus-robot` | 同一 runner 先运行 native StarryOS，再复用一个 AxVisor 构建运行 StarryOS 和 Linux guest；均执行 `FEETECH_DEV=auto ./run_robot_ci_once.sh 28.0` |
 
 三条 virtual 检查使用普通 `OrangePi-5-Plus` 板卡类型。部署前需确认候选板带 UVC
 摄像头和 `0403:6001` FT232 回环接线。
@@ -48,12 +47,13 @@ USB 控制器仍可能在系统中呈现 USB 串口节点。VM 配置也不注�
 
 ## 3. 客户机内核与根文件系统
 
-virtual 和 real 的 AxVisor StarryOS guest 都使用 `image_location = "memory"`，内核为
-当前 checkout 构建的
-`target/aarch64-unknown-none-softfloat/release/starryos.bin`。real StarryOS guest 不
-覆盖 `cmdline`，沿用宿主 bootargs。
+virtual 和 real 的 AxVisor StarryOS guest 使用当前 checkout 构建的
+`target/aarch64-unknown-none-softfloat/release/starryos.bin`。`vm_configs` 指定归档输入，
+axbuild 将内核装入宿主 initramfs 的 `/guest/builtin/images`；有宿主磁盘根时，AxVisor
+先安装自带资源再切根，从最终文件路径加载客户机。real StarryOS guest 不覆盖
+`cmdline`，沿用宿主 bootargs。
 
-AxVisor Linux guest 使用 `image_location = "fs"`、内核
+AxVisor Linux guest 从文件加载内核
 `/guest/linux/orangepi-5-plus-6.1.99` 和 `console=ttyS2`。virtual 普通板使用
 `root=/dev/mmcblk0p2`；单客户机 USB 机器人板实测 guest 根为
 `/dev/mmcblk1p2`，real Linux 检查使用该根。宿主的 `/guest/linux/` 由人工维护，

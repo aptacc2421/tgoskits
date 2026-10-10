@@ -88,7 +88,7 @@ The design is compared against Linux v7.1 commit
   supplies the `buffer_head` uptodate/dirty and synchronous writeback model;
 - [`block/bdev.c`](https://github.com/torvalds/linux/blob/8cd9520d35a6c38db6567e97dd93b1f11f185dc6/block/bdev.c)
   supplies the one-address-space-per-block-device ownership model;
-- [`fs/sync.c`](https://github.com/torvalds/linux/blob/8cd9520d35a6c38db6567e97dd93b1f11f185dc6/fs/sync.c#L97-L113)
+- [`fs/sync.c`](https://github.com/torvalds/linux/blob/8cd9520d35a6c38db6567e97dd93b1f11f185dc6/fs/sync.c)
   supplies the best-effort global `sync(2)` rule, including its unconditional
   successful syscall return;
 - [`block/fops.c`](https://github.com/torvalds/linux/blob/8cd9520d35a6c38db6567e97dd93b1f11f185dc6/block/fops.c)
@@ -327,7 +327,9 @@ cargo xtask clippy --package ax-fs-ng
 cargo xtask clippy --package rsext4
 cargo xtask clippy --package starry-kernel
   -> every configured check passes with warnings denied
-cargo xtask starry app qemu -t block-io-bench --arch x86_64
+cargo xtask starry test qemu --arch x86_64 -c qemu/system/syscall-test-sync
+  -> test-sync reaches STARRY_SYSTEM_TEST_PASSED and the grouped runner passes
+cargo xtask starry app qemu -t benchmark/block-io-bench --arch x86_64
   -> every initial/coherence generation verifies and BLOCK_BENCH_APP_PASSED appears
 ```
 
