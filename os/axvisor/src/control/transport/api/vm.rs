@@ -253,7 +253,7 @@ pub async fn vm_create(Json(payload): Json<Value>) -> Response {
     if manager().get(id).is_some() {
         return StatusCode::CONFLICT.into_response();
     }
-    if let Some(path) = crate::control::domain::pool::missing_guest_image(&config) {
+    if let Some(path) = crate::guest_images::missing_guest_image(&config) {
         return (
             StatusCode::CONFLICT,
             Json(json!({"error": format!("guest image `{path}` does not exist")})),

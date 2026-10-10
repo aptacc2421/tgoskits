@@ -108,16 +108,16 @@ impl NetworkOutputHub {
         self.lanes[lane.index()].connected.load(Ordering::Acquire)
     }
 
-    fn session(&self, lane: ConsoleLane) -> usize {
-        self.lanes[lane.index()].session.load(Ordering::Acquire)
-    }
-
     fn begin_session(&self, lane: ConsoleLane) -> Option<usize> {
         self.lanes[lane.index()].begin_session()
     }
 
     fn end_session(&self, lane: ConsoleLane, session: usize) {
         self.lanes[lane.index()].end_session(session);
+    }
+
+    fn reset(&self, lane: ConsoleLane) {
+        self.lanes[lane.index()].reset();
     }
 
     fn receive(
@@ -179,6 +179,19 @@ impl NetworkOutputLane {
             drop(_queue);
             let _result = self.ready.notify();
         }
+    }
+
+    /// Drops output and disconnects the old owner before a lane is reused.
+    ///
+    /// The layout lock is held by the caller while this runs. That keeps a
+    /// late producer from observing the old endpoint after it was released
+    /// and racing a new owner into the same lane.
+    fn reset(&self) {
+        let mut queue = self.queue.lock_unpoisoned();
+        self.connected.store(false, Ordering::Release);
+        *queue = HostOutputQueue::new();
+        drop(queue);
+        let _result = self.ready.notify();
     }
 
     fn take_batch(&self, session: usize) -> Option<NetworkOutputBatch> {
@@ -291,15 +304,6 @@ struct ActiveSession {
     session: usize,
 }
 
-impl ActiveSession {
-    fn install(lane: ConsoleLane) -> Result<Self> {
-        let session = OUTPUT_HUB.begin_session(lane).with_context(|| {
-            format!("{} console already has an active session", lane_name(lane))
-        })?;
-        Ok(Self { lane, session })
-    }
-}
-
 impl Drop for ActiveSession {
     fn drop(&mut self) {
         OUTPUT_HUB.end_session(self.lane, self.session);
@@ -317,32 +321,28 @@ impl Drop for ActiveSession {
 /// The result says whether this call took a lane or the VM already had one, so
 /// a caller that has to undo the registration gives back only its own lane.
 pub(crate) fn register_guest(vm_id: VMId, name: &str) -> Result<LaneAllocation> {
-    LAYOUT
-        .lock_unpoisoned()
-        .allocate(vm_id, name)
-        .map_err(|LayoutFull| {
-            anyhow::anyhow!(AxVmError::ResourceUnavailable {
-                resource: "browser console lane",
-                detail: format!("all {MAX_GUEST_CONSOLES} guest console lanes are in use"),
-            })
+    let mut layout = LAYOUT.lock_unpoisoned();
+    let allocation = layout.allocate(vm_id, name).map_err(|LayoutFull| {
+        anyhow::anyhow!(AxVmError::ResourceUnavailable {
+            resource: "browser console lane",
+            detail: format!("all {MAX_GUEST_CONSOLES} guest console lanes are in use"),
         })
+    })?;
+    if allocation == LaneAllocation::Allocated {
+        let lane = layout
+            .guest(vm_id)
+            .expect("allocated guest lane must be present")
+            .lane;
+        OUTPUT_HUB.reset(lane);
+    }
+    Ok(allocation)
 }
 
 /// Removes a guest's browser endpoint after its VM control task has stopped.
 pub(crate) fn release_guest(vm_id: VMId) {
-    let (endpoint, session) = {
-        let mut layout = LAYOUT.lock_unpoisoned();
-        let endpoint = layout.release(vm_id);
-        let session = endpoint
-            .as_ref()
-            .map(|endpoint| OUTPUT_HUB.session(endpoint.lane));
-        (endpoint, session)
-    };
-    if let (Some(endpoint), Some(session)) = (endpoint, session) {
-        // `end_session` checks the session generation. A new VM can reuse the
-        // lane after the layout lock is released without being disconnected by
-        // this stale release.
-        OUTPUT_HUB.end_session(endpoint.lane, session);
+    let mut layout = LAYOUT.lock_unpoisoned();
+    if let Some(endpoint) = layout.release(vm_id) {
+        OUTPUT_HUB.reset(endpoint.lane);
     }
 }
 
@@ -443,11 +443,8 @@ pub(crate) fn submit_management_output(bytes: &[u8]) {
 /// not an interrupt callback, so the queue and dynamic lane table may use the
 /// task-context mutex used by the rest of the current Axvisor runtime.
 pub(crate) fn submit_guest_output(vm_id: VMId, bytes: &[u8]) {
-    let Some(lane) = LAYOUT
-        .lock_unpoisoned()
-        .guest(vm_id)
-        .map(|endpoint| endpoint.lane)
-    else {
+    let layout = LAYOUT.lock_unpoisoned();
+    let Some(lane) = layout.guest(vm_id).map(|endpoint| endpoint.lane) else {
         return;
     };
     OUTPUT_HUB.submit(lane, bytes);
@@ -457,17 +454,20 @@ pub(crate) fn submit_guest_output(vm_id: VMId, bytes: &[u8]) {
 pub(crate) fn open_browser_console(
     route: &str,
 ) -> Result<(BrowserConsoleInput, BrowserConsoleOutput)> {
-    let endpoint =
-        endpoint_for_route(route).with_context(|| format!("unknown console endpoint `{route}`"))?;
-    let active_session = ActiveSession::install(endpoint.lane)?;
-    // The VM may be removed between the lookup and the install. Re-check the
-    // lane: if it no longer serves this endpoint the session guard ends the
-    // session on the way out, so a stale browser transport can never keep a
-    // reallocated lane unusable.
-    let current = LAYOUT.lock_unpoisoned().by_lane(endpoint.lane);
-    if current.is_none_or(|current| current.vm_id != endpoint.vm_id) {
-        return Err(anyhow::anyhow!("console endpoint `{route}` was removed"));
-    }
+    let (endpoint, active_session) = {
+        let layout = LAYOUT.lock_unpoisoned();
+        let endpoint = layout
+            .by_route(route)
+            .with_context(|| format!("unknown console endpoint `{route}`"))?;
+        let session = OUTPUT_HUB.begin_session(endpoint.lane).with_context(|| {
+            format!(
+                "{} console already has an active session",
+                endpoint.display_name
+            )
+        })?;
+        let lane = endpoint.lane;
+        (endpoint, ActiveSession { lane, session })
+    };
     let lane = active_session.lane;
     let session = active_session.session;
     let delivery = start_output_dispatcher(lane, session)?;
@@ -661,5 +661,27 @@ impl ManagementLineEditor {
             }
         }
         true
+    }
+}
+
+#[cfg(all(test, not(axtest)))]
+mod tests {
+    use super::{NetworkOutputLane, OUTPUT_BATCH_CAPACITY};
+
+    #[test]
+    fn lane_reuse_drops_the_previous_owner_backlog() {
+        let lane = NetworkOutputLane::new();
+        lane.submit(b"old owner output");
+        lane.reset();
+
+        let session = lane.begin_session().expect("a reset lane is available");
+        assert!(lane.take_batch(session).is_none());
+
+        lane.submit(b"new owner output");
+        let batch = lane
+            .take_batch(session)
+            .expect("new owner output must remain available");
+        assert_eq!(&batch.bytes[..batch.len], b"new owner output");
+        assert!(batch.len <= OUTPUT_BATCH_CAPACITY);
     }
 }

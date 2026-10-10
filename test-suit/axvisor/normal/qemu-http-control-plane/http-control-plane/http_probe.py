@@ -400,6 +400,30 @@ def check_file_transfer():
     )
     check("PATCH /api/files (malformed range)", status, 400)
 
+    # Lengths are converted to the target's usize before the staging file is
+    # opened, and the inclusive range arithmetic is checked before the body is
+    # read. Both hostile values must be rejected without changing the session.
+    huge_total = 1 << 63
+    status, _, _ = request_raw(
+        "POST",
+        "/api/files",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {"id": "probe-huge-total", "directory": directory, "total": huge_total}
+        ).encode("utf-8"),
+    )
+    check("POST /api/files (unrepresentable length)", status, 413)
+    status, _, _ = request_raw(
+        "PATCH",
+        "/api/files/%s" % session,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": "bytes 0-%d/*" % sys.maxsize,
+        },
+        body=b"x",
+    )
+    check("PATCH /api/files (overflowing range)", status, 413)
+
     # A chunk that starts where the disk is not: the offset in the answer is the
     # one the client continues from, which is why the offset is read from the
     # file rather than from a counter.

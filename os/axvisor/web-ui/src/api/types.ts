@@ -118,6 +118,8 @@ export interface PanelProps {
   link: PanelLink
   /** Live VM registry snapshot (see `api/events.ts`); panels that do not care ignore it. */
   resources?: VmSummary[]
+  /** Whether the shell's VM event feed is currently connected. */
+  live?: boolean
   /** VM the navigation asked the panel to focus, set by clicking a resource entry. */
   focusVm?: number | null
   /**

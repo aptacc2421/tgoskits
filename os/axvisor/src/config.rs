@@ -19,7 +19,7 @@
 )))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axvm::{AxVmError, AxVmResult};
 use axvm::{boot::*, config::*, *};
 use axvmconfig::{GuestConfig, GuestType, HostDeviceAssignment};
@@ -46,6 +46,10 @@ pub(crate) fn prepare_guest_vm(raw_cfg: &str) -> Result<VmCreatePlan> {
     let vm_create_config =
         GuestConfig::from_toml(raw_cfg).context("parse VM TOML configuration")?;
     let configured_vm_id = vm_create_config.base.id;
+
+    if let Some(path) = crate::guest_images::missing_guest_image(&vm_create_config) {
+        bail!("guest image `{path}` does not exist");
+    }
 
     if let Some(linux) = get_image_header(&vm_create_config, &image_provider) {
         debug!(

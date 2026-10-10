@@ -35,6 +35,9 @@ mod browser_console_layout;
 mod files;
 mod guest_console_harness;
 #[allow(dead_code)]
+#[path = "../src/guest_images.rs"]
+mod guest_images;
+#[allow(dead_code)]
 #[path = "../src/guest_console/terminal.rs"]
 mod host_terminal;
 mod manager;

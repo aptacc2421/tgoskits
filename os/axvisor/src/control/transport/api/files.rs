@@ -14,6 +14,7 @@
 //! staging area is meant to keep out.
 
 use alloc::{collections::BTreeMap, format};
+use core::fmt::Display;
 
 use axum::Json;
 use axum::body::{Body, to_bytes};
@@ -102,7 +103,11 @@ pub async fn open_file(Json(payload): Json<Value>) -> Response {
         return bad_request("`total` is required".into());
     };
 
-    match files::open(id, directory, total as usize) {
+    let total = match usize::try_from(total) {
+        Ok(total) => total,
+        Err(_) => return too_large(total),
+    };
+    match files::open(id, directory, total) {
         Ok(session) => with_offset(StatusCode::OK, &session),
         Err(error) => error_response(id, error),
     }
@@ -155,7 +160,12 @@ pub async fn send_chunk(Path(id): Path<String>, request: Request) -> Response {
             return too_large(total);
         }
     }
-    let expected = end - start + 1;
+    let Some(expected) = end
+        .checked_sub(start)
+        .and_then(|length| length.checked_add(1))
+    else {
+        return too_large("range length exceeds host address space");
+    };
     if expected > CHUNK_LIMIT {
         return too_large(expected);
     }
@@ -331,7 +341,7 @@ fn bad_request(reason: String) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": reason }))).into_response()
 }
 
-fn too_large(total: usize) -> Response {
+fn too_large(total: impl Display) -> Response {
     (
         StatusCode::PAYLOAD_TOO_LARGE,
         Json(json!({

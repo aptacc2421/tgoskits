@@ -53,7 +53,7 @@ import { CreateForm } from './CreateForm'
 import { DetailDrawer } from './DetailDrawer'
 import { Overview } from './Overview'
 
-/** How long the registry is polled while no event socket is available. */
+/** How long fallback registry and pool refreshes wait between requests. */
 const REGISTRY_REFRESH_MS = 2000
 
 /**
@@ -71,6 +71,7 @@ export default function VmsPanel({
   link,
   files = null,
   resources = [],
+  live = false,
   focusVm = null,
   host = null,
 }: PanelProps) {
@@ -102,6 +103,8 @@ export default function VmsPanel({
   const registryRef = useRef(registry)
   registryRef.current = registry
   const registryKey = registry.map((vm) => vm.id).join(',')
+  const hasEvents = link.maybeUrl('events') !== null
+  const useEventFeed = hasEvents && live
   const physCpuCount = host?.phys_cpu_count ?? null
 
   // The id a fresh form should pre-fill: one past every id the registry and the
@@ -145,22 +148,32 @@ export default function VmsPanel({
     }
   }, [api, link])
 
-  // The registry the shell injects comes from the event socket; polling is only
-  // a fallback for builds whose manifest has no feed (the socket is optional).
+  // The registry the shell injects comes from the event socket. A build without
+  // that optional operation uses the HTTP list as its fallback source.
   useEffect(() => {
     setRegistry(resources)
-    if (resources.length === 0) void refreshRegistry()
-  }, [resources, refreshRegistry])
+    if (!useEventFeed && resources.length === 0) void refreshRegistry()
+  }, [resources, refreshRegistry, useEventFeed])
 
   useEffect(() => {
-    void refreshRegistry()
     void refreshPool()
-    const timer = window.setInterval(() => {
+    const poolTimer = link.maybeUrl('pool')
+      ? window.setInterval(() => void refreshPool(), REGISTRY_REFRESH_MS)
+      : undefined
+    if (useEventFeed) {
+      return () => {
+        if (poolTimer !== undefined) window.clearInterval(poolTimer)
+      }
+    }
+    void refreshRegistry()
+    const registryTimer = window.setInterval(() => {
       void refreshRegistry()
-      void refreshPool()
     }, REGISTRY_REFRESH_MS)
-    return () => window.clearInterval(timer)
-  }, [refreshRegistry, refreshPool])
+    return () => {
+      window.clearInterval(registryTimer)
+      if (poolTimer !== undefined) window.clearInterval(poolTimer)
+    }
+  }, [link, refreshRegistry, refreshPool, useEventFeed])
 
   useEffect(() => {
     let cancelled = false

@@ -387,6 +387,10 @@ pub fn send(
         .open(&path)
         .map_err(|error| map_std_error(&error))?;
     if let Err(error) = file.write_all(bytes) {
+        // A short write may have reached the filesystem before the error was
+        // reported. Re-read the staging file so the retry starts at the real
+        // offset rather than overwriting or skipping bytes.
+        let written = disk_len(&path);
         record_failure(id, &error.to_string());
         return Err(map_io_error(&error, written));
     }
@@ -574,7 +578,7 @@ fn unknown(id: &str) -> FileError {
 /// Bytes on disk, or zero when the file is not there yet.
 fn disk_len(path: &str) -> usize {
     ax_std::fs::metadata(path)
-        .map(|metadata| metadata.len() as usize)
+        .map(|metadata| usize::try_from(metadata.len()).unwrap_or(usize::MAX))
         .unwrap_or(0)
 }
 

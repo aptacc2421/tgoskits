@@ -30,6 +30,7 @@ interface TabsProps {
    */
   files: FilesCapability | null
   resources: VmSummary[]
+  live: boolean
   /** The host facts the shell read once; `null` when this build exports none. */
   host: HostInfo | null
   focusVm: number | null
@@ -48,6 +49,7 @@ export function Tabs(props: TabsProps) {
     capabilities,
     files,
     resources,
+    live,
     host,
     focusVm,
     onActivate,
@@ -163,6 +165,7 @@ export function Tabs(props: TabsProps) {
                     link={link}
                     files={files}
                     resources={resources}
+                    live={live}
                     host={host}
                     focusVm={focusVm}
                   />

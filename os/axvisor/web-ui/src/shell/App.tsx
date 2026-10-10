@@ -231,6 +231,7 @@ export default function App({ registry }: { registry: PanelRegistry }) {
           capabilities={capabilities}
           files={files}
           resources={vms}
+          live={live}
           host={host}
           focusVm={focusVm}
           onActivate={setActiveId}
