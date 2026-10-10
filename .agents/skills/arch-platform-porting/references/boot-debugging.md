@@ -333,6 +333,13 @@ ARM 的 `prepare_vcpu` 在 CPU pin 前失效并 disarm 旧等待，退休物理
 
 ## QEMU 调试模式
 
+### 测试资产 prebuild 的 system emulator
+
+无 qemu-user 时，`scripts/axbuild` 使用 `LinuxQemuSpec` 选择目标
+`qemu-system-*`，以 snapshot 根盘启动 `/guest/linux/linux-qemu`，通过 9P 挂载
+staging、case 和工作目录执行 `prebuild.sh`。排查时区分启动、网络、9P、脚本和完成
+标记；只有完成标记出现后才终止 QEMU，不能把模拟器启动当作 Starry 测试通过。
+
 ### axloader UEFI 网络启动
 
 - axloader v5 控制面只使用固件提供的网络协议。`SimpleNetwork`、`Ip4Config2`、`UDP4 Service Binding` 和 `TCP4 Service Binding` 必须来自同一个 UEFI 控制器；广播、MAC 和 HTTP 监听分别来自不同网卡不算可用实现。
