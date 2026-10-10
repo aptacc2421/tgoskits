@@ -87,7 +87,8 @@ ROC 部署固件会在交接时追加自身控制 DTB 的参数，控制 DTB 中
 ## OrangePi-5-Plus Linux 网卡直通
 
 物理网卡用例位于 `apps/axvisor/normal/board-orangepi-5-plus/pci-network`。
-它从构建机 `${env:AXVISOR_GUEST_ASSETS}/boot/Image` 打包内核（已验证 Linux 6.1.99），
+它使用板卡 `/guest` 已部署的 `linux/orangepi-5-plus-6.1.99` 内核与 `linux/initramfs.cpio`
+（与 `/boot/Image` 同一 Linux 6.1.99 构建），
 并使用匹配客户机根文件系统中的 `r8125`
 模块；旧 `/guest/linux/orangepi-5-plus` 的 6.1.43 映像在相同设备树下出现 PCIe
 链路训练失败。网线连接 `fe180000.pcie` 下的 RTL8125，客户机接口为 `enP3p49s0`，
@@ -332,6 +333,13 @@ ARM 的 `prepare_vcpu` 在 CPU pin 前失效并 disarm 旧等待，退休物理
 不在硬件绑定内按客户机长度分配缓冲区。
 
 ## QEMU 调试模式
+
+### 测试资产 prebuild 的 system emulator
+
+无 qemu-user 时，`scripts/axbuild` 使用 `LinuxQemuSpec` 选择目标
+`qemu-system-*`，以 snapshot 根盘启动 `/guest/linux/linux-qemu`，通过 9P 挂载
+staging、case 和工作目录执行 `prebuild.sh`。排查时区分启动、网络、9P、脚本和完成
+标记；只有完成标记出现后才终止 QEMU，不能把模拟器启动当作 Starry 测试通过。
 
 ### axloader UEFI 网络启动
 
