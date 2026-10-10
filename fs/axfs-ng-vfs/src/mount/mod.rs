@@ -1069,10 +1069,11 @@ impl Location {
         if self.is_readonly() {
             return Err(VfsError::ReadOnlyFilesystem);
         }
-        self.entry
+        let entry = self
+            .entry
             .as_dir()?
-            .create(name, node_type, permission, uid, gid)
-            .map(|entry| self.wrap(entry))
+            .create(name, node_type, permission, uid, gid)?;
+        Ok(self.wrap(entry))
     }
 
     pub fn create_symlink(
@@ -1086,10 +1087,11 @@ impl Location {
         if self.is_readonly() {
             return Err(VfsError::ReadOnlyFilesystem);
         }
-        self.entry
+        let entry = self
+            .entry
             .as_dir()?
-            .create_symlink(name, target, permission, uid, gid)
-            .map(|entry| self.wrap(entry))
+            .create_symlink(name, target, permission, uid, gid)?;
+        Ok(self.wrap(entry))
     }
 
     /// Creates an in-memory directory entry that exists only as a mount target.
@@ -1148,10 +1150,8 @@ impl Location {
         if !Arc::ptr_eq(&self.mountpoint, &node.mountpoint) {
             return Err(VfsError::CrossesDevices);
         }
-        self.entry
-            .as_dir()?
-            .link(name, &node.entry)
-            .map(|entry| self.wrap(entry))
+        let entry = self.entry.as_dir()?.link(name, &node.entry)?;
+        Ok(self.wrap(entry))
     }
 
     pub fn rename(&self, src_name: &str, dst_dir: &Self, dst_name: &str) -> VfsResult<()> {
@@ -1195,7 +1195,8 @@ impl Location {
             dst_dir.entry.as_dir()?,
             dst_name,
             options,
-        )
+        )?;
+        Ok(())
     }
 
     pub fn unlink(&self, name: &str, is_dir: bool) -> VfsResult<()> {
@@ -1219,10 +1220,8 @@ impl Location {
         if self.is_readonly() && (options.create || options.create_new) {
             return Err(VfsError::ReadOnlyFilesystem);
         }
-        self.entry
-            .as_dir()?
-            .open_file_with_status(name, options)
-            .map(|(entry, created)| (self.wrap(entry).resolve_mountpoint(), created))
+        let opened = self.entry.as_dir()?.open_file_with_status(name, options)?;
+        Ok((self.wrap(opened.0).resolve_mountpoint(), opened.1))
     }
 
     pub fn read_dir(

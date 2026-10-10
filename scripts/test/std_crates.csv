@@ -18,6 +18,7 @@ rdif-block
 aic8800
 rdif-eth
 ax-fs-ng
+axfs-ng-vfs
 ax-io
 rsext4
 ax-sched
