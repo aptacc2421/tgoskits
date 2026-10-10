@@ -85,8 +85,10 @@ pub(crate) fn prepare_guest_vm(raw_cfg: &str) -> Result<VmCreatePlan> {
 }
 
 pub fn init_guest_vm(raw_cfg: &str) -> Result<usize> {
-    let plan = prepare_guest_vm(raw_cfg)?;
-    let vm_id = plan.config.id();
+    let vm_id = GuestConfig::from_toml(raw_cfg)
+        .context("parse VM TOML configuration")?
+        .base
+        .id;
 
     #[cfg(all(any(
         target_arch = "aarch64",
@@ -97,9 +99,8 @@ pub fn init_guest_vm(raw_cfg: &str) -> Result<usize> {
         &GuestConfig::from_toml(raw_cfg).context("parse VM TOML configuration")?,
     );
 
-    let operation = crate::manager::manager().create_plan(plan)?;
     crate::manager::manager()
-        .wait_for_created_vm(operation)
+        .create_vm_from_toml_and_wait(raw_cfg)
         .with_context(|| format!("create VM[{vm_id}]"))?;
 
     #[cfg(all(any(

@@ -65,10 +65,15 @@ export function creationBody(schema: VmSchema, values: FormValues): CreationBody
 /** One value as the field's type means it, or why the text cannot be it. */
 function fieldValue(field: VmSchemaField, text: string): FieldValue {
   switch (field.type) {
-    case 'integer':
-      return /^\d+$/.test(text)
-        ? { value: Number(text) }
-        : { error: `「${field.name}」要一个非负整数，收到「${text}」` }
+    case 'integer': {
+      if (!/^\d+$/.test(text)) {
+        return { error: `「${field.name}」要一个非负整数，收到「${text}」` }
+      }
+      const value = Number(text)
+      return Number.isSafeInteger(value)
+        ? { value }
+        : { error: `「${field.name}」超出浏览器可精确表示的整数范围` }
+    }
     case 'address': {
       const address = addressValue(text)
       return address === null

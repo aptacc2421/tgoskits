@@ -15,7 +15,11 @@ pub(crate) fn missing_guest_image(config: &GuestConfig) -> Option<String> {
         .kernel
         .boot_image_paths()
         .filter(|path| !path.is_empty())
-        .find(|path| ax_std::fs::metadata(path).is_err())
+        .find(|path| {
+            ax_std::fs::metadata(path)
+                .map(|metadata| !metadata.is_file())
+                .unwrap_or(true)
+        })
         .map(str::to_owned)
         .or_else(|| {
             config
@@ -23,7 +27,11 @@ pub(crate) fn missing_guest_image(config: &GuestConfig) -> Option<String> {
                 .virtual_devices
                 .iter()
                 .filter_map(file_backing_path)
-                .find(|path| ax_std::fs::metadata(path).is_err())
+                .find(|path| {
+                    ax_std::fs::metadata(path)
+                        .map(|metadata| !metadata.is_file())
+                        .unwrap_or(true)
+                })
         })
 }
 

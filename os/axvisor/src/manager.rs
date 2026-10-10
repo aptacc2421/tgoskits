@@ -74,19 +74,28 @@ impl AxvmManager {
     }
 
     pub fn create_vm_from_toml(&self, raw_cfg: &str) -> Result<VmOperation<VmHandle>> {
+        let _lifecycle = self.lifecycle.lock_unpoisoned();
+        self.create_vm_from_toml_locked(raw_cfg)
+    }
+
+    fn create_vm_from_toml_locked(&self, raw_cfg: &str) -> Result<VmOperation<VmHandle>> {
         let plan = crate::config::prepare_guest_vm(raw_cfg)?;
-        self.create_plan(plan)
+        self.create_plan_locked(plan)
     }
 
     /// Creates one VM and waits until its control task has finished setup.
-    #[cfg(feature = "web")]
     pub fn create_vm_from_toml_and_wait(&self, raw_cfg: &str) -> Result<VmHandle> {
         let _lifecycle = self.lifecycle.lock_unpoisoned();
-        let operation = self.create_vm_from_toml(raw_cfg)?;
+        let operation = self.create_vm_from_toml_locked(raw_cfg)?;
         self.wait_for_created_vm_locked(operation)
     }
 
     pub fn create_plan(&self, plan: axvm::VmCreatePlan) -> Result<VmOperation<VmHandle>> {
+        let _lifecycle = self.lifecycle.lock_unpoisoned();
+        self.create_plan_locked(plan)
+    }
+
+    fn create_plan_locked(&self, plan: axvm::VmCreatePlan) -> Result<VmOperation<VmHandle>> {
         #[cfg(feature = "web")]
         let vm_id = plan.config.id();
         #[cfg(feature = "web")]
@@ -164,7 +173,7 @@ impl AxvmManager {
             return Ok(false);
         };
         let operation = self
-            .create_vm_from_toml(entry.toml())
+            .create_vm_from_toml_locked(entry.toml())
             .with_context(|| format!("create VM[{vm_id}] from VM pool entry `{}`", entry.path()))?;
         self.wait_for_created_vm_locked(operation)
             .with_context(|| {
@@ -185,6 +194,7 @@ impl AxvmManager {
     }
 
     pub fn stop_vm(&self, vm_id: VMId) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock_unpoisoned();
         self.require_vm(vm_id)?
             .stop(StopReason::Forced)?
             .wait()
@@ -192,6 +202,7 @@ impl AxvmManager {
     }
 
     pub fn start_vm(&self, vm_id: VMId) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock_unpoisoned();
         self.require_vm(vm_id)?
             .start()?
             .wait()
@@ -200,10 +211,12 @@ impl AxvmManager {
     }
 
     pub fn pause_vm(&self, vm_id: VMId) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock_unpoisoned();
         self.require_vm(vm_id)?.pause()?.wait().context("pause VM")
     }
 
     pub fn resume_vm(&self, vm_id: VMId) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock_unpoisoned();
         self.require_vm(vm_id)?
             .resume()?
             .wait()
@@ -211,6 +224,7 @@ impl AxvmManager {
     }
 
     pub fn reset_vm(&self, vm_id: VMId) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock_unpoisoned();
         self.require_vm(vm_id)?
             .reset()?
             .wait()
@@ -272,7 +286,11 @@ impl AxvmManager {
         Self::open_file(file_name)?
             .metadata()
             .map_err(|error| anyhow!("read metadata for guest image file `{file_name}`: {error}"))
-            .map(|metadata| metadata.size() as usize)
+            .and_then(|metadata| {
+                usize::try_from(metadata.size()).map_err(|_| {
+                    anyhow!("guest image file `{file_name}` is too large for this target")
+                })
+            })
     }
 
     pub fn read_file_exact(file_name: &str, read_size: usize) -> Result<Vec<u8>> {

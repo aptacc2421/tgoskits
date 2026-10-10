@@ -349,7 +349,7 @@ def check_config_inputs():
     """Creating from a path and writing to the pool reject what they cannot use.
 
     Only refusals are exercised here: a valid save would add a file to the case's
-    pool directory and change what every later phase lists, and the accepted path
+    pool directory and change what every later phase lists, and the completed path
     is already covered by `sh/` provisioning. The refusals are the part that must
     not regress — a config path that is not there and a pool name that could
     escape its directory alike have to be errors.
@@ -608,9 +608,9 @@ def vm_status(body):
 def poll_vm_status(vm_id, expected):
     """Poll `GET /api/vms/{id}` until it reports `expected`.
 
-    `start` returns once the request is accepted, so the running state is
-    observed through the detail endpoint. A transition that never arrives fails
-    on the poll deadline.
+    `start` waits for the lifecycle operation to complete, and the running state
+    is still observed through the detail endpoint. A transition that never
+    arrives fails on the poll deadline.
     """
     start = time.monotonic()
     last = None
@@ -633,11 +633,10 @@ def check_guest_ran(vm_id):
     """Poll until the guest has entered the vCPU run loop at least once.
 
     `guest_entry_count` is incremented by the hypervisor only after a successful
-    guest entry, so this distinguishes a started guest from a start that only
-    flipped a status. It must be polled, not read once: `start` is accepted and
-    the status flips to `running` before the vCPU task has entered the guest, so
-    a single read can observe 0. A guest that never enters fails on the poll
-    deadline.
+    guest entry, so this distinguishes a started guest from a status transition
+    that made no guest progress. It must be polled, not read once, because the
+    completed HTTP action does not itself prove guest execution. A guest that
+    never enters fails on the poll deadline.
     """
     start = time.monotonic()
     last = None
@@ -674,7 +673,7 @@ def start_vm(vm_id, expected_body_status="running"):
 
 
 def create_vm(toml):
-    """Create one VM from a TOML body, asserting it was accepted."""
+    """Create one VM from a TOML body, asserting it completed."""
     status, body = request("POST", "/api/vms/create", body=json.dumps({"toml": toml}))
     expect_status("POST /api/vms/create (id %s)" % _toml_id(toml), status, 200)
     return body
@@ -698,7 +697,7 @@ def close_vm(vm_id):
             "  pool http probe: DELETE /api/vms/%d -> no response (%s); checking state"
             % (vm_id, error)
         )
-    # A lost response also covers the case where the delete was accepted: the
+    # A lost response also covers the case where the delete completed: the
     # registry has to show the VM gone either way.
     poll_vm_gone(vm_id)
 

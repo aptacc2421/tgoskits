@@ -4,7 +4,7 @@
 //! under the list: `guest_entry_count` advances only after a vCPU really
 //! re-entered the guest and `guest_park_count` only after one really parked, so
 //! they are the evidence that a start or a pause did something — which a status
-//! string alone never is, because it flips when the request is accepted.
+//! string alone never is, because it flips before the guest counters settle.
 
 import {
   Dialog,

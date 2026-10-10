@@ -29,7 +29,7 @@ struct FormParams {
     kernel_load_addr: usize,
     cmdline: Option<String>,
     memory_base: usize,
-    memory_mb: usize,
+    memory_bytes: usize,
 }
 
 /// `GET /api/vms` — list the manager's owned VM snapshots.
@@ -93,20 +93,46 @@ const FORM_ENTRY_POINT: &str = "0x8000";
 const FORM_KERNEL_LOAD_ADDR: &str = "0x20_0000";
 #[cfg(target_arch = "x86_64")]
 const FORM_MEMORY_BASE: &str = "0x0";
+#[cfg(target_arch = "loongarch64")]
+const FORM_ENTRY_POINT: &str = "0x0020_0040";
+#[cfg(target_arch = "loongarch64")]
+const FORM_KERNEL_LOAD_ADDR: &str = "0x0020_0000";
+#[cfg(target_arch = "loongarch64")]
+const FORM_MEMORY_BASE: &str = "0x0";
 
 fn form_params(fields: &Value) -> Result<FormParams, String> {
+    let cpu_num = fields.get("cpu_num").map_or(Ok(1), |value| {
+        let cpu_num = value
+            .as_u64()
+            .ok_or_else(|| "`cpu_num` must be a non-negative integer".to_string())?;
+        usize::try_from(cpu_num)
+            .map_err(|_| "`cpu_num` exceeds the target address space".to_string())
+    })?;
+    if !(1..=usize::BITS as usize).contains(&cpu_num) {
+        return Err(format!("`cpu_num` must be between 1 and {}", usize::BITS));
+    }
+
+    let memory_mb = fields
+        .get("memory_mb")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "`memory_mb` is required and must be a non-negative integer".to_string())?;
+    if memory_mb == 0 {
+        return Err("`memory_mb` must be greater than zero".to_string());
+    }
+    let memory_bytes = usize::try_from(memory_mb)
+        .ok()
+        .and_then(|memory_mb| memory_mb.checked_mul(1024 * 1024))
+        .ok_or_else(|| "`memory_mb` is too large".to_string())?;
+
     Ok(FormParams {
-        id: fields
-            .get("id")
-            .and_then(Value::as_u64)
-            .ok_or("`id` is required")? as usize,
+        id: usize_field(fields, "id", "`id` is required")?,
         name: text_field(fields, "name")?,
         guest_type: match fields.get("guest_type").and_then(Value::as_str) {
             None | Some("virtualized") => GuestType::Virtualized,
             Some("passthrough") => GuestType::Passthrough,
             Some(other) => return Err(format!("unknown guest type `{other}`")),
         },
-        cpu_num: fields.get("cpu_num").and_then(Value::as_u64).unwrap_or(1) as usize,
+        cpu_num,
         entry_point: address_field(fields, "entry_point")?,
         kernel_path: text_field(fields, "kernel_path")?,
         kernel_load_addr: address_field(fields, "kernel_load_addr")?,
@@ -120,11 +146,7 @@ fn form_params(fields: &Value) -> Result<FormParams, String> {
                 .to_string(),
         ),
         memory_base: address_field(fields, "memory_base")?,
-        memory_mb: fields
-            .get("memory_mb")
-            .and_then(Value::as_u64)
-            .ok_or("`memory_mb` is required and must be a non-negative integer")?
-            as usize,
+        memory_bytes,
     })
 }
 
@@ -145,7 +167,7 @@ fn form_config(params: FormParams, rootfs_path: Option<&str>) -> GuestConfig {
             cmdline: params.cmdline,
             memory_regions: vec![VmMemConfig {
                 gpa: params.memory_base,
-                size: params.memory_mb.saturating_mul(1024 * 1024),
+                size: params.memory_bytes,
                 flags: GUEST_RAM_FLAGS,
                 map_type: VmMemMappingType::MapAlloc,
             }],
@@ -170,6 +192,14 @@ fn form_config(params: FormParams, rootfs_path: Option<&str>) -> GuestConfig {
     config
 }
 
+fn usize_field(fields: &Value, name: &str, missing: &str) -> Result<usize, String> {
+    let value = fields
+        .get(name)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| missing.to_string())?;
+    usize::try_from(value).map_err(|_| format!("`{name}` exceeds the target address space"))
+}
+
 fn text_field(fields: &Value, name: &str) -> Result<String, String> {
     fields
         .get(name)
@@ -184,7 +214,7 @@ fn address_field(fields: &Value, name: &str) -> Result<usize, String> {
     match fields.get(name) {
         Some(Value::Number(number)) => number
             .as_u64()
-            .map(|value| value as usize)
+            .and_then(|value| usize::try_from(value).ok())
             .ok_or_else(|| format!("`{name}` must be an address")),
         Some(Value::String(text)) => {
             let text = text.trim().replace('_', "");
@@ -395,14 +425,36 @@ fn vm_action(id: usize, action: VmAction) -> Result<Json<Value>, StatusCode> {
 
 fn map_axvm_error(error: anyhow::Error) -> StatusCode {
     match error.root_cause().downcast_ref::<AxVmError>() {
-        Some(AxVmError::InvalidTransition { .. } | AxVmError::InvalidState { .. }) => {
-            StatusCode::CONFLICT
-        }
+        Some(
+            AxVmError::InvalidTransition { .. }
+            | AxVmError::VcpuState { .. }
+            | AxVmError::Backend {
+                source: axvm::VmBackendError::InvalidState | axvm::VmBackendError::ResourceBusy,
+                ..
+            }
+            | AxVmError::InvalidState { .. }
+            | AxVmError::ResourceConflict { .. }
+            | AxVmError::EntryClosed { .. }
+            | AxVmError::StaleRun { .. },
+        ) => StatusCode::CONFLICT,
+        Some(
+            AxVmError::InvalidInput { .. }
+            | AxVmError::InvalidConfig { .. }
+            | AxVmError::Backend {
+                source: axvm::VmBackendError::InvalidInput,
+                ..
+            },
+        ) => StatusCode::BAD_REQUEST,
         Some(AxVmError::OutOfMemory { .. } | AxVmError::ResourceUnavailable { .. }) => {
             StatusCode::SERVICE_UNAVAILABLE
         }
+        Some(AxVmError::OperationCancelled { .. }) => StatusCode::SERVICE_UNAVAILABLE,
         Some(AxVmError::VmNotFound { .. }) => StatusCode::NOT_FOUND,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+        Some(error) => {
+            error!("management HTTP action failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+        None => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

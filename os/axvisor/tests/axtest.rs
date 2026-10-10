@@ -82,7 +82,7 @@ mod tests {
     use axvisor::builtin::{install_builtin, selected_configs};
 
     #[test]
-    fn placed_file_cannot_be_reopened_as_an_upload() {
+    fn placed_file_can_be_reopened_idempotently() {
         let directory = "/tmp/file-transfer-reopen";
         let id = "placed-reopen";
         let _ = std::fs::remove_dir_all(directory);
@@ -100,10 +100,10 @@ mod tests {
             Some("/tmp/file-transfer-reopen/kernel")
         );
 
-        match crate::files::open(id, directory, 4) {
-            Err(crate::files::FileError::Conflict { offset, .. }) => ax_assert_eq!(offset, 4),
-            _ => panic!("reopening a placed file did not return a conflict"),
-        }
+        let reopened = crate::files::open(id, directory, 4).unwrap();
+        ax_assert_eq!(reopened.state, "placed");
+        ax_assert_eq!(reopened.written, 4);
+        ax_assert_eq!(reopened.path.as_deref(), placed.path.as_deref());
         ax_assert_eq!(
             std::fs::read_to_string(placed.path.unwrap()).unwrap(),
             "data"
@@ -112,11 +112,31 @@ mod tests {
     }
 
     #[test]
+    fn oversized_staging_file_cannot_be_marked_uploaded() {
+        let directory = "/tmp/file-transfer-oversized";
+        let id = "oversized-staging";
+        let _ = std::fs::remove_dir_all(directory);
+        std::fs::create_dir_all(format!("{directory}/.files")).unwrap();
+        std::fs::write(format!("{directory}/.files/{id}"), b"12345").unwrap();
+
+        match crate::files::open(id, directory, 4) {
+            Err(crate::files::FileError::Conflict { offset, .. }) => ax_assert_eq!(offset, 5),
+            _ => panic!("a staging file larger than its declaration was accepted"),
+        }
+        crate::files::drop(id).unwrap();
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn diskless_boot_keeps_memory_root_with_inherited_root_parameter() {
-        ax_assert!(
-            ax_fs_ng::block::runtime::BlockRuntime::installed_devices()
-                .is_none_or(|devices| devices.is_empty())
-        );
+        // The shared QEMU axtest image exposes an NVMe device. This scenario
+        // is meaningful only on the diskless target where the runtime has no
+        // block device to prepare, so leave it for that target's harness.
+        if ax_fs_ng::block::runtime::BlockRuntime::installed_devices()
+            .is_some_and(|devices| !devices.is_empty())
+        {
+            return axtest::AxTestResult::Ok;
+        }
         // The bundled kernel exists, but the board DTB is outside the archive.
         // Its absence must affect that VM at load time, not host preparation.
         std::fs::create_dir_all("/guest/builtin/configs").unwrap();
@@ -821,7 +841,7 @@ mod tests {
 
     #[test]
     fn vm_pool_scan_walks_subdirectories_and_ignores_documents_that_are_no_config() {
-        use crate::pool::{MAX_SCAN_DEPTH, scan_dir, scan_dirs, sources};
+        use crate::pool::{MAX_SCAN_DEPTH, browse, scan_dir, scan_dirs, sources};
 
         let root = "/tmp/axvisor-vm-pool-walk";
         reset_test_dir(root);
@@ -852,6 +872,10 @@ mod tests {
         // that is the difference the unrelated document must not blur.
         fs::write(&format!("{nested}/damaged.toml"), b"[base]\nid = 12,\n")
             .expect("write damaged entry");
+        let staging = format!("{root}/.files");
+        fs::create_dir(&staging).expect("create private staging directory");
+        fs::write(&format!("{staging}/staged.toml"), entry_toml(14, "staged"))
+            .expect("write staged config fixture");
 
         let pool = scan_dir(root);
         let ids: alloc::vec::Vec<usize> = pool.entries().iter().map(|entry| entry.id()).collect();
@@ -865,6 +889,15 @@ mod tests {
             .map(|issue| format!("{} {}", issue.kind().as_str(), issue.path()))
             .collect();
         ax_assert_eq!(reported, [format!("invalid-toml {nested}/damaged.toml")]);
+        ax_assert!(
+            pool.entries()
+                .iter()
+                .all(|entry| !entry.path().contains("/.files/"))
+        );
+        let hidden = browse(&staging);
+        ax_assert!(hidden.files().is_empty());
+        ax_assert_eq!(hidden.entries().len(), 0);
+        ax_assert_eq!(hidden.issues().len(), 1);
 
         // The guest tree is a source as well, read last so the narrower ones
         // keep precedence; a file reached through two sources is one candidate

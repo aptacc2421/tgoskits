@@ -9,7 +9,8 @@
 //! The operations are the ones the hypervisor already declares, one per step:
 //!
 //! - **open** starts a session from a client-chosen id, so sending the same file
-//!   twice resumes the first attempt instead of staging the bytes twice;
+//!   to the same destination twice resumes the first attempt instead of staging
+//!   the bytes twice;
 //! - **send** carries one chunk per request, so what a transfer holds in memory
 //!   is bounded by the chunk size rather than by the file;
 //! - **resume** (`HEAD`) is how an interrupted transfer asks where it stopped.
@@ -81,6 +82,7 @@ export class FilesService implements FilesCapability {
   private snapshot: FilesSnapshot = EMPTY_SNAPSHOT
   private readonly listeners = new Set<() => void>()
   private readonly aborts = new Map<string, AbortController>()
+  private readonly active = new Map<string, Promise<void>>()
 
   constructor(
     private readonly api: ApiClient,
@@ -134,7 +136,27 @@ export class FilesService implements FilesCapability {
    * without waiting for it.
    */
   async upload(file: File, directory: string, name: string = file.name): Promise<void> {
-    const id = sessionId(file)
+    const id = sessionId(file, directory, name)
+    const current = this.active.get(id)
+    if (current !== undefined) {
+      await current
+      return
+    }
+    const task = this.uploadOnce(file, directory, name, id)
+    this.active.set(id, task)
+    try {
+      await task
+    } finally {
+      if (this.active.get(id) === task) this.active.delete(id)
+    }
+  }
+
+  private async uploadOnce(
+    file: File,
+    directory: string,
+    name: string,
+    id: string,
+  ): Promise<void> {
     this.aborts.set(id, new AbortController())
     this.track({
       id,
@@ -147,28 +169,15 @@ export class FilesService implements FilesCapability {
       file,
     })
     try {
-      // `open` is idempotent for the same target: sending the same file again
-      // answers with the session it already has and the bytes already on disk,
-      // so a fresh send and a restart share this path. A 409 here means the id
-      // is staged under another target or another length — the operator
-      // re-pointed this file, which disowns the old staging: drop it and open
-      // fresh instead of failing the field.
-      let session: FileSession
-      try {
-        session = await this.api.post<FileSession>(this.link.url('open'), {
-          id,
-          directory,
-          total: file.size,
-        })
-      } catch (e) {
-        if (!(e instanceof ApiError && e.status === 409)) throw e
-        await this.api.del(this.link.url('drop', { id }))
-        session = await this.api.post<FileSession>(this.link.url('open'), {
-          id,
-          directory,
-          total: file.size,
-        })
-      }
+      // `open` is idempotent for the same source and destination: sending the
+      // same file again answers with the session it already has and the bytes
+      // already on disk. A conflict is left intact; another consumer may own
+      // the staged bytes, and dropping it would cancel that transfer.
+      const session = await this.api.post<FileSession>(this.link.url('open'), {
+        id,
+        directory,
+        total: file.size,
+      })
       // A session that is already placed holds bytes that are the target file:
       // sending again would only ask for a placement that exists.
       if (session.state === 'placed') {
@@ -194,9 +203,24 @@ export class FilesService implements FilesCapability {
 
   /** Continues a transfer whose bytes this service still holds. */
   async resume(id: string): Promise<void> {
+    const current = this.active.get(id)
+    if (current !== undefined) {
+      await current
+      return
+    }
     const transfer = this.transfers.find((row) => row.id === id)
     const file = transfer?.file ?? null
     if (transfer === undefined || file === null) return
+    const task = this.resumeOnce(id, transfer, file)
+    this.active.set(id, task)
+    try {
+      await task
+    } finally {
+      if (this.active.get(id) === task) this.active.delete(id)
+    }
+  }
+
+  private async resumeOnce(id: string, transfer: Transfer, file: File): Promise<void> {
     this.aborts.set(id, new AbortController())
     try {
       // The offset comes from the disk, through the plane that owns it: a local
@@ -259,7 +283,16 @@ export class FilesService implements FilesCapability {
     // A transfer still running has to stop before its session goes away, or the
     // next chunk would arrive for a session that is gone.
     this.aborts.get(id)?.abort()
-    await this.api.del(this.link.url('drop', { id }))
+    const current = this.active.get(id)
+    if (current !== undefined) await current
+    try {
+      await this.api.del(this.link.url('drop', { id }))
+    } catch (e) {
+      // A drop racing the opening request can observe no session. The local row
+      // is still gone, and treating that result as success avoids a dead row in
+      // the panel without hiding a real backend failure.
+      if (!(e instanceof ApiError && e.status === 404)) throw e
+    }
     this.transfers = this.transfers.filter((row) => row.id !== id)
     this.publish()
     await this.refresh()
@@ -360,12 +393,12 @@ export function stateOf(transfer: Transfer): FileState {
 /**
  * The id one file is staged under.
  *
- * Stable for one file, so sending it again resumes the first attempt, and
- * distinct for a different file that happens to share its name and length: the
- * modification stamp is part of it. The control plane accepts ascii
- * alphanumerics plus `-_.+` as a single path component.
+ * Stable for one source file and destination, so sending it again resumes the
+ * same attempt while copying that file to another path gets an independent
+ * session. The modification stamp and a short stable hash distinguish target
+ * paths without allowing a path separator into the id.
  */
-export function sessionId(file: File): string {
+export function sessionId(file: File, directory = '', name = file.name): string {
   const stem = file.name
     .replace(/[^A-Za-z0-9-_.+]/g, '-')
     // Two dots anywhere are refused by the control plane, and a leading one too,
@@ -373,8 +406,19 @@ export function sessionId(file: File): string {
     // dot is kept so the id still reads like the file it belongs to.
     .replace(/\.{2,}/g, '-')
     .replace(/^\.+/, '-')
-    .slice(0, 32)
-  return `${stem}-${file.size}-${file.lastModified}`.slice(0, SESSION_ID_MAX)
+  const hash = stableHash(`${file.name}\0${directory}\0${name}\0${file.size}\0${file.lastModified}`)
+  const suffix = `${file.size}-${file.lastModified}-${hash}`
+  const readableLength = Math.max(1, SESSION_ID_MAX - suffix.length - 1)
+  return `${stem.slice(0, readableLength) || 'file'}-${suffix}`
+}
+
+function stableHash(value: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
 }
 
 /** Reads the reported offset, which is the only position a client may trust. */

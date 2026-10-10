@@ -38,6 +38,7 @@ use alloc::{
     collections::BTreeSet,
     format,
     string::{String, ToString},
+    vec,
     vec::Vec,
 };
 use std::sync::{LazyLock, Mutex};
@@ -62,6 +63,13 @@ pub const DEFAULT_VM_ROOT: &str = "/guest";
 /// plane for as long as it takes to walk it. Configs deeper than this are not
 /// candidates.
 pub const MAX_SCAN_DEPTH: usize = 8;
+
+/// Directory owned by the resumable file-transfer service.
+///
+/// It is kept out of pool scans and folder pickers even when a transfer target
+/// happens to be one of the configured pool roots.
+const STAGING_DIR: &str = ".files";
+const PRIVATE_DIRECTORY_DETAIL: &str = "the file-transfer staging directory is private";
 
 static SAVE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -295,6 +303,9 @@ struct Scan {
 impl Scan {
     /// Read `directory`, then every directory below it, to [`MAX_SCAN_DEPTH`].
     fn walk(&mut self, directory: &str, depth: usize) {
+        if is_staging_path(directory) {
+            return;
+        }
         let read_dir = match ax_std::fs::read_dir(directory) {
             Ok(read_dir) => read_dir,
             Err(error) => {
@@ -320,7 +331,7 @@ impl Scan {
             // A symlink to a directory has its own type, so it is not descended
             // into; that also keeps a link pointing back up the tree finite.
             if is_directory {
-                if depth < MAX_SCAN_DEPTH {
+                if !is_staging_path(&path) && depth < MAX_SCAN_DEPTH {
                     self.walk(&path, depth + 1);
                 }
                 continue;
@@ -566,6 +577,19 @@ impl Folder {
 /// back as an empty [`Folder`] with a [`IssueKind::DirectoryUnavailable`] issue,
 /// the same shape a pool scan uses.
 pub fn browse(path: &str) -> Folder {
+    if is_staging_path(path) {
+        return Folder {
+            path: path.to_string(),
+            parent: parent_path(path),
+            directories: Vec::new(),
+            files: Vec::new(),
+            entries: Vec::new(),
+            issues: vec![Issue {
+                path: path.to_string(),
+                kind: IssueKind::DirectoryUnavailable(PRIVATE_DIRECTORY_DETAIL.to_string()),
+            }],
+        };
+    }
     let mut directories = Vec::new();
     let mut files = Vec::new();
     let mut entries = Vec::new();
@@ -589,6 +613,9 @@ pub fn browse(path: &str) -> Folder {
                     .next()
                     .unwrap_or(&entry_path)
                     .to_string();
+                if name == ".files" {
+                    continue;
+                }
                 // `ax_std::fs::metadata` opens the path, which fails on a
                 // directory, so the entry's own type is what decides whether
                 // this is a folder to walk into or a file to try to parse.
@@ -603,7 +630,7 @@ pub fn browse(path: &str) -> Folder {
                     // measured is still a file whose name is known.
                     files.push(File {
                         size: ax_std::fs::metadata(&entry_path)
-                            .map(|metadata| metadata.len() as usize)
+                            .map(|metadata| usize::try_from(metadata.len()).unwrap_or(usize::MAX))
                             .unwrap_or(0),
                         name,
                         path: entry_path.clone(),
@@ -640,24 +667,31 @@ pub fn browse(path: &str) -> Folder {
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     issues.sort_by(|left, right| left.path.cmp(&right.path));
 
-    let parent = {
-        let trimmed = path.trim_end_matches('/');
-        match trimmed.rsplit_once('/') {
-            // `/guest` and `/guest/` both sit directly under the root.
-            Some(("", _)) => Some("/".to_string()),
-            Some((parent, _)) => Some(parent.to_string()),
-            // No separator at all: a relative single component, or the root.
-            None => None,
-        }
-    };
-
     Folder {
         path: path.to_string(),
-        parent,
+        parent: parent_path(path),
         directories,
         files,
         entries,
         issues,
+    }
+}
+
+/// Whether a path names the private staging namespace or one of its children.
+fn is_staging_path(path: &str) -> bool {
+    path.trim_matches('/')
+        .split('/')
+        .any(|component| component == STAGING_DIR)
+}
+
+fn parent_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rsplit_once('/') {
+        // `/guest` and `/guest/` both sit directly under the root.
+        Some(("", _)) => Some("/".to_string()),
+        Some((parent, _)) => Some(parent.to_string()),
+        // No separator at all: a relative single component, or the root.
+        None => None,
     }
 }
 

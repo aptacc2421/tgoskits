@@ -1,5 +1,5 @@
-//! Lifecycle settling: **HTTP 200 only means the request was accepted, not that the
-//! terminal state was reached**.
+//! Lifecycle settling: **HTTP 200 confirms the owner transition, not that the
+//! terminal state and guest counters have settled**.
 //!
 //! After every mutating operation this polls the VM detail until the assertion holds
 //! or it times out. The assertion discipline matches `http_probe.py` in

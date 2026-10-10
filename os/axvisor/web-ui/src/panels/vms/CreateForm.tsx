@@ -389,7 +389,7 @@ function FileField({
     }
     setRefused(null)
     commit()
-    const id = sessionId(file)
+    const id = sessionId(file, destination)
     setActiveId(id)
     // The destination keeps the file's own name; the field value becomes the
     // path the placed file will answer to. Joining rather than concatenating is

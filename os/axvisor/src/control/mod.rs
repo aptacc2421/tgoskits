@@ -31,15 +31,10 @@
 //! exports from this module is therefore either [`serve`] (the entry point) or
 //! a status query used by the startup banner.
 
-#[cfg(feature = "web")]
 pub mod capability;
-#[cfg(feature = "web")]
 pub mod domain;
-#[cfg(feature = "web")]
 pub(crate) mod network_console;
-#[cfg(feature = "web")]
 pub(crate) mod network_status;
-#[cfg(feature = "web")]
 pub mod transport;
 #[cfg(feature = "web-ui")]
 pub mod web;
@@ -52,7 +47,6 @@ pub mod web;
 /// This is the assembly root: the router is built here, from the capability
 /// table, and handed to the transport as data. That keeps the transport from
 /// importing the capability layer and keeps the paths in one place.
-#[cfg(feature = "web")]
 pub fn serve() -> anyhow::Result<()> {
     let router = capability::table::router();
 
@@ -66,13 +60,11 @@ pub fn serve() -> anyhow::Result<()> {
 }
 
 /// Configured HTTP listener address used by the startup access banner.
-#[cfg(feature = "web")]
 pub(crate) fn bind_addr() -> &'static str {
     transport::server::bind_addr()
 }
 
 /// Whether the HTTP listener has successfully bound its configured address.
-#[cfg(feature = "web")]
 pub(crate) fn is_listening() -> bool {
     transport::server::is_listening()
 }

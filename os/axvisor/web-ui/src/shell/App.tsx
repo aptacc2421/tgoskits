@@ -18,7 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Search, Server } from 'lucide-react'
 import { useApiClient } from '@/api/client'
 import { useVmFeed } from '@/api/events'
-import { describeError, type Manifest, type PanelRegistry } from '@/api/types'
+import { describeError, type Manifest, type PanelRegistry, type VmSummary } from '@/api/types'
 import { Capabilities } from '@/capability/accessor'
 import { loadManifest } from '@/capability/manifest'
 import { Button } from '@/components/ui/button'
@@ -52,7 +52,15 @@ export default function App({ registry }: { registry: PanelRegistry }) {
   // the `vms` panel's event link. A build that does not declare it keeps a static
   // list rather than retrying a route that does not exist.
   const feedUrl = capabilities.maybeUrl('vms', 'events')
-  const { vms, live } = useVmFeed(feedUrl)
+  const registryUrl = capabilities.maybeUrl('vms', 'list')
+  const refreshRegistry = useCallback(async (): Promise<VmSummary[]> => {
+    if (registryUrl === null) return []
+    return api.get<VmSummary[]>(registryUrl)
+  }, [api, registryUrl])
+  const { vms, live } = useVmFeed(
+    feedUrl,
+    registryUrl === null ? undefined : refreshRegistry,
+  )
   // The host facts the header names and every panel is handed. They come from
   // the descriptor rather than from the host panel's own route, because the
   // shell may not name a panel kind: the descriptor publishes the same object.

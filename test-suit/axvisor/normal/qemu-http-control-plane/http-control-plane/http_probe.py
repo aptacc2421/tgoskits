@@ -141,13 +141,11 @@ BASE = os.environ.get("AXVISOR_HTTP_BASE", "http://127.0.0.1:8080").rstrip("/")
 CASE_DIR = os.environ.get(
     "AXVISOR_HTTP_CASE_DIR", os.path.dirname(os.path.abspath(__file__))
 )
-LIB_DIR = "os/axvisor/configs/vms/qemu/aarch64"
 CONNECT_TIMEOUT = float(os.environ.get("AXVISOR_HTTP_CONNECT_TIMEOUT", "120"))
 REQUEST_TIMEOUT = float(os.environ.get("AXVISOR_HTTP_REQUEST_TIMEOUT", "5"))
-# Completion-awaited lifecycle routes (create/start/resume/delete) block inside
-# the handler until the owner publishes its postcondition, so they get the full
-# transition deadline instead of the short per-request timeout used by the
-# accepted-only routes (pause/stop), the error checks and the poll loops.
+# Lifecycle routes block inside the handler until the owner publishes its
+# postcondition, so they get the full transition deadline instead of the short
+# per-request timeout used by metadata/error checks and poll loops.
 COMPLETION_TIMEOUT = float(
     os.environ.get("AXVISOR_HTTP_COMPLETION_TIMEOUT", "120")
 )
@@ -586,6 +584,19 @@ def check_create_form(packaged_kernel_path):
     if "console=" not in str(fields["cmdline"].get("default")):
         raise AssertionError("cmdline has no console default: %r" % fields["cmdline"])
     print("  http probe: schema advertises %d fields" % len(fields))
+
+    status, _ = request(
+        "POST",
+        "/api/vms/create",
+        fields_body(packaged_kernel_path, cpu_num=1 << 63),
+    )
+    check("POST /api/vms/create (oversized cpu count)", status, 400)
+    status, _ = request(
+        "POST",
+        "/api/vms/create",
+        fields_body(packaged_kernel_path, memory_mb=0),
+    )
+    check("POST /api/vms/create (zero memory)", status, 400)
 
     status, body = request("GET", "/api/vms/browse?path=/guest/builtin/images")
     check("GET /api/vms/browse (file candidates)", status, 200)

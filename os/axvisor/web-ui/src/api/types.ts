@@ -268,9 +268,8 @@ export interface ActionResult {
   ok: boolean
   status: VmStatus
   /**
-   * `stop` and `pause` have request semantics: the response reports the status
-   * right after the request was accepted, so the transition may still be in
-   * flight. The UI must not treat `ok` as "converged".
+   * The response reports the owner transition. The UI still settles against
+   * detail counters because a guest may need more time to enter or park.
    */
   async: boolean
 }
@@ -384,7 +383,7 @@ export type FileState = 'uploading' | 'uploaded' | 'placing' | 'placed' | 'faile
 
 /** One element of `GET /api/files`: a transfer and the bytes it has on disk. */
 export interface FileSession {
-  /** Client-chosen id; re-opening it resumes the session it already names. */
+  /** Client-chosen id; it identifies one source file and destination target. */
   id: string
   /** Directory the bytes will land in. `place` names the file inside it. */
   directory: string

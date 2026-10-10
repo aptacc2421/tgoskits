@@ -790,9 +790,9 @@ def check_lifecycle(events):
     if body.get("ok") is not True:
         raise AssertionError("start returned %r" % (body,))
 
-    # A start is accepted before the vCPU runs: the counter is the proof that the
-    # guest actually entered, and the event frame is the proof that the browser
-    # list learns about it without polling.
+    # The completed start response does not by itself prove vCPU progress: the
+    # counter proves that the guest actually entered, while the event frame is
+    # an eager update and the shell's HTTP registry refresh remains authoritative.
     frame = expect_event(
         events, "status", DEFAULT_VM_ID, time.monotonic() + EVENT_TIMEOUT, "start event frame"
     )

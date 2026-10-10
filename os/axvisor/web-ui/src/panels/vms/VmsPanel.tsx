@@ -7,8 +7,8 @@
 //! - the **pool** (`GET /api/vms/pool`) is a directory of configs that become
 //!   VMs on demand, and a pool entry is *not* a VM until it is started,
 //! - the **detail** (`GET /api/vms/{id}`) carries the counters that prove an
-//!   action took effect, so every mutation is followed by a settle poll instead
-//!   of trusting the 200 that only means "request accepted".
+//!   action took effect, so every mutation is followed by a settle poll after the
+//!   HTTP response confirms the owner transition.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Pause, Play, RefreshCw, Square, Trash2 } from 'lucide-react'
@@ -71,7 +71,6 @@ export default function VmsPanel({
   link,
   files = null,
   resources = [],
-  live = false,
   focusVm = null,
   host = null,
 }: PanelProps) {
@@ -103,8 +102,6 @@ export default function VmsPanel({
   const registryRef = useRef(registry)
   registryRef.current = registry
   const registryKey = registry.map((vm) => vm.id).join(',')
-  const hasEvents = link.maybeUrl('events') !== null
-  const useEventFeed = hasEvents && live
   const physCpuCount = host?.phys_cpu_count ?? null
 
   // The id a fresh form should pre-fill: one past every id the registry and the
@@ -148,32 +145,29 @@ export default function VmsPanel({
     }
   }, [api, link])
 
-  // The registry the shell injects comes from the event socket. A build without
-  // that optional operation uses the HTTP list as its fallback source.
+  // The event socket is an eager status update path; preserve the metadata the
+  // HTTP registry supplied until its next refresh fills a newly created row.
   useEffect(() => {
-    setRegistry(resources)
-    if (!useEventFeed && resources.length === 0) void refreshRegistry()
-  }, [resources, refreshRegistry, useEventFeed])
+    setRegistry((previous) => {
+      const known = new Map(previous.map((vm) => [vm.id, vm]))
+      return resources.map((vm) => {
+        const current = known.get(vm.id)
+        return current === undefined
+          ? vm
+          : { ...current, name: vm.name, status: vm.status }
+      })
+    })
+  }, [resources])
 
   useEffect(() => {
     void refreshPool()
     const poolTimer = link.maybeUrl('pool')
       ? window.setInterval(() => void refreshPool(), REGISTRY_REFRESH_MS)
       : undefined
-    if (useEventFeed) {
-      return () => {
-        if (poolTimer !== undefined) window.clearInterval(poolTimer)
-      }
-    }
-    void refreshRegistry()
-    const registryTimer = window.setInterval(() => {
-      void refreshRegistry()
-    }, REGISTRY_REFRESH_MS)
     return () => {
-      window.clearInterval(registryTimer)
       if (poolTimer !== undefined) window.clearInterval(poolTimer)
     }
-  }, [link, refreshRegistry, refreshPool, useEventFeed])
+  }, [link, refreshPool])
 
   useEffect(() => {
     let cancelled = false

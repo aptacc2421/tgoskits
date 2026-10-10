@@ -109,6 +109,17 @@ describe('creationBody', () => {
     }
   })
 
+  it('refuses integers the browser cannot represent exactly', () => {
+    const body = creationBody(SCHEMA, {
+      ...FILLED,
+      id: '9007199254740993',
+    })
+    expect(body).toEqual({
+      ok: false,
+      error: '「id」超出浏览器可精确表示的整数范围',
+    })
+  })
+
   it('accepts an address in either spelling', () => {
     const decimal = creationBody(SCHEMA, { ...FILLED, entry_point: '2149580800' })
     expect(decimal.ok && decimal.fields.entry_point).toBe(0x80200000)

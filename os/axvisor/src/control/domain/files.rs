@@ -46,6 +46,7 @@ use ax_std::StdError;
 use ax_std::fs::OpenOptions;
 use ax_std::io::Error as IoError;
 use ax_std::io::Write;
+use axfs_ng_vfs::{MutationCredentials, RenameOptions, VfsError};
 
 use crate::sync::MutexExt;
 
@@ -201,24 +202,29 @@ pub fn open(id: &str, directory: &str, total: usize) -> Result<SessionView, File
     // join a session that agrees with both: joining one that does not would
     // answer with this folder while every later chunk is written into the one
     // the session first named.
-    let staged_under = {
+    let existing = {
         let sessions = SESSIONS.lock_unpoisoned();
-        sessions.get(id).map(|session| {
-            (
-                session.directory.clone(),
-                session.total,
-                session.state.clone(),
-            )
-        })
+        sessions.get(id).cloned()
     };
-    if let Some((staged_in, declared, state)) = staged_under {
-        if matches!(&state, State::Placed | State::Placing) {
+    if let Some(session) = existing {
+        let staged_in = &session.directory;
+        let declared = session.total;
+        if matches!(&session.state, State::Placed) {
+            if staged_in == &directory && declared == total {
+                return Ok(view(id, &session, declared));
+            }
             return Err(FileError::Conflict {
-                reason: format!("{id} is {}", state.name()),
+                reason: format!("{id} is already placed in `{staged_in}`"),
                 offset: declared,
             });
         }
-        if staged_in != directory {
+        if matches!(&session.state, State::Placing) {
+            return Err(FileError::Conflict {
+                reason: format!("{id} is being placed"),
+                offset: declared,
+            });
+        }
+        if staged_in != &directory {
             return Err(FileError::Conflict {
                 reason: format!("{id} is already staged in `{staged_in}`, not `{directory}`"),
                 offset: disk_len(&staging_path(&staged_in, id)),
@@ -253,6 +259,15 @@ pub fn open(id: &str, directory: &str, total: usize) -> Result<SessionView, File
         path: None,
         state: State::Uploading,
     });
+    if written > session.total {
+        return Err(FileError::Conflict {
+            reason: format!(
+                "{id} has {written} bytes on disk, exceeding the declared {}",
+                session.total
+            ),
+            offset: written,
+        });
+    }
     session.state = if written >= session.total {
         State::Uploaded
     } else {
@@ -463,12 +478,6 @@ pub fn place(id: &str, name: &str) -> Result<SessionView, FileError> {
 
     let from = staging_path(&directory, id);
     let to = format!("{directory}/{name}");
-    if ax_std::fs::metadata(&to).is_ok() {
-        return Err(FileError::Conflict {
-            reason: format!("{to} already exists"),
-            offset: written,
-        });
-    }
 
     {
         let mut sessions = SESSIONS.lock_unpoisoned();
@@ -477,9 +486,25 @@ pub fn place(id: &str, name: &str) -> Result<SessionView, FileError> {
             session.name = Some(name);
         }
     }
-    if let Err(error) = ax_std::fs::rename(&from, &to) {
+    if let Err(error) = ax_fs_ng::current_fs_context().lock().rename_with_options(
+        &from,
+        &to,
+        RenameOptions::NO_REPLACE,
+        &MutationCredentials::root(),
+    ) {
+        if error == VfsError::AlreadyExists {
+            let mut sessions = SESSIONS.lock_unpoisoned();
+            if let Some(session) = sessions.get_mut(id) {
+                session.state = State::Uploaded;
+                session.name = None;
+            }
+            return Err(FileError::Conflict {
+                reason: format!("{to} already exists"),
+                offset: written,
+            });
+        }
         record_failure(id, &error.to_string());
-        return Err(map_std_error(&error));
+        return Err(FileError::Unwritable(error.to_string()));
     }
 
     let mut sessions = SESSIONS.lock_unpoisoned();
@@ -624,7 +649,9 @@ fn checked_directory(directory: &str) -> Result<String, FileError> {
     let acceptable = normalized.starts_with('/')
         && !normalized.contains("..")
         && !normalized.contains("//")
-        && !normalized.ends_with(STAGING_DIR);
+        && !normalized
+            .split('/')
+            .any(|component| component == STAGING_DIR);
     if acceptable {
         Ok(normalized)
     } else {

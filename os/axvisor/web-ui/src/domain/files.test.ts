@@ -193,6 +193,13 @@ describe('sessionId', () => {
     expect(sessionId(file('linux-qemu', 3, 1000))).not.toBe(sessionId(file('linux-qemu', 4, 1000)))
   })
 
+  it('differs for one file sent to different destinations', () => {
+    const kernel = file('linux-qemu', 3, 1000)
+    expect(sessionId(kernel, '/guest/a', 'kernel')).not.toBe(
+      sessionId(kernel, '/guest/b', 'kernel'),
+    )
+  })
+
   it('is one acceptable path component', () => {
     // The control plane turns the id into a file name: ascii alphanumerics plus
     // `-_.+`, no leading dot, at most 64 characters.
@@ -257,7 +264,7 @@ describe('FilesService', () => {
     fake.calls.length = 0
     fake.placeError = null
 
-    await transfers.resume(sessionId(kernel))
+    await transfers.resume(sessionId(kernel, '/guest/linux', 'linux-qemu'))
 
     expect(fake.calls[0]).toMatchObject({ method: 'HEAD' })
     const sent = fake.calls.filter((call) => call.method === 'PATCH')
@@ -279,7 +286,10 @@ describe('FilesService', () => {
     expect(transfers.getSnapshot().transfers[0].file).not.toBeNull()
 
     fake.placeError = null
-    const ok = await transfers.place(sessionId(file('kernel.bin', 4)), 'other-name')
+    const ok = await transfers.place(
+      sessionId(file('kernel.bin', 4), '/guest/linux', 'linux-qemu'),
+      'other-name',
+    )
     expect(ok).toBe(true)
     expect(transfers.getSnapshot().transfers[0]).toMatchObject({ phase: 'placed' })
   })
@@ -304,15 +314,15 @@ describe('FilesService', () => {
 
   it('re-pointing a staged file drops the orphaned staging and opens fresh', async () => {
     const fake = new FakeApi()
-    // The id was already staged in another directory, so the first open hits
-    // the plane's re-open guard; the retry after the drop lands.
+    // A conflicting session is left in place: the service must not drop bytes
+    // another consumer may still be uploading.
     fake.openError = new ApiError(409, 'staged in /guest/other')
     const transfers = service(fake)
     await transfers.upload(file('kernel.bin', 4), '/guest/linux', 'linux-qemu')
 
     const methods = fake.calls.map((call) => call.method)
-    expect(methods).toEqual(['POST', 'DELETE', 'POST', 'PATCH', 'POST', 'GET'])
-    expect(transfers.getSnapshot().transfers[0]).toMatchObject({ phase: 'placed' })
+    expect(methods).toEqual(['POST'])
+    expect(transfers.getSnapshot().transfers[0]).toMatchObject({ phase: 'failed' })
   })
 
   it('answers an already-placed session without resending or re-placing', async () => {
@@ -330,7 +340,7 @@ describe('FilesService', () => {
     const fake = new FakeApi()
     fake.offset = 0
     const transfers = service(fake)
-    const id = sessionId(file('kernel.bin', 0))
+    const id = sessionId(file('kernel.bin', 0), '/guest/linux', 'linux-qemu')
     fake.placeError = new ApiError(409, '目标已存在')
     await transfers.upload(file('kernel.bin', 0), '/guest/linux', 'linux-qemu')
 

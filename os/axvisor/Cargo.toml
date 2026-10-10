@@ -22,12 +22,10 @@ include = [
     "README.md",
     "LICENSE*",
     # The `web-ui` feature embeds `web-ui/dist`, which is produced with the
-    # frontend toolchain.  Keep the source and lockfile for reproducible local
-    # builds, while generated output, dependencies, and design snapshots stay
-    # outside the crate package.
+    # frontend toolchain. Keep the generated bundle in the crate package so a
+    # registry consumer can enable the feature without rebuilding the workspace.
     "web-ui/**",
     "!web-ui/node_modules/**",
-    "!web-ui/dist/**",
     "!web-ui/design/**",
 ]
 

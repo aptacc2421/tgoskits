@@ -148,7 +148,7 @@ cargo xtask axvisor test qemu --arch aarch64 --test-case qemu-vm-pool-http
 
 CI 采用的用例集合登记在 `.github/ci/checks/axvisor.toml`：aarch64 控制面检查运行 `http-control-plane`、`browser-console` 和 `qemu-ivc-arceos`，并在同一检查中执行 web UI 的 `npm test` 与 `npm run build`；`web-ui`、`qemu-vm-pool`、`qemu-vm-pool-http` 以及三客户机终端用例仍是手工诊断入口，未计入 CI 绿灯。
 
-覆盖的缺口需要如实记录：文件传输定义的两类错误（分片超限与存储不足）在仓库的用例资产中没有断言，当前只覆盖了 400、404、409、200 与 204 这些路径。另外，`axvmconfig` 新增的必填参数改变了命令行行为，未在本文档的验证范围内提供独立用例。
+覆盖的缺口需要如实记录：文件传输的存储不足与完整分片上限仍没有在仓库用例资产中断言；当前已覆盖范围不可表示和声明总长超限，以及 400、404、409、200 与 204 这些路径。另外，`axvmconfig` 新增的必填参数改变了命令行行为，未在本文档的验证范围内提供独立用例。
 
 ## 回滚与剩余风险
 
