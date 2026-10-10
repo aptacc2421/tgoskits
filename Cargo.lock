@@ -485,6 +485,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arceos-test-intel-hda"
+version = "0.1.0"
+dependencies = [
+ "ax-alloc",
+ "ax-driver",
+ "ax-hal",
+ "ax-std",
+]
+
+[[package]]
 name = "arceos-test-suit"
 version = "0.3.1"
 dependencies = [
@@ -939,6 +949,7 @@ dependencies = [
  "fdt-edit",
  "fxmac_rs",
  "heapless",
+ "intel-hda",
  "irq-framework",
  "log",
  "mmio-api",
@@ -947,6 +958,7 @@ dependencies = [
  "pcie",
  "phytium-mci-host",
  "rd-net",
+ "rdif-audio",
  "rdif-block",
  "rdif-clk",
  "rdif-cpufreq",
@@ -4505,6 +4517,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "intel-hda"
+version = "0.1.0"
+dependencies = [
+ "dma-api",
+ "mmio-api",
+ "rdif-audio",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "intrusive-collections"
 version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6587,6 +6609,14 @@ dependencies = [
  "dma-api",
  "futures",
  "rdif-eth",
+]
+
+[[package]]
+name = "rdif-audio"
+version = "0.1.0"
+dependencies = [
+ "rdif-base",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

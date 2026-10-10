@@ -10,6 +10,7 @@ use ax_sync::{RawSpinLock, RawSpinLockUnpinnedGuard};
     feature = "ahci",
     feature = "intel-net",
     feature = "nvme",
+    feature = "intel-hda",
     feature = "realtek-rtl8125",
     feature = "xhci-pci",
     all(feature = "net", feature = "pci")
@@ -20,6 +21,7 @@ use dma_api::DeviceDma;
     feature = "ahci",
     feature = "intel-net",
     feature = "nvme",
+    feature = "intel-hda",
     feature = "realtek-rtl8125",
     feature = "xhci-pci",
     all(feature = "net", feature = "pci")
@@ -84,6 +86,7 @@ const PCI_INTX_LINES: usize = 4;
     feature = "ahci",
     feature = "intel-net",
     feature = "nvme",
+    feature = "intel-hda",
     feature = "realtek-rtl8125",
     feature = "xhci-pci",
     all(feature = "net", feature = "pci")
@@ -214,6 +217,7 @@ pub use testdev::iommu_testdev_endpoint;
     feature = "ahci",
     feature = "intel-net",
     feature = "nvme",
+    feature = "intel-hda",
     feature = "realtek-rtl8125",
     feature = "xhci-pci",
     all(feature = "net", feature = "pci")
@@ -368,6 +372,7 @@ pub const fn has_pci_endpoint_drivers() -> bool {
         feature = "intel-net",
         feature = "realtek-rtl8125",
         feature = "nvme",
+        feature = "intel-hda",
         feature = "xhci-pci",
         feature = "virtio-net",
         feature = "virtio-gpu",

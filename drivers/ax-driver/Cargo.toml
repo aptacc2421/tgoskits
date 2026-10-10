@@ -20,6 +20,8 @@ iommu-dma-test = ["arm-smmu-v3"]
 
 block = ["dep:ax-sync", "dep:rdif-block"]
 net = ["dep:ax-sync", "dep:rd-net"]
+audio-playback = ["dep:rdif-audio"]
+intel-hda = ["audio-playback", "pci", "dep:intel-hda", "intel-hda/rdif"]
 display = ["dep:rdif-display", "dep:rdif-gpu"]
 gpu = ["display"]
 input = ["dep:rdif-input"]
@@ -155,6 +157,8 @@ list-pci-devices = ["pci"]
 pci-list-devices = ["list-pci-devices"]
 
 [dependencies]
+rdif-audio = { workspace = true, optional = true }
+intel-hda = { workspace = true, optional = true }
 sg200x-pwm = { workspace = true, optional = true }
 cv181x-clock = { workspace = true, optional = true }
 aic8800 = { workspace = true, optional = true }

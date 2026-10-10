@@ -79,6 +79,7 @@ members = [
     "drivers/serial/*",
     "drivers/soc/rockchip/*",
     "drivers/soc/cv181x-clock",
+    "drivers/audio/intel-hda",
     "drivers/test_crates/*",
     "drivers/tpu/*",
     "drivers/vpu/*",
@@ -124,6 +125,7 @@ members = [
     "test-suit/arceos/cpu/trap-entry",
     "test-suit/arceos/axtest/sg2002-usb-msc",
     "test-suit/arceos/rust",
+    "test-suit/arceos/drivers/intel-hda",
     "test-suit/arceos/drivers/acpica-interpreter",
     "apps/arceos/*",
     "benchmarks/axvisor/board-orangepi-5-plus/vcpu-perf/guest",
@@ -222,9 +224,11 @@ x86-apic-driver = { version = "0.2", path = "drivers/intc/x86-apic-driver" }
 eth-intel = { version = "0.2", path = "drivers/net/eth-intel" }
 riscv_vplic = { version = "0.5", path = "virtualization/riscv_vplic" }
 nvme-driver = { version = "0.8", path = "drivers/blk/nvme-driver" }
+intel-hda = { version = "0.1", path = "drivers/audio/intel-hda" }
 acpica-interpreter = { version = "0.1", path = "drivers/firmware/acpica-interpreter" }
 pcie = { version = "0.7", path = "drivers/pci/pcie" }
 rd-net = { version = "0.3", path = "drivers/net/rd-net" }
+rdif-audio = { version = "0.1", path = "drivers/interface/rdif-audio" }
 rdif-base = { version = "0.9", path = "drivers/interface/rdif-base" }
 rdif-block = { version = "0.13", path = "drivers/interface/rdif-block" }
 rdif-clk = { version = "0.5", path = "drivers/interface/rdif-clk" }

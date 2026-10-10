@@ -53,6 +53,7 @@ pub mod mmio;
 #[cfg(any(
     feature = "block",
     feature = "display",
+    feature = "audio-playback",
     feature = "input",
     feature = "net",
     feature = "usb",
@@ -75,6 +76,8 @@ pub mod display;
 pub mod input;
 #[cfg(feature = "net")]
 pub mod net;
+#[cfg(feature = "audio-playback")]
+pub mod playback;
 #[cfg(feature = "vsock")]
 pub mod vsock;
 
