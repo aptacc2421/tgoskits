@@ -68,7 +68,8 @@ echo "==> axvisor web UI typecheck, unit tests, and bundle"
   npm test
   npm run build
 )
-git diff --exit-code -- os/axvisor/web-ui/dist
+repo_root="$(pwd)"
+git --git-dir="${repo_root}/.git" --work-tree="${repo_root}" diff --exit-code -- os/axvisor/web-ui/dist
 echo "==> axvisor aarch64 HTTP control-plane (incl. pause/resume)"
 cargo xtask axvisor test qemu --arch aarch64 --test-case http-control-plane
 echo "==> axvisor aarch64 browser console"
