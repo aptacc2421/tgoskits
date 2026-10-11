@@ -164,11 +164,12 @@ fn management_endpoint() -> Endpoint {
     }
 }
 
-#[cfg(all(test, not(axtest)))]
+#[cfg(any(test, axtest))]
 mod tests {
     use super::{ConsoleLane, LaneAllocation, Layout, LayoutFull, MAX_GUEST_CONSOLES};
 
-    #[test]
+    #[cfg_attr(axtest, axtest::axtest)]
+    #[cfg_attr(not(axtest), test)]
     fn allocation_is_idempotent_and_reuses_a_released_lane() {
         let mut layout = Layout::new();
         assert_eq!(layout.allocate(7, "guest"), Ok(LaneAllocation::Allocated));
@@ -188,7 +189,8 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg_attr(axtest, axtest::axtest)]
+    #[cfg_attr(not(axtest), test)]
     fn allocation_uses_the_smallest_free_lane() {
         let mut layout = Layout::new();
         for vm_id in 1..=3 {
@@ -205,7 +207,8 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg_attr(axtest, axtest::axtest)]
+    #[cfg_attr(not(axtest), test)]
     fn allocation_reports_a_full_layout() {
         let mut layout = Layout::new();
         for vm_id in 0..MAX_GUEST_CONSOLES {
