@@ -402,7 +402,7 @@ def check_file_transfer():
     # opened, and the inclusive range arithmetic is checked before the body is
     # read. Both hostile values must be rejected without changing the session.
     huge_total = 1 << 63
-    status, _, _ = request_raw(
+    status, _, body = request_raw(
         "POST",
         "/api/files",
         headers={"Content-Type": "application/json"},
@@ -411,16 +411,21 @@ def check_file_transfer():
         ).encode("utf-8"),
     )
     check("POST /api/files (unrepresentable length)", status, 413)
-    status, _, _ = request_raw(
+    file_limit = 4 * 1024 * 1024 * 1024
+    if "%d byte limit" % file_limit not in body.decode("utf-8", "replace"):
+        raise AssertionError("the file-size refusal does not name the file limit")
+    status, _, body = request_raw(
         "PATCH",
         "/api/files/%s" % session,
         headers={
             "Content-Type": "application/octet-stream",
-            "Content-Range": "bytes 0-%d/*" % sys.maxsize,
+            "Content-Range": "bytes 0-%d/*" % ((1 << 64) - 1),
         },
         body=b"x",
     )
     check("PATCH /api/files (overflowing range)", status, 413)
+    if "range length exceeds host address space" not in body.decode("utf-8", "replace"):
+        raise AssertionError("the overflowing range refusal does not name its cause")
 
     # A chunk that starts where the disk is not: the offset in the answer is the
     # one the client continues from, which is why the offset is read from the

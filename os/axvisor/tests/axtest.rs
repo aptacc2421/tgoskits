@@ -28,6 +28,9 @@ use axvm as _;
 #[path = "../src/control/network_console/delivery.rs"]
 mod browser_console_delivery;
 #[allow(dead_code)]
+#[path = "../src/control/network_console/lane.rs"]
+mod browser_console_lane;
+#[allow(dead_code)]
 #[path = "../src/control/network_console/layout.rs"]
 mod browser_console_layout;
 #[allow(dead_code)]

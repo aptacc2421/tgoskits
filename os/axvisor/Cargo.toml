@@ -23,7 +23,8 @@ include = [
     "LICENSE*",
     # The `web-ui` feature embeds `web-ui/dist`, which is produced with the
     # frontend toolchain. Keep the generated bundle in the crate package so a
-    # registry consumer can enable the feature without rebuilding the workspace.
+    # registry consumer can enable the feature without rebuilding the workspace;
+    # the AxVisor CI check rebuilds it and rejects a stale checked-in bundle.
     "web-ui/**",
     "!web-ui/node_modules/**",
     "!web-ui/design/**",

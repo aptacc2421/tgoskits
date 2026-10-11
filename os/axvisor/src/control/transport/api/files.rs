@@ -105,7 +105,7 @@ pub async fn open_file(Json(payload): Json<Value>) -> Response {
 
     let total = match usize::try_from(total) {
         Ok(total) => total,
-        Err(_) => return too_large(total),
+        Err(_) => return too_large(total, files::FILE_LIMIT),
     };
     match files::open(id, directory, total) {
         Ok(session) => with_offset(StatusCode::OK, &session),
@@ -157,17 +157,17 @@ pub async fn send_chunk(Path(id): Path<String>, request: Request) -> Response {
     };
     if let Some(total) = total {
         if total > files::FILE_LIMIT {
-            return too_large(total);
+            return too_large(total, files::FILE_LIMIT);
         }
     }
     let Some(expected) = end
         .checked_sub(start)
         .and_then(|length| length.checked_add(1))
     else {
-        return too_large("range length exceeds host address space");
+        return payload_too_large("range length exceeds host address space".into());
     };
     if expected > CHUNK_LIMIT {
-        return too_large(expected);
+        return too_large(expected, CHUNK_LIMIT);
     }
 
     // Only now is the body read, and with the chunk limit as its bound.
@@ -341,14 +341,16 @@ fn bad_request(reason: String) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": reason }))).into_response()
 }
 
-fn too_large(total: impl Display) -> Response {
+fn payload_too_large(reason: String) -> Response {
     (
         StatusCode::PAYLOAD_TOO_LARGE,
-        Json(json!({
-            "error": format!("{total} bytes exceeds the {} byte limit", files::FILE_LIMIT),
-        })),
+        Json(json!({ "error": reason })),
     )
         .into_response()
+}
+
+fn too_large(total: impl Display, limit: usize) -> Response {
+    payload_too_large(format!("{total} bytes exceeds the {limit} byte limit"))
 }
 
 /// Parses `bytes <start>-<end>/<total>`, the one chunk frame this plane accepts.
