@@ -219,4 +219,4 @@ cargo xtask axvisor test qemu --arch aarch64 --test-case web-ui
 
 ### 5.2 持续集成
 
-持续集成在构建该用例之前准备 Node 环境并生成产物：若运行器上不存在 Node 24 和 npm，就下载并校验固定版本 Node `v24.11.1` 到临时目录并加入 `PATH`，随后执行 `npm ci` 与 `npm run build`。这样做的原因是自托管运行器不保证预装 npm，而把产物入库会让仓库里同时存在源码与可变产物两份事实来源。
+持续集成通过独立的 Web UI 检查准备 Node 环境并生成产物：若运行器上不存在 Node 24 和 npm，就下载并校验固定版本 Node `v24.11.1` 到临时目录并加入 `PATH`，随后执行 `npm ci`、`npm test` 与 `npm run build`，再检查入库产物没有变化。这样做的原因是自托管运行器不保证预装 npm，而把产物入库会让仓库里同时存在源码与可变产物两份事实来源；前端检查与 QEMU 控制面检查分开，失败时可以直接区分资源校验和运行时行为。
